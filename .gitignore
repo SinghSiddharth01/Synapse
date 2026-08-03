@@ -1,0 +1,8 @@
+# Internal hackathon materials — contain credentials, do not publish
+docs/misc/
+
+# API credentials
+api-1.json
+.env
+
+.DS_Store

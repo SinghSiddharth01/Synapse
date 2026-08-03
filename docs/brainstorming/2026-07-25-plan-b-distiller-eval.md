@@ -731,6 +731,8 @@ EOF
 
 ### Task 4: NPU spike — SLM on Hexagon (X Elite laptop, on-target)
 
+> **⟨AMENDED 2026-08-03⟩** — see `2026-08-03-aic100-cirrascale-amendment.md` Parts 2–3. The runtime is now **GenieX**, not ONNX Runtime GenAI + QNN EP: `geniex serve` exposes an OpenAI-compatible API at `localhost:18181/v1` with `qairt` (NPU-exclusive, pre-compiled AI Hub bundles) and `llama_cpp` (GGUF) backends. New spike order: (1) `/quad-detect` + `/quad-doctor` environment sanity → (2) `geniex serve` with a `qairt` bundle → run the fixture corpus through **Qwen3-4B-Instruct-2507** (primary), **Gemma-4-E4B-it** (GenieX's documented example), **Qwen3-1.7B** (power/speed floor) → (3) fallback GenieX `llama_cpp` → (4) final fallback Ollama, unchanged. Go/no-go axes unchanged (NPU residency, prefill/generate tok/s, power, schema-valid JSON rate); add a 10-minute probe for llama.cpp-style grammar/GBNF support before assuming `native_structured_output=False`. The Phi-3.5-mini / Llama-3.2-3B model choices below are stale — neither is in the GenieX catalog. Steps 1–2's `onnxruntime-genai` setup and `spike_npu.py`'s manual generation loop are superseded: the smoke test becomes "run the fixture corpus through `NPUProvider` pointed at `localhost:18181/v1`". Runbook template and go/no-go checklist remain valid with the model/runtime names swapped. QUAD `profile-device` numbers (latency/power/HTP utilization), where obtainable, feed the Task 6 benchmark table.
+
 **This task is a spike, not a component build.** Output is a runbook + a go/no-go verdict. No new imports into `synapse_worker` until it lands green.
 
 **Kill time:** end of Day 2 of the prep week. If red, the fallback is `OllamaProvider` on the Mac (delivered in Plan C) for the demo, with the NPU number reported separately from a partial benchmark run.
@@ -930,6 +932,8 @@ EOF
 ---
 
 ### Task 5: `NPUProvider` — wrap the ONNX Runtime GenAI + QNN EP client
+
+> **⟨AMENDED 2026-08-03⟩** — the custom `onnxruntime-genai` wrapper below is **retired**. `NPUProvider` is now a thin subclass of Plan C's `OpenAICompatibleProvider` pointed at GenieX's server (`base_url="http://localhost:18181/v1"`, `provider_id="npu"`, model = spike winner). No optional dep, no chat-template rendering, no token loop — the implementation mirrors `OllamaProvider` (~10 lines). Tests mirror `test_openai_compat.py` against `pytest-httpserver`. Set `native_structured_output` from the Task 4 grammar probe (default False → distiller's tolerant parse).
 
 **This task depends on Task 4 landing green (or amber-with-schema-valid).** If Task 4 is red at the kill time, skip this task; the demo runs with `OllamaProvider` and the on-target story is a Plan-C AI-100 story only.
 
@@ -1271,7 +1275,7 @@ from __future__ import annotations
 
 _PRICING_PER_MILLION: dict[str, tuple[float, float]] = {
     "claude": (5.00, 25.00),
-    "aic100": (0.0, 0.0),  # self-hosted; the real cost story is $/hour of the box
+    "aic100": (0.0, 0.0),  # ⟨A 2026-08-03⟩ hosted Cirrascale, shared hackathon credit pool — report credits/token usage from ModelResult.usage, not $/hour
     "npu": (0.0, 0.0),
     "ollama": (0.0, 0.0),
     "fake": (0.0, 0.0),
@@ -1621,7 +1625,7 @@ Fill in `docs/spikes/2026-07-26-npu-spike.md` § Go / No-go verdict with actual 
 **Out (stretch):**
 - Distiller output caching (identical Segment → cached Finding[]) — nice for eval reruns, not necessary.
 - Streaming distillation — not on the demo path.
-- Fine-tuned SLM specifically for this schema — out of scope for the hackathon; the pre-quantized Llama-3.2-3B is the target.
+- Fine-tuned SLM specifically for this schema — out of scope for the hackathon; the target is a pre-optimized GenieX bundle (Qwen3-4B-Instruct-2507 primary; see 2026-08-03 amendment ⟨A⟩).
 - Cost model for AI-100 (per-hour vs per-token) — Plan C's synthesis is where AI-100 costs matter; the pricing table can be extended when the number is known.
 
 ## Known Risks

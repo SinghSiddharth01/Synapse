@@ -2,6 +2,7 @@
 
 **Status:** Approved design, pre-implementation
 **Date:** 2026-07-25
+**Amended:** 2026-08-03 — provider layer (hosted Cirrascale AI-100, GenieX NPU runtime, model selection); see `2026-08-03-aic100-cirrascale-amendment.md`. Amended sections marked ⟨A⟩.
 **Event:** Snapdragon Multiverse internal hackathon (build week Aug 3–7 2026; prep week ~Jul 27–31)
 **Team:** Siddsing (architect/integration), Akhil (edge worker / low-level), Aditya (ML/distillation, owns NPU laptop)
 
@@ -24,8 +25,8 @@ A teammate creates an opt-in shared session from their Copilot+ PC, declaring it
 ## 3. Verified assumptions (as of 2026-07-25)
 
 - **Passive capture is real.** Claude Code writes `~/.claude/projects/<slug>/<uuid>.jsonl`, one JSON event per line. A real 5,579-line session confirmed: events carry `type` (user/assistant/system), `timestamp`, `cwd`, `gitBranch`, `sessionId`, `uuid`/`parentUuid`; `message.content` is a list of typed parts (`thinking` / `text` / `tool_use` / `tool_result`); 1,212 tool calls in that session. The "what the agent learned / tried / hit a wall on" signal is directly present. Capture = tailing these files, zero agent modification. This corpus is also the eval fixture + TDD corpus.
-- **On-device LLM on X Elite NPU is turnkey:** ONNX Runtime GenAI + QNN EP officially supports Phi-3.5-mini and Llama-3.2-3B; llama.cpp QNN-HTP backend is an alternative. (Prefill ~1180 tok/s on Llama-3.2-3B per public benchmarks — favorable for ingest-heavy distillation.)
-- **AI-100 serves LLMs via an OpenAI-compatible API** (Qualcomm Efficient-Transformers / vLLM `qaic` backend). This lets AI-100, Ollama, and llama.cpp all sit behind one HTTP adapter.
+- **On-device LLM on X Elite NPU is turnkey — via GenieX ⟨A⟩:** `geniex serve` exposes an OpenAI-compatible API at `localhost:18181/v1` with `qairt` (NPU-exclusive, pre-compiled AI Hub bundles) and `llama_cpp` backends. Distiller candidates from the GenieX-optimized catalog: Qwen3-4B-Instruct-2507 (primary), Gemma-4-E4B-it, Qwen3-1.7B. (Original ONNX-QNN/Phi-3.5/Llama-3.2-3B path is stale — those models aren't in the GenieX catalog.)
+- **AI-100 serves LLMs via an OpenAI-compatible-shaped API — hosted ⟨A⟩:** Cirrascale Inference Cloud (`https://aisuite.cirrascale.com/apis/v2`, bearer key, `Llama-3.1-8B` only), verified live 2026-08-03. No self-hosting. Caveats: `response_format` ignored; JSON output must route via `/completions` (chat endpoint misparses it into empty tool calls). AI-100, Ollama, and GenieX all sit behind one HTTP adapter.
 
 ## 4. Architecture
 
@@ -42,14 +43,15 @@ A teammate creates an opt-in shared session from their Copilot+ PC, declaring it
      Sync client ── POST findings + session join over HTTP
    ─ ─ ─ ─ ─ ─│─ ─ device boundary: only Findings cross ─ ─ ─ ─ ─ ─ ─
               ▼
-   SYNAPSE SERVICE (on AI-100 box, Siddsing) ────────────────────────
+   SYNAPSE SERVICE (any laptop, Siddsing) ⟨A⟩ ──────────────────────
      Ingest API (findings in)
      Synthesis (ModelProvider(large) → incremental merge → SessionContext + Conflict[])
+       └─ calls hosted Cloud AI 100 (Cirrascale, Llama-3.1-8B) over HTTPS ⟨A⟩
      MCP server (HTTP/SSE): create_session / join_session / query(nl) → ranked Finding[]
        Retrieval = LLM-as-retriever (query + shared-memory doc → ranked findings)
 ```
 
-Two planes: **data plane** (workers → ingest API) and **retrieval/control plane** (agents → MCP). One service hosts both; MCP transport is **remote HTTP/SSE** — agents point at `http://ai100-box:PORT`.
+Two planes: **data plane** (workers → ingest API) and **retrieval/control plane** (agents → MCP). One service hosts both; MCP transport is **remote HTTP/SSE** — agents point at the service host. ⟨A⟩ The service is decoupled from the accelerator: it runs on any machine and reaches Cloud AI 100 through the hosted Cirrascale API, so only distilled Findings ever cross either boundary (device → service, service → cloud).
 
 ## 5. Contracts (frozen Day 0, in `synapse/contracts`)
 
@@ -74,11 +76,11 @@ Every model-using component depends only on `ModelProvider`. A **mode is a pair*
 |---|---|---|
 | `FakeProvider` | scripted deterministic outputs | **all unit/contract tests** (offline, instant, CI) |
 | `ClaudeProvider` | Anthropic SDK | off-target + **quality/cost baseline** |
-| `OllamaProvider` | local Ollama (Llama-3.2-3B) | off-target dev on Mac |
-| `AIC100Provider` | vLLM `qaic` OpenAI endpoint | on-target synthesis |
-| `NPUProvider` | ONNX-QNN / llama.cpp-QNN (Hexagon) | on-target distillation |
+| `OllamaProvider` | local Ollama (Llama-3.2-3B) | off-target dev on Mac + offline demo fallback |
+| `AIC100Provider` ⟨A⟩ | Cirrascale hosted Cloud AI 100 (`Llama-3.1-8B`) | synthesis — reachable from Day 1, dev included |
+| `NPUProvider` ⟨A⟩ | GenieX `serve` @ `localhost:18181/v1` (`qairt`/`llama_cpp` on Hexagon) | on-target distillation |
 
-Ollama / AI-100 / llama.cpp share one OpenAI-compatible HTTP adapter (differ by base URL); only Claude needs a distinct adapter. **Structured output is capability-flagged**: providers without native constrained decoding (likely NPU) use prompt-instructed JSON + tolerant parse + one retry; the conformance test *measures* schema-valid rate per provider rather than assuming it.
+Ollama / AI-100 / GenieX share one OpenAI-compatible HTTP adapter (differ by base URL); only Claude needs a distinct adapter. **Structured output is capability-flagged**: providers without native constrained decoding (NPU **and** aic100 ⟨A⟩ — Cirrascale ignores `response_format` and schema calls route via `/completions`) use prompt-instructed JSON + tolerant parse + one retry; the conformance test *measures* schema-valid rate per provider rather than assuming it.
 
 Config example:
 ```
@@ -109,8 +111,8 @@ synthesizer: claude                   synthesizer: aic100
 
 **Then three parallel tracks:**
 
-- **Siddsing:** `ModelProvider`+`FakeProvider` first (unblocks teammates — top Day-0 priority). AI-100 spike Day 1–2 (stand up model on vLLM `qaic`, curl the endpoint; go/no-go: serves? tok/s? model size? — fallback AWS DL2q). Then Synthesis (incremental merge) + MCP (LLM-as-retriever).
-- **Aditya:** NPU spike Day 1–2 (SLM resident on Hexagon; go/no-go: NPU residency, prefill/generate tok/s, power, **can it emit schema-valid JSON?** — fallback Mac/CPU Ollama). Then Distiller (TDD vs `FakeProvider`) + eval harness (corpus × provider → quality/cost/latency table).
+- **Siddsing:** `ModelProvider`+`FakeProvider` first (unblocks teammates — top Day-0 priority). ~~AI-100 spike Day 1–2~~ ⟨A⟩ **spike retired — GO 2026-08-03**: hosted Cirrascale endpoint verified end-to-end (ping/chat/embeddings); residual work is the `/completions` schema path in `AIC100Provider`. Freed time → Synthesis (incremental merge) + MCP (LLM-as-retriever).
+- **Aditya:** NPU spike Day 1–2 ⟨A⟩ **via GenieX**: `/quad-detect` sanity → `geniex serve` with `qairt` AI Hub bundle → run fixture corpus through Qwen3-4B-Instruct-2507 / Gemma-4-E4B-it / Qwen3-1.7B (go/no-go: NPU residency, prefill/generate tok/s, power, **schema-valid JSON rate**; grammar-support probe worth 10 min — fallback GenieX `llama_cpp`, then Mac/CPU Ollama). Then Distiller (TDD vs `FakeProvider`) + eval harness (corpus × provider → quality/cost/latency table).
 - **Akhil:** No hardware spike. `ClaudeCodeSource` (JSONL→`AgentEvent`) · follower (tail/rotation/partial/malformed) · segmenter (turn-boundary→`Segment`, must reproduce fixtures) · Sync client (findings push + join, tested vs mock HTTP server).
 
 **Spike discipline:** each risky spike has a one-line success assertion, a drop-dead time, and a fallback. Off-target mode *is* the fallback (e.g. AI-100 red by end of Day 2 → demo synthesis on Claude, present AI-100 as validated separately).
@@ -139,8 +141,12 @@ synthesizer: claude                   synthesizer: aic100
 
 | Risk | Mitigation |
 |---|---|
-| AI-100 provisioning/serving | Day-1 spike + kill-time; off-target Claude synthesis is the fallback |
-| NPU can't emit structured JSON | capability flag + prompt-instructed JSON + tolerant parse; measured, not assumed |
+| ~~AI-100 provisioning/serving~~ ⟨A⟩ retired — hosted endpoint verified GO | — |
+| Shared Cirrascale credit pool / unknown rate limits ⟨A⟩ | bound `max_tokens` on every call; dev loops on Ollama; usage tracked via `ModelResult.usage` |
+| Synthesis quality on single 8B model (no 70B on our key) ⟨A⟩ | tight working-memory bound + simple prompts; benchmark table Claude-vs-aic100 *is* the demo narrative; ask office hours re 70B |
+| Cirrascale chat endpoint misparses JSON output into empty tool calls ⟨A⟩ | schema calls route via `/completions` + tolerant extraction (probed + verified) |
+| Venue WiFi down ⟨A⟩ | synthesis falls back to `synthesizer: ollama` (one env var); edge path (GenieX) is fully local |
+| NPU/aic100 can't emit structured JSON | capability flag + prompt-instructed JSON + tolerant parse; measured, not assumed |
 | Provider parity (3B mangles schema Claude honors) | shared conformance test; this *is* the quality signal to measure |
 | Segment/distiller drift between Akhil & Aditya | frozen hand-authored fixture Segments are the shared ground truth |
 | "Isn't this Notion + RAG?" | no human writes notes — agents' own work becomes shared memory, in-loop, in minutes |

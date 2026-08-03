@@ -297,7 +297,9 @@ EOF
 
 ### Task 2: OpenAI-compatible HTTP adapter — one class, three providers
 
-`AIC100Provider`, `OllamaProvider`, and llama.cpp all speak OpenAI-compatible chat completions. That's ~90% shared code — one base class, three thin subclasses differing only by `base_url` and provider-id.
+> **⟨AMENDED 2026-08-03⟩** — see `2026-08-03-aic100-cirrascale-amendment.md` Part 1. AI-100 is the **hosted Cirrascale API** (`https://aisuite.cirrascale.com/apis/v2`, bearer `INFERENCE_CLOUD_API_KEY`, model `Llama-3.1-8B`). `AIC100Provider` overrides more than `base_url`: `native_structured_output=False` (Cirrascale silently ignores `response_format`), and schema-requested calls must route to `POST /completions` with a flattened prompt + tolerant JSON extraction, because the **chat endpoint misparses JSON output into empty tool calls** (probed live). The test `test_aic100_provider_uses_json_schema_response_format` below is obsolete as written — replace with completions-path tests. GenieX (`localhost:18181/v1`) becomes the third subclass alongside Ollama; the base-class code below is otherwise unchanged.
+
+`AIC100Provider`, `OllamaProvider`, and GenieX all speak OpenAI-compatible chat completions. That's ~90% shared code — one base class, three thin subclasses differing only by `base_url` and provider-id.
 
 **Files:**
 - Create: `packages/providers/src/synapse_providers/openai_compat.py`
@@ -574,7 +576,7 @@ EOF
 
 ### Task 3: AI-100 hardware spike — stand up a model on the internal server
 
-**This task is a spike, not a component build.** Output is a runbook + a go/no-go verdict.
+> **⟨RETIRED 2026-08-03 — verdict GO⟩** Cloud AI 100 is provided as the hosted Cirrascale service; there is no box to provision. Endpoint verified end-to-end on Day 1 (ping → models → chat completion ~0.7 s → embeddings). **No QEfficient, no vLLM `qaic`, no AWS DL2q fallback.** Residual work moved into Task 2 (completions-path schema tests). The steps below are kept for historical reference only — do not execute them. Freed time goes to Tasks 4–7.
 
 **Kill time:** end of Day 2 of prep week. If red at kill time, the fallback for the demo is `synthesizer: claude` — the architecture handles it (Plan 0's `ModelProvider` abstraction is exactly what makes this fallback zero-code).
 
