@@ -1,7 +1,9 @@
 # Internal hackathon materials — contain credentials, do not publish
 docs/misc/
 
-# API credentials
+# API credentials — secrets.jsonc is the canonical team credentials file,
+# distributed offline only. secrets.example.jsonc (committed) is the template.
+secrets.jsonc
 api-1.json
 .env
 
