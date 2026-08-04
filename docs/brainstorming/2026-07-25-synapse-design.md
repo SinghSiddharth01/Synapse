@@ -3,6 +3,7 @@
 **Status:** Approved design, pre-implementation
 **Date:** 2026-07-25
 **Amended:** 2026-08-03 — provider layer (hosted Cirrascale AI-100, GenieX NPU runtime, model selection); see `2026-08-03-aic100-cirrascale-amendment.md`. Amended sections marked ⟨A⟩.
+**Amended:** 2026-08-03 — hybrid frontier/local strategy (Part 1: design-time frontier leverage, local-only runtime; Part 2: contribute module, deferred); see `2026-08-03-hybrid-frontier-local-amendment.md`. Amended sections marked ⟨B⟩.
 **Event:** Snapdragon Multiverse internal hackathon (build week Aug 3–7 2026; prep week ~Jul 27–31)
 **Team:** Siddsing (architect/integration), Akhil (edge worker / low-level), Aditya (ML/distillation, owns NPU laptop)
 
@@ -59,7 +60,7 @@ Two planes: **data plane** (workers → ingest API) and **retrieval/control plan
 |---|---|
 | `AgentEvent` | `{role, kind: text\|thinking\|tool_use\|tool_result, content, tool_name?, ts, session_id, cwd, git_branch}` — agent-agnostic, internal to worker |
 | `Segment` | bounded run of `AgentEvent`s split on turn boundary — the distiller's input |
-| `Finding` | `{type: learning\|decision\|dead_end\|open_question, text, contributor, ts, source_session, refs?}` — `text` is **abstracted, not verbatim code** (distiller redacts by design) |
+| `Finding` | `{type: learning\|decision\|dead_end\|open_question, text, contributor, ts, source_session, refs?, provenance: distilled\|contributed}` ⟨B⟩ — `text` is **abstracted, not verbatim code** (distiller redacts by design); `provenance` defaults to `distilled`, reserved for the Part-2 contribute module |
 | `SynapseSession` | `{shared_id, purpose, members[], created_by}` |
 | `LocalBinding` | `{local_agent_session_id → shared_id, contributor}` — set at join |
 | `Conflict` | `{finding_a, finding_b, description}` |
@@ -135,7 +136,7 @@ synthesizer: claude                   synthesizer: aic100
 ## 11. Scope / YAGNI
 
 **In:** the pipeline above, off/on-target modes, opt-in shared sessions, conflict flagging, benchmark harness.
-**Out (stretch goals):** `CodexSource` adapter (agent-agnostic proof — nice-to-have for the week, not core), vector-embedding retrieval (LLM-as-retriever suffices at hackathon scale; vector RAG is the scaling story), cross-session persistence, mobile contributions (photos/voice notes), team dashboard, auth beyond opt-in join.
+**Out (stretch goals):** `CodexSource` adapter (agent-agnostic proof — nice-to-have for the week, not core), **contribute module — MCP `contribute(text)` tool, agent self-distills in NL, local model gates it into shared memory (first post-walking-skeleton stretch; see hybrid amendment Part 2)** ⟨B⟩, vector-embedding retrieval (LLM-as-retriever suffices at hackathon scale; vector RAG is the scaling story), cross-session persistence, mobile contributions (photos/voice notes), team dashboard, auth beyond opt-in join.
 
 ## 12. Known risks & mitigations
 
