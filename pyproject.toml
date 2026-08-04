@@ -8,6 +8,7 @@ dependencies = [
     "synapse-providers",
     "synapse-distiller",
     "synapse-worker",
+    "synapse-orchestrator",
 ]
 
 [tool.uv.workspace]
@@ -18,17 +19,27 @@ synapse-contracts = { workspace = true }
 synapse-providers = { workspace = true }
 synapse-distiller = { workspace = true }
 synapse-worker = { workspace = true }
+synapse-orchestrator = { workspace = true }
 
 [dependency-groups]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
     "pytest-httpserver>=1.1",
+    "pytest-cov>=5.0",
 ]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["packages"]
+
+[tool.coverage.report]
+# The `if __name__ == "__main__": sys.exit(main())` guard in every CLI module
+# never executes under pytest (it only runs on direct invocation), and the
+# live subprocess script (scripts/verify_orchestrator.py) is what actually
+# exercises it. Excluding it keeps 100% a meaningful target instead of a
+# number nobody can reach.
+exclude_lines = ["if __name__ == .__main__.:"]
 
 [build-system]
 requires = ["hatchling"]

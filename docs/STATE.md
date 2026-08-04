@@ -1,6 +1,6 @@
 # Where things stand — 2026-08-04 end of day
 
-**Code exists now.** Four packages, 149 tests green offline, and the capture → condense → push loop has run end to end against a real Claude Code transcript on the NPU.
+**Code exists now.** Five packages, 191 tests green offline (100% coverage on both CLI entry points), and the capture → condense → push loop has run end to end against a real Claude Code transcript on the NPU. Session binding (`synapse-worker join`) has been verified live against real subprocesses and the real `~/.claude/projects` directory.
 
 Full detail: **[`2026-08-04-implementation-report.md`](./2026-08-04-implementation-report.md)**. This file is the summary and the pointer.
 
@@ -8,7 +8,7 @@ Full detail: **[`2026-08-04-implementation-report.md`](./2026-08-04-implementati
 
 ## Start here tomorrow
 
-1. **[`2026-08-04-implementation-report.md`](./2026-08-04-implementation-report.md)** — what exists, what was measured, and Part 5's gap list.
+1. **[`2026-08-04-implementation-report.md`](./2026-08-04-implementation-report.md)** — what exists, what was measured, Part 4's session-binding correction, and Part 6's gap list.
 2. **[`adr/0003-distiller-compresses-rather-than-judges.md`](./adr/0003-distiller-compresses-rather-than-judges.md)** — the architectural change made today and why. It moves work into a component that does not exist yet.
 3. **`/CONTEXT.md`** — still the vocabulary. Unchanged and still authoritative.
 
@@ -17,13 +17,14 @@ Then pick from "The three that block progress" below.
 ## What exists
 
 ```
-packages/contracts/     frozen schemas, verbatim from Plan 0's source
+packages/contracts/     frozen schemas + SessionBinding, verbatim from Plan 0's source
 packages/providers/     ModelProvider · FakeProvider · OpenAICompatible · NPUProvider
 packages/distiller/     guards · promptpack · distiller · capability · config · evaluation
-packages/worker/        claude_code source · follower · segmenter · producer · loop · cli
+packages/worker/        claude_code source · follower · segmenter · producer · loop · discovery · cli (join/run/status/replay)
+packages/orchestrator/  MCP transport shell only — no query/contribute yet, see report Part 4
 config/                 synapse.toml + 4 versioned prompt packs
 fixtures/               seg-001, seg-004 — PROVISIONAL, solo-authored
-scripts/                run_npu_eval · trace_one · calibrate_prompt · dump_prompt
+scripts/                run_npu_eval · trace_one · calibrate_prompt · dump_prompt · verify_orchestrator
 ```
 
 Everything is configurable from `config/synapse.toml` or the environment: model, prompt pack, event kinds, render style, segment budget, poll interval, idle flush, sink.
@@ -39,6 +40,7 @@ Everything is configurable from `config/synapse.toml` or the environment: model,
 | Empty-segment discipline (Plan B.3) | the distiller's job | **triage's job** — and triage does not exist |
 | `seg-004`'s golden (Plan 0.3) | tests the distiller | now tests **triage** |
 | Prompt (Plan B.2) | module constant | versioned TOML packs, A/B-able, overhead calibrated |
+| Session binding (Plan D.3) | *"there is no `attach(shared_id)`"* | **built once as one anyway** (an MCP prompt), then deleted and replaced with `synapse-worker join <shared_id>` to match the plan — see report Part 4 |
 
 ## The three that block progress
 
@@ -55,19 +57,20 @@ Everything is configurable from `config/synapse.toml` or the environment: model,
 
 ## Open, unchanged
 
-**Q3 — who builds the orchestrator.** Still open, still a staffing decision. `FileSink` is standing in for it; `HttpSink` exists but has never talked to a real endpoint.
+**Q3 — who builds the orchestrator.** Still open as a staffing decision, though it now has a real (if minimal) starting point: a tested MCP transport shell over `streamable-http`, verified live, with zero tools registered. Plan D.1's producer endpoint, D.3's `query`/`contribute`, and D.4's service client are all still unbuilt — `FileSink` still stands in for the whole egress path. `HttpSink` exists but has never talked to a real endpoint.
 
 ## Traps worth re-reading
 
-Three from 2026-08-03 still stand. Four more earned today:
+Three from 2026-08-03 still stand. Six more earned today:
 
 1. **`uv`'s managed interpreter is x86_64.** A bare `uv venv` silently builds the emulated Prism venv where NPU wheels cannot install. Pin `--python` at the ARM64 exe.
 2. **GenieX accepts unknown request parameters silently.** A 200 response is not evidence a parameter was honoured. Send a deliberately bogus field as a control before believing any capability probe.
 3. **Do not let one person write both the prompt and the eval target.** A few-shot that duplicated a fixture produced a "fix" that was pattern-matching, and it survived a full measurement cycle before anyone noticed.
 4. **A 4B can reverse a fact stated twice in its own prompt.** It passes the canary, the `prompt_tokens` guard, schema validation and the verbatim metric while doing it. An inverted finding is worse than a missing one.
+5. **`mcp` must be pinned to `1.9.4`.** `1.9.4` through `1.29.0`, and all of `2.x`, pull `pyjwt[crypto]` → `cryptography`, which has no ARM64 Windows wheel and fails building from source here.
+6. **Check Plan A/D before presenting design options, not after building one.** The session-binding MCP prompt was built faithfully against an explicit choice, then turned out to contradict Plan D Task D.3 ("there is no `attach(shared_id)`"), discovered only by checking afterward. Deleted and rebuilt to match. See report Part 4.
 
 ## Not done
 
-- **Nothing is committed.** All of today's work is untracked.
-- No orchestrator, no Codex adapter, no compaction, no synthesis, no retrieval, no MCP surface.
+- No Codex adapter, no compaction, no synthesis, no retrieval, no producer endpoint, no `query`/`contribute`.
 - The A/B demo measurement (Plan B.8) has not started.

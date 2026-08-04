@@ -1,0 +1,23 @@
+[project]
+name = "synapse-orchestrator"
+version = "0.1.0"
+description = "Local hub: MCP transport shell, per ADR 0001 (query/contribute pending Plan C)"
+requires-python = ">=3.12"
+dependencies = [
+    # Pinned exactly. Some version between 1.9.4 and 1.29.0 (and all of 2.x)
+    # starts pulling pyjwt[crypto] -> cryptography for OAuth support on remote
+    # servers. cryptography has no ARM64 Windows wheel here and fails to build
+    # (needs a Rust toolchain we don't have). 1.9.4 is confirmed dependency-clean
+    # for a local, unauthenticated stdio server -- which is all this is.
+    "mcp==1.9.4",
+]
+
+[project.scripts]
+synapse-orchestrator = "synapse_orchestrator.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/synapse_orchestrator"]

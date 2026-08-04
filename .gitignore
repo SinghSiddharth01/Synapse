@@ -14,6 +14,7 @@ api-1.json
 __pycache__/
 *.egg-info/
 .pytest_cache/
+.coverage
 
 # Worker runtime state: follow offsets, the pending-turn buffer, and the
 # write-ahead log. Machine-local and per-session — committing it would push one

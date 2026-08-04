@@ -6,6 +6,7 @@
 # omits them from the import — `from synapse_contracts import Attribution`
 # would raise ImportError. Fixed here; the schemas themselves are verbatim.
 
+from synapse_contracts.binding import SessionBinding, clear_binding, read_binding, write_binding
 from synapse_contracts.schemas import (
     AgentEvent,
     Attribution,
@@ -36,6 +37,10 @@ __all__ = [
     "ModelUsage",
     "Provenance",
     "Segment",
+    "SessionBinding",
     "SessionContext",
     "SynapseSession",
+    "clear_binding",
+    "read_binding",
+    "write_binding",
 ]
