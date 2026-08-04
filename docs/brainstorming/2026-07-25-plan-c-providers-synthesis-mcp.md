@@ -10,6 +10,8 @@
 
 **Owner:** Siddsing.
 
+> **⟨AMENDED 2026-08-03 D⟩** — see `2026-08-03-agent-detection-demo-storage-amendment.md`. (1) `InMemorySynthesizer` state goes behind a **narrow storage interface** (store findings / get context / query candidates) so a retrieval-optimized backend — vector RAG, findings graph, or purpose→topic hierarchy — can swap in later without touching synthesis or MCP; the backend choice is deferred, in-memory + LLM-as-retriever remains the first pass. (2) The synthesis prompt and merge strategy are **explicitly first-pass** (Claude-suggested), tuned via the eval loop — not a contract. (3) Nothing in the service may assume a specific coding agent; agent-specific awareness delivery lives in per-agent integration packs (Claude Code pack = hooks + skill), with the MCP-native surface as the universal floor. (4) The demo is **pre-recorded A/B**; venue-network risk applies only to the live encore.
+
 **Prerequisites (from Plan 0):** all contracts frozen, `FakeProvider` shipped, fixture Segments + golden Findings committed.
 
 **Handoff to other tracks:**

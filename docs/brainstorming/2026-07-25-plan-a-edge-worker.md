@@ -10,6 +10,8 @@
 
 **Owner:** Akhil.
 
+> **⟨AMENDED 2026-08-03 D⟩** — see `2026-08-03-agent-detection-demo-storage-amendment.md`. (1) The source layer gains an **agent registry + auto-detection**: the worker watches registered transcript roots (Claude Code `~/.claude/projects/`, Codex's session dir) and spawns the matching follower+adapter on fresh activity — no per-agent configuration, and compaction summaries the agent writes are ingested as events. (2) **`CodexSource` is elevated from stretch to the demo pair** — required by recording day. (3) The segmenter's token budget is **per-model**: read from the resolved distiller's capability record (usable context, prefill tok/s), never a hard-coded constant; the ~2–2.5K figure below is the expected value for a 4K qairt bundle, not a global.
+
 **Prerequisites (from Plan 0):** frozen contracts in `synapse_contracts` (`AgentEvent`, `Segment`, `Finding`, `CreateSessionRequest`/`Response`, `JoinSessionRequest`/`Response`, `PushFindingsRequest`/`Response`), fixture Segments in `fixtures/segments/`, `FakeProvider`.
 
 **Handoff to other tracks:** `ClaudeCodeSource` (Task 1) → `AgentEvent[]`, consumed by the segmenter (Task 3) → `Segment[]`, consumed by the Distiller (Plan B, Task 3) → `Finding[]`, consumed by the sync client (Task 4).

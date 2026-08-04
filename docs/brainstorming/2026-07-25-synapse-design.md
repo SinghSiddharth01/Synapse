@@ -5,6 +5,7 @@
 **Amended:** 2026-08-03 — provider layer (hosted Cirrascale AI-100, GenieX NPU runtime, model selection); see `2026-08-03-aic100-cirrascale-amendment.md`. Amended sections marked ⟨A⟩.
 **Amended:** 2026-08-03 — hybrid frontier/local strategy (Part 1: design-time frontier leverage, local-only runtime; Part 2: contribute module, deferred); see `2026-08-03-hybrid-frontier-local-amendment.md`. Amended sections marked ⟨B⟩.
 **Amended:** 2026-08-03 — segment token budget + compaction + 4B quality calibration; see `2026-08-03-segment-budget-compaction-amendment.md`. Amended sections marked ⟨C⟩.
+**Amended:** 2026-08-03 — agent auto-detection, pre-recorded A/B demo, per-model segment budget, shared-memory storage seam; see `2026-08-03-agent-detection-demo-storage-amendment.md`. Amended sections marked ⟨D⟩.
 **Event:** Snapdragon Multiverse internal hackathon (build week Aug 3–7 2026; prep week ~Jul 27–31)
 **Team:** Siddsing (architect/integration), Akhil (edge worker / low-level), Aditya (ML/distillation, owns NPU laptop)
 
@@ -22,7 +23,7 @@ A teammate creates an opt-in shared session from their Copilot+ PC, declaring it
 
 **Division of labor (the "Why Qualcomm" thesis):** edge distillation on the Snapdragon X Elite NPU (continuous, ingest/prefill-heavy — the NPU's strength) + cloud synthesis on Cloud AI 100 (sustained low-cost multi-user serving).
 
-**Demo vehicles:** Claude Code is the **primary** path (capture verified). OpenAI Codex is the **agent-agnostic proof** — a second `Source` adapter normalizing into the same `AgentEvent` schema; building it is a week **stretch goal**, not required for the core pipeline. Design is agent-agnostic by construction (new agent = one new Source, nothing else changes).
+**Demo vehicles ⟨D⟩:** Claude Code (capture verified) **and** OpenAI Codex are the demo pair. The worker **auto-detects** which agent is active from a registry of known transcript roots and selects the matching `Source` adapter — no per-agent workflow exists anywhere downstream of the adapter. Design is agent-agnostic by construction (new agent = one registry entry + one Source, nothing else changes); the hackathon scopes it to these two agents, the solution applies to any. The demo itself is **pre-recorded A/B**: the same task run without Synapse and with it, side-by-side, with measured deltas (wall-clock, tokens, duplicated exploration) — a live run is the encore, not the dependency.
 
 ## 3. Verified assumptions (as of 2026-07-25)
 
@@ -36,6 +37,7 @@ A teammate creates an opt-in shared session from their Copilot+ PC, declaring it
    Coding agent (Claude Code / Codex)  ── writes JSONL it already writes
               │
    EDGE WORKER (per machine, Akhil) ─────────────────────────────────
+     Agent detect (registry of transcript roots) ⟨D⟩
      Source adapter (ClaudeCodeSource / CodexSource) → AgentEvent
      File follower (tail, rotation, partial/malformed lines)
      Segmenter → Segment (turn-boundary batches of AgentEvent)
@@ -60,7 +62,7 @@ Two planes: **data plane** (workers → ingest API) and **retrieval/control plan
 | Contract | Shape (essentials) |
 |---|---|
 | `AgentEvent` | `{role, kind: text\|thinking\|tool_use\|tool_result, content, tool_name?, ts, session_id, cwd, git_branch}` — agent-agnostic, internal to worker |
-| `Segment` | bounded run of `AgentEvent`s split on turn boundary **and token budget (~2–2.5K tok; final number from NPU spike prefill/context measurement), events deterministically compacted (tool_result head/tail truncation, thinking trimmed, trivial calls dropped)** ⟨C⟩ — the distiller's input |
+| `Segment` | bounded run of `AgentEvent`s split on turn boundary **and token budget (derived per model from its measured capability record — usable context, prefill tok/s, prompt reserves — never a shared hard-coded constant ⟨D⟩; ~2–2.5K on a 4K qairt bundle), events deterministically compacted (tool_result head/tail truncation, thinking trimmed, trivial calls dropped)** ⟨C⟩ — the distiller's input |
 | `Finding` | `{type: learning\|decision\|dead_end\|open_question, text, contributor, ts, source_session, refs?, provenance: distilled\|contributed}` ⟨B⟩ — `text` is **abstracted, not verbatim code** (distiller redacts by design); `provenance` defaults to `distilled`, reserved for the Part-2 contribute module |
 | `SynapseSession` | `{shared_id, purpose, members[], created_by}` |
 | `LocalBinding` | `{local_agent_session_id → shared_id, contributor}` — set at join |
@@ -136,8 +138,8 @@ synthesizer: claude                   synthesizer: aic100
 
 ## 11. Scope / YAGNI
 
-**In:** the pipeline above, off/on-target modes, opt-in shared sessions, conflict flagging, benchmark harness.
-**Out (stretch goals):** `CodexSource` adapter (agent-agnostic proof — nice-to-have for the week, not core), **contribute module — MCP `contribute(text)` tool, agent self-distills in NL, local model gates it into shared memory (first post-walking-skeleton stretch; see hybrid amendment Part 2)** ⟨B⟩, vector-embedding retrieval (LLM-as-retriever suffices at hackathon scale; vector RAG is the scaling story), cross-session persistence, mobile contributions (photos/voice notes), team dashboard, auth beyond opt-in join.
+**In:** the pipeline above, off/on-target modes, opt-in shared sessions, conflict flagging, benchmark harness, **agent auto-detection + `CodexSource` (demo pair) ⟨D⟩**.
+**Out (stretch goals):** **retrieval-optimized shared-memory store ⟨D⟩ — vector RAG / findings graph / purpose→topic hierarchy behind the storage interface (in-memory + LLM-as-retriever is the first pass)**, **contribute module — MCP `contribute(text)` tool, agent self-distills in NL, local model gates it into shared memory (first post-walking-skeleton stretch; see hybrid amendment Part 2)** ⟨B⟩, cross-session persistence, mobile contributions (photos/voice notes), team dashboard, auth beyond opt-in join.
 
 ## 12. Known risks & mitigations
 
@@ -147,10 +149,12 @@ synthesizer: claude                   synthesizer: aic100
 | Shared Cirrascale credit pool / unknown rate limits ⟨A⟩ | bound `max_tokens` on every call; dev loops on Ollama; usage tracked via `ModelResult.usage` |
 | Synthesis quality on single 8B model (no 70B on our key) ⟨A⟩ | tight working-memory bound + simple prompts; benchmark table Claude-vs-aic100 *is* the demo narrative; ask office hours re 70B |
 | Cirrascale chat endpoint misparses JSON output into empty tool calls ⟨A⟩ | schema calls route via `/completions` + tolerant extraction (probed + verified) |
-| Venue WiFi down ⟨A⟩ | synthesis falls back to `synthesizer: ollama` (one env var); edge path (GenieX) is fully local |
+| Venue WiFi down ⟨A⟩ | demo is pre-recorded A/B ⟨D⟩ — network only threatens the live encore; for that, synthesis falls back to `synthesizer: ollama` (one env var); edge path (GenieX) is fully local |
 | NPU/aic100 can't emit structured JSON | capability flag + prompt-instructed JSON + tolerant parse; measured, not assumed |
 | Provider parity (3B mangles schema Claude honors) | shared conformance test; this *is* the quality signal to measure |
 | Segment/distiller drift between Akhil & Aditya | frozen hand-authored fixture Segments are the shared ground truth |
 | "Isn't this Notion + RAG?" | no human writes notes — agents' own work becomes shared memory, in-loop, in minutes |
 | Cross-machine ordering | wall-clock timestamps assumed sufficient at hackathon scale (named limitation) |
+| Shared-memory store is naive (in-memory + LLM-as-retriever) ⟨D⟩ | acceptable at hackathon scale; a narrow storage interface isolates the choice; RAG / graph / hierarchy evaluated as the scaling story |
+| Distiller & synthesis prompts are first-pass Claude drafts ⟨D⟩ | explicitly not contracts; eval loop + prompt-optimizer (hybrid amendment) is the tuning mechanism |
 | Single turn exceeds NPU context / prefill power budget ⟨C⟩ | budgeted sub-turn segments + deterministic compaction; synthesis dedupes across sub-segments; usable bundle context is a spike go/no-go axis |

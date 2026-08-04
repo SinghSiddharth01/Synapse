@@ -31,7 +31,7 @@ Edge distillation on Snapdragon plus cloud synthesis on Cloud AI 100 is the divi
 - **On-device SLM inference** on the Snapdragon X Elite NPU
 - **Qualcomm Cloud AI 100** for synthesis and retrieval
 - **MCP** (Model Context Protocol) for the agent-facing interface
-- **Claude Code** as the demo vehicle — the design is agent-agnostic
+- **Claude Code and Codex** as the demo pair — the worker auto-detects which agent is running; the design is agent-agnostic
 
 ## Five-Day Plan
 

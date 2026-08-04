@@ -465,7 +465,7 @@
     <p class="thesis">Every engineer's coding agent learns something. None of them tell each other. Synapse is the listener in between.</p>
     <div class="meta">
       <span><b>Status</b> &nbsp;approved design, pre-implementation</span>
-      <span><b>Spec</b> &nbsp;2026-07-25, amended 2026-08-03 ×3</span>
+      <span><b>Spec</b> &nbsp;2026-07-25, amended 2026-08-03 ×4</span>
       <span><b>Event</b> &nbsp;Snapdragon Multiverse, build week Aug 3–7</span>
     </div>
   </header>
@@ -512,8 +512,8 @@
 
           <!-- agent -->
           <rect x="64" y="30" width="300" height="52" rx="6" class="s-box"/>
-          <text x="84" y="51" class="s-title">Coding agent — Claude Code</text>
-          <text x="84" y="68" class="s-sub">writes ~/.claude/projects/*.jsonl, unmodified</text>
+          <text x="84" y="51" class="s-title">Coding agent — Claude Code / Codex / any</text>
+          <text x="84" y="68" class="s-sub">writes its session transcript, unmodified</text>
           <line x1="214" y1="86" x2="214" y2="140" class="s-line" marker-end="url(#ar-ink)"/>
 
           <!-- edge stages -->
@@ -523,7 +523,7 @@
 
           <rect x="68" y="242" width="292" height="52" rx="6" class="s-box-edge"/>
           <text x="86" y="263" class="s-title">Source adapter</text>
-          <text x="86" y="280" class="s-sub">ClaudeCodeSource · agent-agnostic normalize</text>
+          <text x="86" y="280" class="s-sub">auto-selected by agent detection · normalize</text>
 
           <rect x="68" y="334" width="292" height="52" rx="6" class="s-box-edge"/>
           <text x="86" y="355" class="s-title">Segmenter + compaction</text>
@@ -544,7 +544,7 @@
 
           <text x="226" y="226" class="s-flow">JSONL lines</text>
           <text x="226" y="318" class="s-flow">AgentEvent</text>
-          <text x="226" y="410" class="s-flow">Segment ≤ ~2.5K tok</text>
+          <text x="226" y="410" class="s-flow">Segment ≤ per-model budget</text>
           <text x="226" y="502" class="s-flow">Finding[]</text>
 
           <!-- device boundary -->
@@ -606,9 +606,9 @@
       <div class="stage on-edge">
         <div class="n">02</div>
         <div class="body">
-          <h3>Source adapter</h3>
-          <p>Normalizes one agent's transcript format into the internal event shape. <span class="m">ClaudeCodeSource</span> is the primary; a <span class="m">CodexSource</span> is the agent-agnostic proof and a stretch goal. Adding an agent means adding one adapter and nothing else.</p>
-          <div class="io"><b>in</b> JSONL lines &nbsp;→&nbsp; <b>out</b> AgentEvent</div>
+          <h3>Source adapter + agent detection</h3>
+          <p>The worker is never <em>configured</em> for an agent — it detects one. A registry maps each known agent to its transcript roots and adapter; fresh activity under a registered root spawns the matching follower and <span class="m">Source</span>, which normalizes that agent's format into the internal event shape. <span class="m">ClaudeCodeSource</span> and <span class="m">CodexSource</span> are the demo pair; any other agent is one adapter plus one registry entry, and nothing downstream ever knows the difference. Compaction summaries an agent writes are ingested as events too — they are high-density signal.</p>
+          <div class="io"><b>in</b> transcript lines &nbsp;→&nbsp; <b>out</b> AgentEvent</div>
         </div>
         <div class="who"><span>Akhil</span></div>
       </div>
@@ -617,8 +617,8 @@
         <div class="n">03</div>
         <div class="body">
           <h3>Segmenter + compaction</h3>
-          <p>Batches events into bounded chunks, splitting on turn boundary <em>and</em> on a token budget, so one monster turn becomes several sub-segments rather than one unprocessable blob. Compaction is deterministic code, not a model: truncate tool results head and tail, trim thinking, drop trivial calls, strip binary.</p>
-          <div class="io"><b>in</b> AgentEvent &nbsp;→&nbsp; <b>out</b> Segment (~2–2.5K tok)</div>
+          <p>Batches events into bounded chunks, splitting on turn boundary <em>and</em> on a token budget, so one monster turn becomes several sub-segments rather than one unprocessable blob. The budget is not a constant: it is derived from the resolved distiller's measured capability record — usable context, prefill speed, prompt reserves — so swapping models re-budgets automatically. Compaction is deterministic code, not a model: truncate tool results head and tail, trim thinking, drop trivial calls, strip binary.</p>
+          <div class="io"><b>in</b> AgentEvent &nbsp;→&nbsp; <b>out</b> Segment ≤ budget(model)</div>
         </div>
         <div class="who"><span>Akhil</span></div>
       </div>
@@ -722,7 +722,7 @@
         </thead>
         <tbody>
           <tr><td>AgentEvent</td><td>One normalized turn part — role, kind (text / thinking / tool_use / tool_result), content, timestamp, cwd, branch. Agent-agnostic and internal to the worker.</td></tr>
-          <tr><td>Segment</td><td>A bounded run of events, split on turn boundary and token budget, deterministically compacted. The distiller's unit of work.</td></tr>
+          <tr><td>Segment</td><td>A bounded run of events, split on turn boundary and a per-model token budget (derived from the distiller's measured capabilities, never hard-coded), deterministically compacted. The distiller's unit of work.</td></tr>
           <tr><td>Finding</td><td>The atom of shared knowledge: type (learning / decision / dead_end / open_question), abstracted text, contributor, timestamp, provenance. This is what crosses the device boundary.</td></tr>
           <tr><td>SynapseSession</td><td>The shared session: id, stated purpose, members. Opt-in by construction — you create one or you join one.</td></tr>
           <tr><td>LocalBinding</td><td>Maps a local agent session to a shared session id plus contributor. Set once, at join.</td></tr>
@@ -830,6 +830,7 @@
     <div class="prose">
       <p>Retrieval being agent-initiated creates its own failure: the agent only pulls if it knows memory exists, knows it is relevant right now, and knows whether anything has changed since it last looked. A tool sitting in a tool list conveys none of that. The result is a user typing <em>"check the shared learnings first"</em> at the top of every task — which is exactly the manual labour the product claims to remove.</p>
       <p>So awareness gets designed rather than assumed. The mechanism that makes it honest is that <strong>joining a session is the consent event.</strong> Before an agent joins, Synapse is inert: the tools are listed, nothing is injected, footprint zero. Joining arms everything below it, for that session only. The promise is not "we never push" — it is "we push nothing until you opt in, and only ever pointers, never payload."</p>
+      <p>And like the capture side, none of it is allowed to be agent-shaped. The four signals below are mechanism-neutral; what is per-agent is only the delivery vehicle, packaged as a thin <strong>integration pack</strong> that mirrors the <span class="m">Source</span> adapters. The Claude Code pack — hooks plus a skill — is the demo instance described here; a Codex pack delivers the same signals through its own surfaces; and the MCP-native floor (signal ① and the join briefing) needs no pack at all.</p>
     </div>
 
     <div class="invariant prose">
@@ -932,7 +933,7 @@
           <p>A <span class="m">UserPromptSubmit</span> hook checks a cheap watermark endpoint every turn and injects a single line <em>only</em> when the version has moved since this agent last looked, naming the topics that changed. Every other turn it is silent. That silence is the feature: a nudge that fires constantly is one the agent learns to skip past.</p>
           <p>The constraint shapes the implementation. This hook runs on the critical path of every prompt with a thirty-second budget, so it can never make a model call — it is one small HTTP request against a precomputed watermark, capped around two seconds, and it fails open.</p>
         </div>
-        <div class="mark"><span class="st deferred">hook pack</span></div>
+        <div class="mark"><span class="st deferred">agent pack</span></div>
       </div>
 
       <div class="seam is-deferred">
@@ -947,7 +948,7 @@ description: Use when starting work in a joined Synapse session — before
   concluding something is a dead end. Checks what the team already learned.</div>
           <p>The skill body is short: check the watermark, call <span class="m">query</span> with what you are about to work on, and say plainly when memory had nothing. That last instruction matters — an agent that silently finds nothing is indistinguishable from one that never looked.</p>
         </div>
-        <div class="mark"><span class="st deferred">hook pack</span></div>
+        <div class="mark"><span class="st deferred">agent pack</span></div>
       </div>
     </div>
 
@@ -983,6 +984,8 @@ description: Use when starting work in a joined Synapse session — before
           <li>Cloud AI 100 is a hosted endpoint, verified end-to-end on Aug 3. No box to provision; the spike is retired.</li>
           <li>The NPU path is <span class="m">geniex serve</span>, an OpenAI-compatible server — no custom runtime bring-up.</li>
           <li>Frontier models are design-time only: they author few-shots and diagnose eval failures. Nothing frontier sits in the runtime path.</li>
+          <li>The demo is pre-recorded A/B: the same task without Synapse and with it, side-by-side, with measured deltas — tokens, wall-clock, duplicated exploration. A live run is the encore, which is also what collapses the venue-WiFi risk.</li>
+          <li>Capture is agent-detected, not agent-configured: a registry of transcript roots spawns the right adapter, and Claude Code + Codex are the demo pair.</li>
         </ul>
       </div>
       <div class="col open">
@@ -992,6 +995,8 @@ description: Use when starting work in a joined Synapse session — before
           <li>Distiller model choice, decided by bake-off across Qwen3-4B, Gemma-4-E4B and Qwen3-1.7B on schema-valid rate, prefill throughput and power.</li>
           <li>Synthesis quality on a single 8B model — 70B is not on our key. The honest Claude-vs-8B delta is the demo narrative rather than a thing to hide.</li>
           <li>Expect the 4B to land around 0.5–0.7 against Claude goldens. Recorded up front so results get read against expectations, not hopes.</li>
+          <li>Distiller and synthesis prompts are first-pass Claude drafts, explicitly not contracts — the eval loop exists to fine-tune them, and mid-week changes are expected.</li>
+          <li>How shared memory is stored for semantic retrieval. In-memory + LLM-as-retriever is the first pass, behind a storage interface; vector RAG, a findings graph, and a purpose→topic hierarchy are the candidate backends once evidence demands one.</li>
         </ul>
       </div>
     </div>
@@ -1209,11 +1214,11 @@ description: Use when starting work in a joined Synapse session — before
         </thead>
         <tbody>
           <tr><td>contribute(text)</td><td><span class="st deferred">first up</span></td><td>The strongest demo beat available: an agent visibly hands an insight to team memory, and a teammate's agent retrieves it seconds later. The thesis in one moment. Small by design — it reuses the existing distiller.</td></tr>
-          <tr><td>Awareness hook pack</td><td><span class="st deferred">first up</span></td><td>The SessionStart briefing, the per-turn freshness pointer, and the shipped skill. Turns retrieval from something the user has to ask for into something the agent does on its own — the difference between a demo that works and a tool someone keeps using.</td></tr>
-          <tr><td>CodexSource</td><td><span class="st deferred">~1 day</span></td><td>The agent-agnostic proof. Adding a second adapter and changing nothing else is the claim; shipping one demonstrates it instead of asserting it.</td></tr>
+          <tr><td>Awareness packs</td><td><span class="st deferred">first up</span></td><td>Per-agent delivery of the awareness signals — the Claude Code pack (SessionStart briefing, per-turn freshness pointer, shipped skill) first, a Codex pack as its mirror. Turns retrieval from something the user has to ask for into something the agent does on its own.</td></tr>
+          <tr><td>CodexSource</td><td><span class="st adopted">demo scope</span></td><td>Elevated out of stretch: the recorded demo runs both Claude Code and Codex, so the second adapter must exist by recording day — and the agent-agnostic claim gets demonstrated on screen instead of asserted.</td></tr>
           <tr><td>Team dashboard</td><td><span class="st deferred">stretch</span></td><td>Makes the shared memory visible to humans rather than only to agents — the artifact that would survive the hackathon.</td></tr>
           <tr><td>Cross-session persistence</td><td><span class="st deferred">stretch</span></td><td>Today findings live in memory and a restart wipes them. Persistence turns a session tool into team knowledge that accumulates.</td></tr>
-          <tr><td>Vector retrieval</td><td><span class="st deferred">scaling</span></td><td>Only matters past hackathon scale — but the infrastructure is already on the key, so it is a small step rather than a project.</td></tr>
+          <tr><td>Retrieval-optimized store</td><td><span class="st deferred">scaling</span></td><td>The backend behind the storage interface once in-memory + LLM-as-retriever runs out: vector RAG (embeddings already on the key), a findings graph whose edges are topics, refs and conflicts, or a purpose→topic hierarchy. Chosen on evidence, not up front.</td></tr>
           <tr><td>Mobile contributions</td><td><span class="st deferred">stretch</span></td><td>Photos and voice notes from a lab bench. Fits the original use case — a lab engineer's on-target context meeting a developer's code context.</td></tr>
           <tr><td>Offline queue + inotify follower</td><td><span class="st free">hardening</span></td><td>The follower currently polls and keeps its offset in-process. Neither matters for a short demo run; both matter the day someone actually uses it.</td></tr>
           <tr><td>Llama-3.1-70B</td><td><span class="st free">ask</span></td><td>Not on our key today. If office hours can enable it, better synthesis for a one-line config change.</td></tr>
@@ -1227,7 +1232,7 @@ description: Use when starting work in a joined Synapse session — before
   <section>
     <div class="eyebrow">Best case</div>
     <h2>If all of it lands</h2>
-    <p class="prose">The optimistic end state, written as the demo we would give rather than a feature list. Everything here is composed from items above; nothing new is invented.</p>
+    <p class="prose">The optimistic end state, written as the demo we would record rather than a feature list. The recording pairs this run against a baseline of the same task without Synapse, so every gain below shows up as a measured delta — tokens, wall-clock, duplicated exploration — rather than a claim. Everything here is composed from items above; nothing new is invented.</p>
 
     <div class="scenario">
       <div class="beat">
@@ -1242,7 +1247,7 @@ description: Use when starting work in a joined Synapse session — before
         <div class="n">02</div>
         <div>
           <p>One of them is on Codex rather than Claude Code. It makes no difference to anything downstream: a second source adapter normalizes into the same event shape and the rest of the pipeline never learns which agent it came from. <b>The agent-agnostic claim is demonstrated rather than asserted.</b></p>
-          <span class="from">stretch · CodexSource</span>
+          <span class="from">demo scope · CodexSource + agent detection</span>
         </div>
       </div>
 
@@ -1299,7 +1304,7 @@ description: Use when starting work in a joined Synapse session — before
   </section>
 
   <footer>
-    <span>Sources: docs/brainstorming/2026-07-25-synapse-design.md · plans 0 / A / B / C · the three 2026-08-03 amendments (provider layer · hybrid frontier/local · segment budget &amp; compaction).</span>
+    <span>Sources: docs/brainstorming/2026-07-25-synapse-design.md · plans 0 / A / B / C · the four 2026-08-03 amendments (provider layer · hybrid frontier/local · segment budget &amp; compaction · agent detection, demo &amp; storage).</span>
     <span>Diagrams: Snapdragon Workspace board, Synapse frames.</span>
   </footer>
 

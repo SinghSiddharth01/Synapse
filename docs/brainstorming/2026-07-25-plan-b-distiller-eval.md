@@ -10,6 +10,8 @@
 
 **Owner:** Aditya (owns the X Elite laptop for the NPU spike).
 
+> **⟨AMENDED 2026-08-03 D⟩** — see `2026-08-03-agent-detection-demo-storage-amendment.md`. (1) Spike/eval measurements (usable compiled context, prefill tok/s) populate **per-model capability rows** that the segmenter's budget derivation reads — one row per candidate model, not one global number. (2) The distiller prompt is **explicitly first-pass** (Claude-suggested); the eval loop + failure-analysis → prompt-revision loop is the tuning mechanism, and the prompt is not a contract. (3) The eval harness's usage/latency numbers also feed the **pre-recorded A/B demo** (baseline vs Synapse deltas: tokens, wall-clock, duplicated exploration).
+
 **Prerequisites (from Plan 0):** `Segment` and `Finding` schemas frozen, `ModelProvider` + `FakeProvider` shipped, fixture Segments + golden Findings committed. From Plan C: `ClaudeProvider` (Aditya can build against a mocked adapter until C1–C3 land, but the eval harness needs a real Claude call to establish the baseline).
 
 **Handoff to other tracks:** `Distiller` (Task 3) plugs into `EdgeWorker` from Plan A Task 5 (matches the `DistillerLike` protocol). `build_default_distiller()` (Task 3) is what the worker CLI imports.
