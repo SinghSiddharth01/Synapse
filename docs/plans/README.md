@@ -20,7 +20,8 @@ The old plans accumulated five amendment layers and ~30 inline code snippets sho
 
 - `/CONTEXT.md` — vocabulary. Agent Session vs Shared Session vs Agent Run; Attribution; Tombstone. Read this first; the plans use these terms precisely.
 - `docs/brainstorming/2026-08-03-local-orchestrator-domain-model-amendment.md` — **amendment F**: the architecture revision, the domain model, and every question closed with its reasoning.
-- `docs/adr/` — the two decisions worth a record: the local orchestrator, and semantic merge with tombstones.
+- `docs/adr/` — the three decisions worth a record: the local orchestrator, semantic merge with tombstones, and the distiller compressing rather than judging.
+- `docs/2026-08-04-implementation-report.md` — **what was actually built, measured, and left open.** Plan B's Tasks B.1–B.5 are partly superseded by it; read it before executing them.
 - `docs/brainstorming/2026-07-30-npu-llm-benchmarks-and-geniex-findings.md` — measured hardware evidence. Plan B depends on it heavily.
 - `docs/architecture.html` — the overview page, rebuilt against this architecture.
 
