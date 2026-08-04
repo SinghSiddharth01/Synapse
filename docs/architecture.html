@@ -1,0 +1,1306 @@
+<title>Synapse — Architecture at a Glance</title>
+
+<style>
+  :root {
+    --ground:      #F5F6F4;
+    --panel:       #FFFFFF;
+    --ink:         #191B1A;
+    --ink-soft:    #5C6360;
+    --ink-faint:   #868D89;
+    --rule:        #DDDFDA;
+    --rule-soft:   #E9EBE7;
+    --edge:        #A8501C;
+    --edge-tint:   #F6EBE3;
+    --cloud:       #0E6B72;
+    --cloud-tint:  #E1EDED;
+    --flag:        #7C6210;
+    --flag-tint:   #F5EFDC;
+    --stop:        #94322A;
+    --stop-tint:   #F5E5E2;
+
+    --serif: "Iowan Old Style", Charter, "Bitstream Charter", "Palatino Linotype", Palatino, Georgia, serif;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground:     #131614;
+      --panel:      #1B1F1D;
+      --ink:        #E9ECE9;
+      --ink-soft:   #9AA39F;
+      --ink-faint:  #767E7A;
+      --rule:       #2F3532;
+      --rule-soft:  #262B29;
+      --edge:       #E19256;
+      --edge-tint:  #2A211B;
+      --cloud:      #5FC6CC;
+      --cloud-tint: #16282A;
+      --flag:       #D6B45C;
+      --flag-tint:  #2A2517;
+      --stop:       #E38C80;
+      --stop-tint:  #2C1B18;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground:     #131614;
+    --panel:      #1B1F1D;
+    --ink:        #E9ECE9;
+    --ink-soft:   #9AA39F;
+    --ink-faint:  #767E7A;
+    --rule:       #2F3532;
+    --rule-soft:  #262B29;
+    --edge:       #E19256;
+    --edge-tint:  #2A211B;
+    --cloud:      #5FC6CC;
+    --cloud-tint: #16282A;
+    --flag:       #D6B45C;
+    --flag-tint:  #2A2517;
+    --stop:       #E38C80;
+    --stop-tint:  #2C1B18;
+  }
+
+  :root[data-theme="light"] {
+    --ground:     #F5F6F4;
+    --panel:      #FFFFFF;
+    --ink:        #191B1A;
+    --ink-soft:   #5C6360;
+    --ink-faint:  #868D89;
+    --rule:       #DDDFDA;
+    --rule-soft:  #E9EBE7;
+    --edge:       #A8501C;
+    --edge-tint:  #F6EBE3;
+    --cloud:      #0E6B72;
+    --cloud-tint: #E1EDED;
+    --flag:       #7C6210;
+    --flag-tint:  #F5EFDC;
+    --stop:       #94322A;
+    --stop-tint:  #F5E5E2;
+  }
+
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--serif);
+    font-size: 17px;
+    line-height: 1.62;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: 1040px;
+    margin: 0 auto;
+    padding: 56px 28px 100px;
+    display: flex;
+    flex-direction: column;
+    gap: 60px;
+  }
+
+  .prose { max-width: 66ch; }
+
+  h1, h2, h3 { font-family: var(--sans); text-wrap: balance; margin: 0; }
+
+  /* ---------- masthead ---------- */
+
+  .masthead { display: flex; flex-direction: column; gap: 20px; }
+
+  h1 {
+    font-size: clamp(38px, 7vw, 60px);
+    font-weight: 680;
+    letter-spacing: -0.028em;
+    line-height: 1.02;
+  }
+
+  .thesis {
+    font-size: clamp(19px, 2.6vw, 23px);
+    line-height: 1.45;
+    color: var(--ink-soft);
+    max-width: 30ch;
+    margin: 0;
+  }
+
+  .meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 26px;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    letter-spacing: 0.02em;
+    color: var(--ink-faint);
+    padding-top: 16px;
+    border-top: 1px solid var(--rule);
+  }
+  .meta b { color: var(--ink-soft); font-weight: 500; }
+
+  /* ---------- sections ---------- */
+
+  section { display: flex; flex-direction: column; gap: 22px; }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+  .eyebrow::after {
+    content: "";
+    flex: 1;
+    height: 1px;
+    background: var(--rule);
+  }
+
+  h2 { font-size: clamp(25px, 3.4vw, 31px); font-weight: 640; letter-spacing: -0.018em; }
+  h3 { font-size: 17px; font-weight: 620; letter-spacing: -0.008em; }
+
+  p { margin: 0; }
+  .prose p + p { margin-top: 14px; }
+
+  code, .m { font-family: var(--mono); font-size: 0.855em; }
+  code {
+    background: var(--rule-soft);
+    padding: 0.12em 0.36em;
+    border-radius: 3px;
+  }
+
+  a { color: inherit; text-underline-offset: 3px; text-decoration-color: var(--ink-faint); }
+  a:hover { text-decoration-color: currentColor; }
+  a:focus-visible { outline: 2px solid var(--edge); outline-offset: 3px; border-radius: 2px; }
+
+  /* ---------- invariant callout ---------- */
+
+  .invariant {
+    background: var(--panel);
+    border: 1px solid var(--rule);
+    border-top: 2px dashed var(--edge);
+    padding: 22px 26px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .invariant .label {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--edge);
+  }
+  .invariant p { font-size: 18px; }
+
+  /* ---------- figures ---------- */
+
+  figure {
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .canvas {
+    background: var(--panel);
+    border: 1px solid var(--rule);
+    padding: 22px 18px;
+    overflow-x: auto;
+  }
+  .canvas svg { display: block; max-width: 100%; height: auto; min-width: 620px; margin: 0 auto; }
+  figcaption {
+    font-size: 14.5px;
+    line-height: 1.55;
+    color: var(--ink-soft);
+    max-width: 74ch;
+  }
+  figcaption a { color: var(--ink-soft); }
+
+  /* svg theming */
+  .s-zone-edge  { fill: var(--edge-tint);  stroke: var(--edge);  stroke-opacity: 0.35; }
+  .s-zone-cloud { fill: var(--cloud-tint); stroke: var(--cloud); stroke-opacity: 0.35; }
+  .s-box        { fill: var(--panel); stroke: var(--rule); }
+  .s-box-edge   { fill: var(--panel); stroke: var(--edge);  stroke-opacity: 0.55; }
+  .s-box-cloud  { fill: var(--panel); stroke: var(--cloud); stroke-opacity: 0.55; }
+  .s-mask       { fill: var(--panel); stroke: none; }
+  .s-line       { stroke: var(--ink-soft); fill: none; }
+  .s-line-edge  { stroke: var(--edge);  fill: none; }
+  .s-line-cloud { stroke: var(--cloud); fill: none; }
+  .s-bound      { stroke: var(--edge); fill: none; stroke-dasharray: 7 6; stroke-opacity: 0.8; }
+  .s-title      { fill: var(--ink); font-family: var(--sans); font-size: 13.5px; font-weight: 600; }
+  .s-sub        { fill: var(--ink-soft); font-family: var(--sans); font-size: 11px; }
+  .s-flow       { fill: var(--ink-soft); font-family: var(--mono); font-size: 10px; }
+  .s-zonelabel  { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.13em; }
+  .s-bell       { fill: var(--edge); font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.13em; }
+  .s-bell-sub   { fill: var(--edge); font-family: var(--sans); font-size: 10.5px; opacity: 0.85; }
+  .a-edge  { fill: var(--edge); }
+  .a-cloud { fill: var(--cloud); }
+  .a-ink   { fill: var(--ink-soft); }
+
+  /* ---------- stage list ---------- */
+
+  .stages { display: flex; flex-direction: column; gap: 1px; background: var(--rule); border: 1px solid var(--rule); }
+
+  .stage {
+    background: var(--panel);
+    display: grid;
+    grid-template-columns: 46px minmax(0, 1fr) 128px;
+    gap: 0 18px;
+    padding: 18px 22px;
+    align-items: start;
+  }
+  .stage .n {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--ink-faint);
+    padding-top: 3px;
+    font-variant-numeric: tabular-nums;
+  }
+  .stage.on-edge  .n { color: var(--edge); }
+  .stage.on-cloud .n { color: var(--cloud); }
+  .stage .body { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+  .stage .body p { font-size: 15.5px; line-height: 1.5; color: var(--ink-soft); }
+  .io {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--ink-faint);
+    white-space: nowrap;
+    overflow-x: auto;
+    padding-bottom: 2px;
+  }
+  .io b { color: var(--ink-soft); font-weight: 500; }
+
+  .who {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--ink-soft);
+    text-align: right;
+    padding-top: 3px;
+  }
+  .who span {
+    display: inline-block;
+    border: 1px solid var(--rule);
+    border-radius: 100px;
+    padding: 2px 9px;
+    white-space: nowrap;
+  }
+
+  .band {
+    background: var(--panel);
+    padding: 10px 22px;
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .band.edge  { color: var(--edge); }
+  .band.cloud { color: var(--cloud); }
+  .band::after { content: ""; flex: 1; height: 1px; background: currentColor; opacity: 0.25; }
+
+  /* ---------- tables ---------- */
+
+  .tablewrap { overflow-x: auto; border: 1px solid var(--rule); background: var(--panel); }
+  table { border-collapse: collapse; width: 100%; font-size: 14.5px; min-width: 560px; }
+  th, td { text-align: left; padding: 12px 18px; border-bottom: 1px solid var(--rule-soft); vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+  th {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    font-weight: 400;
+    border-bottom: 1px solid var(--rule);
+  }
+  td:first-child { font-family: var(--mono); font-size: 12.5px; white-space: nowrap; color: var(--ink); }
+  td { color: var(--ink-soft); }
+
+  .tag {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    border-radius: 3px;
+    padding: 2px 7px;
+    white-space: nowrap;
+  }
+  .tag.edge  { background: var(--edge-tint);  color: var(--edge); }
+  .tag.cloud { background: var(--cloud-tint); color: var(--cloud); }
+  .tag.test  { background: var(--rule-soft);  color: var(--ink-soft); }
+
+  /* ---------- status ---------- */
+
+  .cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 1px; background: var(--rule); border: 1px solid var(--rule); }
+  .col { background: var(--panel); padding: 20px 22px; display: flex; flex-direction: column; gap: 12px; }
+  .col h3 { font-size: 12px; font-family: var(--mono); letter-spacing: 0.13em; text-transform: uppercase; color: var(--ink-faint); font-weight: 400; }
+  .col ul { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 10px; }
+  .col li { font-size: 14.5px; line-height: 1.5; color: var(--ink-soft); padding-left: 18px; position: relative; }
+  .col li::before { content: ""; position: absolute; left: 0; top: 0.62em; width: 7px; height: 1px; background: var(--ink-faint); }
+  .col.settled li::before { background: var(--cloud); }
+  .col.open li::before    { background: var(--flag); }
+
+  .note {
+    background: var(--flag-tint);
+    border-left: 2px solid var(--flag);
+    padding: 14px 18px;
+    font-size: 14.5px;
+    line-height: 1.55;
+    color: var(--ink-soft);
+  }
+
+  /* ---------- speculative half ---------- */
+
+  .break {
+    border-top: 2px dashed var(--flag);
+    padding-top: 26px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin-top: 12px;
+  }
+  .break .label {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--flag);
+  }
+  .break h2 { font-size: clamp(27px, 3.8vw, 34px); }
+
+  .st {
+    font-family: var(--mono);
+    font-size: 9.5px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    padding: 3px 8px;
+    border-radius: 3px;
+    white-space: nowrap;
+    display: inline-block;
+  }
+  .st.adopted  { background: var(--cloud-tint); color: var(--cloud); }
+  .st.deferred { background: var(--flag-tint);  color: var(--flag); }
+  .st.rejected { background: var(--stop-tint);  color: var(--stop); }
+  .st.free     { background: var(--rule-soft);  color: var(--ink-soft); }
+
+  .s-stop      { stroke: var(--stop); fill: none; }
+  .s-stop-text { fill: var(--stop); font-family: var(--sans); font-size: 11px; }
+  .s-seam      { fill: var(--ink-faint); font-family: var(--mono); font-size: 11px; font-weight: 600; }
+  .s-dash      { stroke-dasharray: 5 4; }
+
+  .seams { display: flex; flex-direction: column; gap: 1px; background: var(--rule); border: 1px solid var(--rule); }
+  .seam {
+    background: var(--panel);
+    padding: 18px 22px;
+    display: grid;
+    grid-template-columns: 46px minmax(0, 1fr) 92px;
+    gap: 0 18px;
+    align-items: start;
+  }
+  .seam .n { font-family: var(--mono); font-size: 12px; color: var(--ink-faint); padding-top: 3px; font-variant-numeric: tabular-nums; }
+  .seam.is-adopted  .n { color: var(--cloud); }
+  .seam.is-deferred .n { color: var(--flag); }
+  .seam.is-rejected .n { color: var(--stop); }
+  .seam .body { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+  .seam .body p { font-size: 15.5px; line-height: 1.5; color: var(--ink-soft); }
+  .seam .mark { text-align: right; padding-top: 3px; }
+
+  .ladders { display: flex; flex-direction: column; gap: 1px; background: var(--rule); border: 1px solid var(--rule); }
+  .ladder { background: var(--panel); padding: 18px 22px; display: flex; flex-direction: column; gap: 11px; }
+  .ladder h3 { font-size: 12px; font-family: var(--mono); letter-spacing: 0.13em; text-transform: uppercase; color: var(--ink-faint); font-weight: 400; }
+  .rungs { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; font-family: var(--mono); font-size: 12px; }
+  .rung { border: 1px solid var(--rule); border-radius: 3px; padding: 3px 9px; color: var(--ink-soft); }
+  .rung.primary { border-color: var(--cloud); color: var(--cloud); }
+  .rung.last { border-style: dashed; }
+  .chev { color: var(--ink-faint); font-size: 11px; }
+  .trigger { font-size: 14.5px; line-height: 1.5; color: var(--ink-soft); }
+  .trigger b { color: var(--ink); font-weight: 600; }
+
+  .scenario { display: flex; flex-direction: column; gap: 1px; background: var(--rule); border: 1px solid var(--rule); }
+  .beat {
+    background: var(--panel);
+    padding: 18px 22px;
+    display: grid;
+    grid-template-columns: 46px minmax(0, 1fr);
+    gap: 0 18px;
+    align-items: start;
+  }
+  .beat .n { font-family: var(--mono); font-size: 12px; color: var(--flag); padding-top: 3px; font-variant-numeric: tabular-nums; }
+  .beat p { font-size: 15.5px; line-height: 1.55; color: var(--ink-soft); }
+  .beat p b { color: var(--ink); font-weight: 600; }
+  .beat .from { font-family: var(--mono); font-size: 11px; color: var(--ink-faint); margin-top: 7px; display: block; }
+
+  @media (max-width: 620px) {
+    .seam { grid-template-columns: 32px minmax(0, 1fr); }
+    .seam .mark { grid-column: 2; text-align: left; padding-top: 8px; }
+    .beat { grid-template-columns: 32px minmax(0, 1fr); gap: 0 14px; }
+  }
+
+  footer {
+    border-top: 1px solid var(--rule);
+    padding-top: 22px;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    line-height: 1.9;
+    color: var(--ink-faint);
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  @media (max-width: 620px) {
+    .stage { grid-template-columns: 32px minmax(0, 1fr); gap: 0 14px; }
+    .stage .who { grid-column: 2; text-align: left; padding-top: 8px; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+</style>
+
+<div class="wrap">
+
+  <header class="masthead">
+    <h1>Synapse</h1>
+    <p class="thesis">Every engineer's coding agent learns something. None of them tell each other. Synapse is the listener in between.</p>
+    <div class="meta">
+      <span><b>Status</b> &nbsp;approved design, pre-implementation</span>
+      <span><b>Spec</b> &nbsp;2026-07-25, amended 2026-08-03 ×3</span>
+      <span><b>Event</b> &nbsp;Snapdragon Multiverse, build week Aug 3–7</span>
+    </div>
+  </header>
+
+  <section>
+    <div class="eyebrow">The idea</div>
+    <div class="prose">
+      <p>When three people chase the same bug, their three agents each rediscover the same things in isolation. Synapse pools what they learn — without anyone writing a note and without changing how they work.</p>
+      <p>It works by reading a file the agent already writes. Claude Code appends every turn to <code>~/.claude/projects/&lt;slug&gt;/&lt;uuid&gt;.jsonl</code>; Synapse tails it. A small model on the developer's own NPU turns each chunk of that transcript into a handful of structured <em>findings</em> — a learning, a decision, a dead end, an open question. Those findings, and nothing else, leave the machine. A larger model in the cloud merges everyone's findings into one shared memory, and teammates' agents pull from it over MCP when they ask.</p>
+    </div>
+
+    <div class="invariant prose">
+      <div class="label">The invariant everything else serves</div>
+      <p>Raw work never leaves the device. The <span class="m">Finding</span> is the trust boundary — above it, only abstracted text crosses the wire; below it, any model is fair game.</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="eyebrow">The flow, end to end</div>
+    <h2>One transcript in, ranked findings back out</h2>
+    <p class="prose">Read it as two planes sharing one service: transcripts flow <em>down</em> the left column and across to the service (the data plane), and queries come <em>back</em> along the bottom rail (the retrieval plane). The dashed wall is the only thing the product really promises.</p>
+
+    <figure>
+      <div class="canvas">
+        <svg viewBox="0 0 960 664" role="img" aria-label="Synapse end-to-end architecture: a coding agent's JSONL transcript passes through a five-stage edge worker on the developer's machine — file follower, source adapter, segmenter, distiller, sync client — after which only distilled findings cross a dashed device boundary to the Synapse service, where an ingest API, synthesis on Cloud AI 100, and an MCP server return ranked findings to the agent.">
+          <defs>
+            <marker id="ar-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" class="a-ink"/>
+            </marker>
+            <marker id="ar-edge" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" class="a-edge"/>
+            </marker>
+            <marker id="ar-cloud" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" class="a-cloud"/>
+            </marker>
+          </defs>
+
+          <!-- zones -->
+          <rect x="44" y="104" width="340" height="492" rx="10" class="s-zone-edge"/>
+          <text x="60" y="128" class="s-zonelabel" fill="var(--edge)">EDGE WORKER · SNAPDRAGON X ELITE</text>
+
+          <rect x="572" y="206" width="344" height="334" rx="10" class="s-zone-cloud"/>
+          <text x="588" y="230" class="s-zonelabel" fill="var(--cloud)">SYNAPSE SERVICE · ANY LAPTOP</text>
+
+          <!-- agent -->
+          <rect x="64" y="30" width="300" height="52" rx="6" class="s-box"/>
+          <text x="84" y="51" class="s-title">Coding agent — Claude Code</text>
+          <text x="84" y="68" class="s-sub">writes ~/.claude/projects/*.jsonl, unmodified</text>
+          <line x1="214" y1="86" x2="214" y2="140" class="s-line" marker-end="url(#ar-ink)"/>
+
+          <!-- edge stages -->
+          <rect x="68" y="150" width="292" height="52" rx="6" class="s-box-edge"/>
+          <text x="86" y="171" class="s-title">File follower</text>
+          <text x="86" y="188" class="s-sub">tail · rotation · partial &amp; malformed lines</text>
+
+          <rect x="68" y="242" width="292" height="52" rx="6" class="s-box-edge"/>
+          <text x="86" y="263" class="s-title">Source adapter</text>
+          <text x="86" y="280" class="s-sub">ClaudeCodeSource · agent-agnostic normalize</text>
+
+          <rect x="68" y="334" width="292" height="52" rx="6" class="s-box-edge"/>
+          <text x="86" y="355" class="s-title">Segmenter + compaction</text>
+          <text x="86" y="372" class="s-sub">turn boundary AND token budget</text>
+
+          <rect x="68" y="426" width="292" height="52" rx="6" class="s-box-edge"/>
+          <text x="86" y="447" class="s-title">Distiller</text>
+          <text x="86" y="464" class="s-sub">~4B SLM · GenieX on the Hexagon NPU</text>
+
+          <rect x="68" y="518" width="292" height="52" rx="6" class="s-box-edge"/>
+          <text x="86" y="539" class="s-title">Sync client</text>
+          <text x="86" y="556" class="s-sub">POST findings · join shared session</text>
+
+          <line x1="214" y1="206" x2="214" y2="236" class="s-line-edge" marker-end="url(#ar-edge)"/>
+          <line x1="214" y1="298" x2="214" y2="328" class="s-line-edge" marker-end="url(#ar-edge)"/>
+          <line x1="214" y1="390" x2="214" y2="420" class="s-line-edge" marker-end="url(#ar-edge)"/>
+          <line x1="214" y1="482" x2="214" y2="512" class="s-line-edge" marker-end="url(#ar-edge)"/>
+
+          <text x="226" y="226" class="s-flow">JSONL lines</text>
+          <text x="226" y="318" class="s-flow">AgentEvent</text>
+          <text x="226" y="410" class="s-flow">Segment ≤ ~2.5K tok</text>
+          <text x="226" y="502" class="s-flow">Finding[]</text>
+
+          <!-- device boundary -->
+          <line x1="478" y1="16" x2="478" y2="648" class="s-bound"/>
+          <rect x="456" y="52" width="40" height="212" class="s-mask"/>
+          <text x="470" y="158" class="s-bell" text-anchor="middle" transform="rotate(-90 470 158)">DEVICE BOUNDARY</text>
+          <text x="488" y="158" class="s-bell-sub" text-anchor="middle" transform="rotate(-90 488 158)">only Findings cross</text>
+
+          <!-- crossing -->
+          <line x1="360" y1="544" x2="588" y2="280" class="s-line-edge" marker-end="url(#ar-edge)"/>
+          <text x="467" y="400" class="s-flow" text-anchor="middle" transform="rotate(-49 467 400)">Finding[] over HTTPS</text>
+
+          <!-- service stages -->
+          <rect x="596" y="250" width="296" height="52" rx="6" class="s-box-cloud"/>
+          <text x="614" y="271" class="s-title">Ingest API</text>
+          <text x="614" y="288" class="s-sub">findings in · tagged contributor + shared_id</text>
+
+          <rect x="596" y="350" width="296" height="52" rx="6" class="s-box-cloud"/>
+          <text x="614" y="371" class="s-title">Synthesis</text>
+          <text x="614" y="388" class="s-sub">Llama-3.1-8B on Cloud AI 100 (hosted)</text>
+
+          <rect x="596" y="450" width="296" height="52" rx="6" class="s-box-cloud"/>
+          <text x="614" y="471" class="s-title">MCP server</text>
+          <text x="614" y="488" class="s-sub">HTTP/SSE · create · join · query</text>
+
+          <line x1="744" y1="306" x2="744" y2="344" class="s-line-cloud" marker-end="url(#ar-cloud)"/>
+          <line x1="744" y1="406" x2="744" y2="444" class="s-line-cloud" marker-end="url(#ar-cloud)"/>
+          <text x="756" y="323" class="s-flow">merge · dedupe · flag conflicts</text>
+          <text x="756" y="423" class="s-flow">SessionContext + Conflict[]</text>
+
+          <!-- retrieval rail back to the agent -->
+          <path d="M 744 506 L 744 630 L 16 630 L 16 56 L 58 56" class="s-line-cloud" stroke-dasharray="1 0" marker-end="url(#ar-cloud)"/>
+          <text x="420" y="620" class="s-flow" text-anchor="middle">retrieval plane — query(nl) → ranked Finding[], pull-only</text>
+        </svg>
+      </div>
+      <figcaption>Reconstructed from <a href="https://miro.com/app/board/uXjVH4YqbFQ=/?moveToWidget=3458764679158496052">Synapse — End-to-End Architecture Flow</a> on the Snapdragon Workspace board, updated to the 2026-08-03 amendments (GenieX on the edge, hosted Cirrascale AI-100 in the cloud). The follower is drawn ahead of the source adapter here, which is the actual data-flow order.</figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <div class="eyebrow">Major components</div>
+    <h2>Eight stages and three things that cut across them</h2>
+    <p class="prose">Numbered in the order a transcript travels. Each stage is defined by what it takes in and what it hands on — which is why the contracts get frozen before any of them get written.</p>
+
+    <div class="stages">
+
+      <div class="band edge">On device — nothing here talks to the network except stage 5</div>
+
+      <div class="stage on-edge">
+        <div class="n">01</div>
+        <div class="body">
+          <h3>File follower</h3>
+          <p>Tails the agent's session JSONL as it grows. Handles rotation, partial trailing lines, and malformed JSON without crashing — the transcript is being written live by someone else's process.</p>
+          <div class="io"><b>in</b> file on disk &nbsp;→&nbsp; <b>out</b> raw JSONL lines</div>
+        </div>
+        <div class="who"><span>Akhil</span></div>
+      </div>
+
+      <div class="stage on-edge">
+        <div class="n">02</div>
+        <div class="body">
+          <h3>Source adapter</h3>
+          <p>Normalizes one agent's transcript format into the internal event shape. <span class="m">ClaudeCodeSource</span> is the primary; a <span class="m">CodexSource</span> is the agent-agnostic proof and a stretch goal. Adding an agent means adding one adapter and nothing else.</p>
+          <div class="io"><b>in</b> JSONL lines &nbsp;→&nbsp; <b>out</b> AgentEvent</div>
+        </div>
+        <div class="who"><span>Akhil</span></div>
+      </div>
+
+      <div class="stage on-edge">
+        <div class="n">03</div>
+        <div class="body">
+          <h3>Segmenter + compaction</h3>
+          <p>Batches events into bounded chunks, splitting on turn boundary <em>and</em> on a token budget, so one monster turn becomes several sub-segments rather than one unprocessable blob. Compaction is deterministic code, not a model: truncate tool results head and tail, trim thinking, drop trivial calls, strip binary.</p>
+          <div class="io"><b>in</b> AgentEvent &nbsp;→&nbsp; <b>out</b> Segment (~2–2.5K tok)</div>
+        </div>
+        <div class="who"><span>Akhil</span></div>
+      </div>
+
+      <div class="stage on-edge">
+        <div class="n">04</div>
+        <div class="body">
+          <h3>Distiller</h3>
+          <p>The one piece of judgment on the device. A ~4B instruct model turns a segment into structured findings, abstracting rather than quoting — the redaction is a property of the prompt, measured by a deterministic verbatim-copy metric rather than assumed.</p>
+          <div class="io"><b>in</b> Segment &nbsp;→&nbsp; <b>out</b> Finding[]</div>
+        </div>
+        <div class="who"><span>Aditya</span></div>
+      </div>
+
+      <div class="stage on-edge">
+        <div class="n">05</div>
+        <div class="body">
+          <h3>Sync client</h3>
+          <p>Pushes findings to the service tagged with contributor and shared session id, and performs the join that binds a local agent session to a shared one. Retries on 5xx. This is the only outbound path on the device.</p>
+          <div class="io"><b>in</b> Finding[] &nbsp;→&nbsp; <b>out</b> HTTPS POST</div>
+        </div>
+        <div class="who"><span>Akhil</span></div>
+      </div>
+
+      <div class="band cloud">Service — runs on any laptop, reaches the accelerator over HTTPS</div>
+
+      <div class="stage on-cloud">
+        <div class="n">06</div>
+        <div class="body">
+          <h3>Ingest API</h3>
+          <p>Receives findings from every member's worker and handles session create and join. Frozen as a contract on day zero so the sync client can be built and tested against a mock server before the service exists.</p>
+          <div class="io"><b>in</b> HTTPS POST &nbsp;→&nbsp; <b>out</b> Finding[] into the session</div>
+        </div>
+        <div class="who"><span>Siddsing</span></div>
+      </div>
+
+      <div class="stage on-cloud">
+        <div class="n">07</div>
+        <div class="body">
+          <h3>Synthesis</h3>
+          <p>The reduce half of the map-reduce. Merges each new batch into the running shared memory, deduplicates, flags contradictions as conflicts, organizes against the session's stated purpose, and filters out trivia the small model over-produced. Runs on Llama-3.1-8B on hosted Cloud AI 100.</p>
+          <div class="io"><b>in</b> Finding[] &nbsp;→&nbsp; <b>out</b> SessionContext + Conflict[]</div>
+        </div>
+        <div class="who"><span>Siddsing</span></div>
+      </div>
+
+      <div class="stage on-cloud">
+        <div class="n">08</div>
+        <div class="body">
+          <h3>MCP server</h3>
+          <p>The agent-facing surface, over remote HTTP/SSE: <span class="m">create_session</span>, <span class="m">join_session</span>, <span class="m">query</span>. Retrieval is the large model reading the query against the shared memory and ranking, not a vector index. Nothing reaches an agent that has not joined a session — and once it has, keeping it aware is a design problem in its own right (see <a href="#awareness">retrieval &amp; awareness</a>).</p>
+          <div class="io"><b>in</b> natural-language query &nbsp;→&nbsp; <b>out</b> ranked Finding[]</div>
+        </div>
+        <div class="who"><span>Siddsing</span></div>
+      </div>
+
+      <div class="band">Cross-cutting</div>
+
+      <div class="stage">
+        <div class="n">·</div>
+        <div class="body">
+          <h3>Contracts + fixtures</h3>
+          <p>Frozen before anything else starts, co-authored by all three. Hand-written segment blobs with golden findings are the shared ground truth: the distiller is built against those exact blobs and the segmenter must reproduce them, so the two tracks cannot drift apart.</p>
+          <div class="io"><b>role</b> the thing that makes three parallel tracks safe</div>
+        </div>
+        <div class="who"><span>all three</span></div>
+      </div>
+
+      <div class="stage">
+        <div class="n">·</div>
+        <div class="body">
+          <h3>ModelProvider layer</h3>
+          <p>Every model-using component depends on one interface. Swapping the NPU for Ollama, or Cloud AI 100 for Claude, is a config line — which is also the offline fallback if venue WiFi dies.</p>
+          <div class="io"><b>in</b> messages + optional schema &nbsp;→&nbsp; <b>out</b> ModelResult</div>
+        </div>
+        <div class="who"><span>Siddsing</span></div>
+      </div>
+
+      <div class="stage">
+        <div class="n">·</div>
+        <div class="body">
+          <h3>Eval / benchmark harness</h3>
+          <p>Runs the fixture corpus across providers and tables quality, cost, and latency. It exists because <span class="m">usage</span> and <span class="m">latency_ms</span> are in the contract, so it costs almost no extra code — and it is the answer to "why not just call Claude?"</p>
+          <div class="io"><b>in</b> corpus × provider &nbsp;→&nbsp; <b>out</b> quality / cost / latency table</div>
+        </div>
+        <div class="who"><span>Aditya</span></div>
+      </div>
+
+    </div>
+  </section>
+
+  <section>
+    <div class="eyebrow">What moves between them</div>
+    <h2>The contracts</h2>
+    <p class="prose">Seven shapes carry the whole system. Freezing them on day zero is what lets three people build in parallel without a daily integration meeting.</p>
+
+    <div class="tablewrap">
+      <table>
+        <thead>
+          <tr><th>Contract</th><th>What it is</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>AgentEvent</td><td>One normalized turn part — role, kind (text / thinking / tool_use / tool_result), content, timestamp, cwd, branch. Agent-agnostic and internal to the worker.</td></tr>
+          <tr><td>Segment</td><td>A bounded run of events, split on turn boundary and token budget, deterministically compacted. The distiller's unit of work.</td></tr>
+          <tr><td>Finding</td><td>The atom of shared knowledge: type (learning / decision / dead_end / open_question), abstracted text, contributor, timestamp, provenance. This is what crosses the device boundary.</td></tr>
+          <tr><td>SynapseSession</td><td>The shared session: id, stated purpose, members. Opt-in by construction — you create one or you join one.</td></tr>
+          <tr><td>LocalBinding</td><td>Maps a local agent session to a shared session id plus contributor. Set once, at join.</td></tr>
+          <tr><td>Conflict</td><td>Two findings that disagree, plus a description. Surfaced rather than silently resolved.</td></tr>
+          <tr><td>SessionContext</td><td>The merged shared working memory with its conflicts, organized against the session's purpose. What retrieval reads.</td></tr>
+          <tr><td>ModelProvider</td><td><span class="m">complete(messages, schema?) → ModelResult</span> carrying data, token usage, latency, and whether the output validated. Usage and latency being in the contract is what makes the benchmark nearly free.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <div class="eyebrow">The model layer</div>
+    <h2>A mode is a pair</h2>
+    <p class="prose">Nothing in the pipeline knows which model it is talking to. A run picks one distiller and one synthesizer, resolved from config at startup — so off-target development on a Mac, on-target demo, and CI all execute the identical code path.</p>
+
+    <div class="tablewrap">
+      <table>
+        <thead>
+          <tr><th>Provider</th><th>Where</th><th>Wraps</th><th>Role</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>FakeProvider</td><td><span class="tag test">test</span></td><td>scripted deterministic output</td><td>Every unit and contract test. No keys, no GPU, no network — quality is measured by the eval harness, never gated in CI.</td></tr>
+          <tr><td>NPUProvider</td><td><span class="tag edge">on-target</span></td><td><span class="m">geniex serve</span> at localhost:18181</td><td>Distillation on the Hexagon NPU. Candidates: Qwen3-4B-Instruct, Gemma-4-E4B, Qwen3-1.7B — picked by bake-off, not on paper.</td></tr>
+          <tr><td>AIC100Provider</td><td><span class="tag cloud">on-target</span></td><td>hosted Cirrascale Inference Cloud</td><td>Synthesis on Cloud AI 100. Llama-3.1-8B; verified live and reachable from anywhere, so it is in the loop from day one.</td></tr>
+          <tr><td>OllamaProvider</td><td><span class="tag test">off-target</span></td><td>local Ollama</td><td>Mac dev loop, and the offline fallback for both roles if the venue network fails.</td></tr>
+          <tr><td>ClaudeProvider</td><td><span class="tag test">off-target</span></td><td>Anthropic SDK</td><td>The quality and cost baseline the small models are measured against — and, at design time, the author of the distiller's few-shot examples.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p class="note">Ollama, Cirrascale, and GenieX all speak OpenAI-compatible HTTP and differ only by base URL, so four of the five providers share one adapter. Structured output is capability-flagged rather than assumed: neither the NPU nor Cirrascale honors a JSON schema, so those calls use prompt-instructed JSON with a tolerant parse and one retry, and the conformance test <em>measures</em> the schema-valid rate per provider.</p>
+  </section>
+
+  <section>
+    <div class="eyebrow">Why it's worth doing</div>
+    <h2>Many people, one memory</h2>
+    <p class="prose">Everything above describes one machine. The point is what happens when three of them are pointed at the same session: each teammate holds a different slice of the same problem, and today those slices never meet.</p>
+
+    <figure>
+      <div class="canvas">
+        <svg viewBox="0 0 900 408" role="img" aria-label="Three teammates each running an agent and edge worker on their own Copilot+ PC send findings into a shared Synapse service, where ingest, synthesis and shared working memory merge them, and an MCP retrieval rail carries ranked findings back up to all three agents.">
+          <defs>
+            <marker id="b-edge" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" class="a-edge"/>
+            </marker>
+            <marker id="b-cloud" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" class="a-cloud"/>
+            </marker>
+          </defs>
+
+          <!-- contributors -->
+          <rect x="40" y="48" width="230" height="60" rx="6" class="s-box-edge"/>
+          <text x="58" y="72" class="s-title">Akhil</text>
+          <text x="58" y="90" class="s-sub">agent + edge worker · own PC</text>
+
+          <rect x="330" y="48" width="230" height="60" rx="6" class="s-box-edge"/>
+          <text x="348" y="72" class="s-title">Aditya</text>
+          <text x="348" y="90" class="s-sub">agent + edge worker · own PC</text>
+
+          <rect x="620" y="48" width="230" height="60" rx="6" class="s-box-edge"/>
+          <text x="638" y="72" class="s-title">Siddsing</text>
+          <text x="638" y="90" class="s-sub">agent + edge worker · own PC</text>
+
+          <!-- converge -->
+          <line x1="155" y1="112" x2="404" y2="164" class="s-line-edge" marker-end="url(#b-edge)"/>
+          <line x1="445" y1="112" x2="445" y2="164" class="s-line-edge" marker-end="url(#b-edge)"/>
+          <line x1="735" y1="112" x2="486" y2="164" class="s-line-edge" marker-end="url(#b-edge)"/>
+          <text x="458" y="142" class="s-flow">Finding[]</text>
+
+          <!-- service -->
+          <rect x="310" y="152" width="270" height="212" rx="10" class="s-zone-cloud"/>
+
+          <rect x="330" y="172" width="230" height="44" rx="6" class="s-box-cloud"/>
+          <text x="348" y="199" class="s-title">Ingest API</text>
+
+          <rect x="330" y="236" width="230" height="44" rx="6" class="s-box-cloud"/>
+          <text x="348" y="256" class="s-title">Synthesis</text>
+          <text x="348" y="271" class="s-sub">merge · dedupe · flag conflicts</text>
+
+          <rect x="330" y="300" width="230" height="44" rx="6" class="s-box-cloud"/>
+          <text x="348" y="320" class="s-title">Shared working memory</text>
+          <text x="348" y="335" class="s-sub">SessionContext, organized by purpose</text>
+
+          <line x1="445" y1="220" x2="445" y2="230" class="s-line-cloud" marker-end="url(#b-cloud)"/>
+          <line x1="445" y1="284" x2="445" y2="294" class="s-line-cloud" marker-end="url(#b-cloud)"/>
+
+          <text x="445" y="386" class="s-zonelabel" fill="var(--cloud)" text-anchor="middle">SYNAPSE SERVICE · CLOUD AI 100</text>
+
+          <!-- retrieval rail -->
+          <path d="M 560 322 L 878 322 L 878 20 L 155 20" class="s-line-cloud"/>
+          <line x1="155" y1="20" x2="155" y2="42" class="s-line-cloud" marker-end="url(#b-cloud)"/>
+          <line x1="445" y1="20" x2="445" y2="42" class="s-line-cloud" marker-end="url(#b-cloud)"/>
+          <line x1="735" y1="20" x2="735" y2="42" class="s-line-cloud" marker-end="url(#b-cloud)"/>
+          <text x="445" y="13" class="s-flow" text-anchor="middle">MCP · query(nl) → ranked Finding[], minutes later</text>
+        </svg>
+      </div>
+      <figcaption>Reconstructed from <a href="https://miro.com/app/board/uXjVH4YqbFQ=/?moveToWidget=3458764679158721810">Synapse — Multi-User Shared Intelligence</a>. One teammate creates the session and declares its purpose; the others join with one command. Every finding is tagged with its contributor and the shared session id, which is what lets synthesis attribute and reconcile.</figcaption>
+    </figure>
+  </section>
+
+  <section id="awareness">
+    <div class="eyebrow">Retrieval &amp; awareness</div>
+    <h2>Making the agent remember to remember</h2>
+    <div class="prose">
+      <p>Retrieval being agent-initiated creates its own failure: the agent only pulls if it knows memory exists, knows it is relevant right now, and knows whether anything has changed since it last looked. A tool sitting in a tool list conveys none of that. The result is a user typing <em>"check the shared learnings first"</em> at the top of every task — which is exactly the manual labour the product claims to remove.</p>
+      <p>So awareness gets designed rather than assumed. The mechanism that makes it honest is that <strong>joining a session is the consent event.</strong> Before an agent joins, Synapse is inert: the tools are listed, nothing is injected, footprint zero. Joining arms everything below it, for that session only. The promise is not "we never push" — it is "we push nothing until you opt in, and only ever pointers, never payload."</p>
+    </div>
+
+    <div class="invariant prose">
+      <div class="label">The rule that replaces "pull-only"</div>
+      <p>Membership is the license. Not joined, nothing happens; joined, your agent is kept aware — with headlines, while the bodies still come from a <span class="m">query()</span> the agent chose to make.</p>
+    </div>
+
+    <figure>
+      <div class="canvas">
+        <svg viewBox="0 0 1000 400" role="img" aria-label="A timeline of one agent session. Before joining, Synapse is dormant and injects nothing. On join_session an arrival briefing is injected carrying purpose, finding counts, topics and conflicts. On subsequent turns a watermark is checked silently. When a teammate's findings merge and the shared memory version moves from v14 to v17, the next turn injects a freshness pointer naming the changed topics, and the agent calls query itself.">
+          <defs>
+            <marker id="d-cloud" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" class="a-cloud"/>
+            </marker>
+          </defs>
+
+          <text x="140" y="115" class="s-flow" text-anchor="end">agent turns</text>
+          <text x="140" y="200" class="s-flow" text-anchor="end">synapse injects</text>
+          <text x="140" y="292" class="s-flow" text-anchor="end">shared memory</text>
+
+          <!-- zones -->
+          <rect x="158" y="68" width="150" height="296" rx="8" class="s-box"/>
+          <text x="233" y="88" class="s-flow" text-anchor="middle" fill="var(--ink-faint)">not a member</text>
+
+          <rect x="340" y="68" width="636" height="296" rx="8" class="s-zone-cloud"/>
+          <text x="658" y="88" class="s-zonelabel" text-anchor="middle" fill="var(--cloud)">MEMBER — AWARENESS ARMED</text>
+
+          <line x1="324" y1="44" x2="324" y2="372" class="s-bound"/>
+          <text x="324" y="34" class="s-bell" text-anchor="middle">join_session()</text>
+
+          <!-- turn markers -->
+          <rect x="199" y="96" width="68" height="30" rx="5" class="s-box"/>
+          <text x="233" y="116" class="s-sub" text-anchor="middle">turn 0</text>
+          <rect x="396" y="96" width="68" height="30" rx="5" class="s-box-cloud"/>
+          <text x="430" y="116" class="s-sub" text-anchor="middle">turn 1</text>
+          <rect x="576" y="96" width="68" height="30" rx="5" class="s-box-cloud"/>
+          <text x="610" y="116" class="s-sub" text-anchor="middle">turn 2</text>
+          <rect x="756" y="96" width="68" height="30" rx="5" class="s-box-cloud"/>
+          <text x="790" y="116" class="s-sub" text-anchor="middle">turn 3</text>
+          <rect x="896" y="96" width="68" height="30" rx="5" class="s-box-cloud"/>
+          <text x="930" y="116" class="s-sub" text-anchor="middle">turn 4</text>
+
+          <!-- injections -->
+          <text x="233" y="196" class="s-flow" text-anchor="middle" fill="var(--ink-faint)">dormant</text>
+          <text x="233" y="210" class="s-flow" text-anchor="middle" fill="var(--ink-faint)">— nothing —</text>
+
+          <rect x="356" y="170" width="200" height="54" rx="5" class="s-box-cloud"/>
+          <text x="368" y="188" class="s-flow" fill="var(--cloud)">arrival briefing</text>
+          <text x="368" y="203" class="s-flow">purpose · 14 findings</text>
+          <text x="368" y="217" class="s-flow">5 topics · 2 conflicts</text>
+
+          <text x="610" y="200" class="s-flow" text-anchor="middle" fill="var(--ink-faint)">checked · silent</text>
+
+          <rect x="676" y="170" width="200" height="54" rx="5" class="s-box-cloud"/>
+          <text x="688" y="188" class="s-flow" fill="var(--cloud)">freshness pointer</text>
+          <text x="688" y="203" class="s-flow">3 new · timing-window</text>
+          <text x="688" y="217" class="s-flow">→ agent calls query()</text>
+
+          <text x="930" y="200" class="s-flow" text-anchor="middle" fill="var(--ink-faint)">checked · silent</text>
+
+          <!-- memory version -->
+          <polyline points="356,300 700,300 700,282 970,282" class="s-line-cloud"/>
+          <text x="430" y="294" class="s-flow">v14</text>
+          <text x="800" y="276" class="s-flow">v17</text>
+          <circle cx="700" cy="291" r="4" fill="var(--cloud)"/>
+          <line x1="700" y1="302" x2="700" y2="322" class="s-line-cloud"/>
+          <text x="700" y="338" class="s-flow" text-anchor="middle">a teammate's findings merge — watermark moves</text>
+        </svg>
+      </div>
+      <figcaption>The pointer fires on the first turn <em>after</em> the watermark moved, not on a timer, and stays silent when nothing changed. Naming the changed topics inline lets the agent decide whether to spend a query at all.</figcaption>
+    </figure>
+
+    <h3 style="margin-top:8px">Four signals, cheapest first</h3>
+
+    <div class="seams">
+      <div class="seam is-adopted">
+        <div class="n">①</div>
+        <div class="body">
+          <h3>Ambient — the tool description is the nudge</h3>
+          <p>The one signal that is always present and costs nothing: how the tools describe themselves. Written in trigger voice rather than API voice — not <em>"queries the shared memory"</em> but <em>"call before exploring an unfamiliar subsystem, when debugging something a teammate may also be on, or before concluding something is a dead end."</em> The MCP server's <span class="m">instructions</span> field carries the same framing at the server level, which is what a client uses to decide the server is worth reaching for at all.</p>
+          <p>This tier is pure MCP, so it works in any client with no install — the floor that keeps the agent-agnostic claim intact.</p>
+        </div>
+        <div class="mark"><span class="st adopted">build week</span></div>
+      </div>
+
+      <div class="seam is-adopted">
+        <div class="n">②</div>
+        <div class="body">
+          <h3>Arrival briefing — the late-joiner answer</h3>
+          <p><span class="m">join_session</span> returns a briefing in its own tool result: the session purpose, who is in it, finding counts by type, the topic labels present, open conflicts, and the current memory version. Someone joining at hour three learns in one call that forty findings predate them and what they are about — without reading any of them.</p>
+          <p>"Joined late" is not the only way to arrive cold, though. A new terminal tomorrow morning, a resumed session, and a context compaction all produce an agent that has forgotten. The <span class="m">SessionStart</span> hook re-injects the briefing on <span class="m">startup</span>, <span class="m">resume</span>, <span class="m">clear</span> and <span class="m">compact</span> — that last matcher being the one that matters most, since compaction is precisely when an agent silently loses the fact that team memory exists.</p>
+        </div>
+        <div class="mark"><span class="st adopted">join call</span><br><span class="st deferred">hook</span></div>
+      </div>
+
+      <div class="seam is-deferred">
+        <div class="n">③</div>
+        <div class="body">
+          <h3>Freshness pointer — speak only on change</h3>
+          <p>A <span class="m">UserPromptSubmit</span> hook checks a cheap watermark endpoint every turn and injects a single line <em>only</em> when the version has moved since this agent last looked, naming the topics that changed. Every other turn it is silent. That silence is the feature: a nudge that fires constantly is one the agent learns to skip past.</p>
+          <p>The constraint shapes the implementation. This hook runs on the critical path of every prompt with a thirty-second budget, so it can never make a model call — it is one small HTTP request against a precomputed watermark, capped around two seconds, and it fails open.</p>
+        </div>
+        <div class="mark"><span class="st deferred">hook pack</span></div>
+      </div>
+
+      <div class="seam is-deferred">
+        <div class="n">④</div>
+        <div class="body">
+          <h3>Relevance trigger — ship it as a skill</h3>
+          <p>Session start is the wrong moment for most retrieval; the right moment is when the agent is about to do something the team may already have done. That is precisely the problem skills solve — a description the model reads and matches against what it is currently doing. So Synapse ships one, and it auto-loads on relevant work the same way a brainstorming or debugging skill does:</p>
+          <div class="io" style="white-space:pre-wrap; padding:12px 14px; background:var(--rule-soft); border-radius:4px; margin-top:4px">name: synapse-shared-memory
+description: Use when starting work in a joined Synapse session — before
+  exploring an unfamiliar subsystem, when debugging an issue a teammate may
+  also be on, when an error looks like it could already be known, or before
+  concluding something is a dead end. Checks what the team already learned.</div>
+          <p>The skill body is short: check the watermark, call <span class="m">query</span> with what you are about to work on, and say plainly when memory had nothing. That last instruction matters — an agent that silently finds nothing is indistinguishable from one that never looked.</p>
+        </div>
+        <div class="mark"><span class="st deferred">hook pack</span></div>
+      </div>
+    </div>
+
+    <h3 style="margin-top:8px">The mechanics underneath</h3>
+
+    <div class="tablewrap">
+      <table>
+        <thead>
+          <tr><th>Piece</th><th>What it does</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>memory_version</td><td>A counter on the shared session, bumped once per synthesis merge. The single source of "has anything changed", and cheap enough to serve on every turn.</td></tr>
+          <tr><td>last_seen_version</td><td>Per member, advanced whenever that agent calls <span class="m">query</span>. The difference against <span class="m">memory_version</span> is the entire staleness calculation.</td></tr>
+          <tr><td>GET /watermark</td><td>Returns <span class="m">{version, new_since, topics, conflicts}</span> and nothing else — precomputed, no model call, safe to hit every turn.</td></tr>
+          <tr><td>briefing budget</td><td>Hard-capped near 200 tokens. Headlines and topic labels get pushed; finding bodies never do. The reason is context economy rather than principle — bodies grow with session length, headlines do not.</td></tr>
+          <tr><td>contributor filter</td><td>An agent is never shown findings distilled from its own work. It already knows them, and echoing them back is the fastest way to teach it that memory is noise.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p class="note"><b>Two rules that keep it from becoming a liability.</b> Every hook <em>fails open</em> — if Synapse is unreachable, slow, or returning nonsense, the hook exits quietly and the agent works exactly as it would without Synapse installed. A memory service that can break someone's coding session is worse than no memory service. And the pointer is rate-limited independently of the watermark, so a burst of teammate activity produces one notice rather than one per turn.</p>
+  </section>
+
+  <section>
+    <div class="eyebrow">Where it stands</div>
+    <h2>Settled, and still open</h2>
+
+    <div class="cols">
+      <div class="col settled">
+        <h3>Settled</h3>
+        <ul>
+          <li>Passive capture is real — confirmed against a 5,579-line session with 1,212 tool calls. That corpus is also the fixture and eval set.</li>
+          <li>Cloud AI 100 is a hosted endpoint, verified end-to-end on Aug 3. No box to provision; the spike is retired.</li>
+          <li>The NPU path is <span class="m">geniex serve</span>, an OpenAI-compatible server — no custom runtime bring-up.</li>
+          <li>Frontier models are design-time only: they author few-shots and diagnose eval failures. Nothing frontier sits in the runtime path.</li>
+        </ul>
+      </div>
+      <div class="col open">
+        <h3>Still open</h3>
+        <ul>
+          <li>Usable compiled context length of the GenieX bundle — likely 4K, must be measured. The segment budget keys off it.</li>
+          <li>Distiller model choice, decided by bake-off across Qwen3-4B, Gemma-4-E4B and Qwen3-1.7B on schema-valid rate, prefill throughput and power.</li>
+          <li>Synthesis quality on a single 8B model — 70B is not on our key. The honest Claude-vs-8B delta is the demo narrative rather than a thing to hide.</li>
+          <li>Expect the 4B to land around 0.5–0.7 against Claude goldens. Recorded up front so results get read against expectations, not hopes.</li>
+        </ul>
+      </div>
+    </div>
+
+    <p class="note">Note on the Miro board: the <a href="https://miro.com/app/board/uXjVH4YqbFQ=/?moveToWidget=3458764679158721830">On/Off-Target ModelProvider</a> diagram still shows the pre-amendment runtimes (ONNX-QNN for the NPU, self-hosted vLLM-qaic for AI-100). Both were replaced on Aug 3 by GenieX and hosted Cirrascale. Four more diagrams on that board — segment lifecycle, finding lifecycle, session lifecycle, and event flow over time — are not covered here and are the natural next layer of detail.</p>
+  </section>
+
+  <div class="break">
+    <div class="label">Everything below this line is not committed</div>
+    <h2>Optional modules, fallbacks, and the optimistic case</h2>
+    <p class="prose">The design above is what ships. What follows is the shape of the system if more of it lands — plus the ladders it degrades down when something doesn't. Both are written in advance for the same reason: a fallback decided under demo pressure is a worse fallback.</p>
+  </div>
+
+  <section>
+    <div class="eyebrow">Optional module · frontier models</div>
+    <h2>Where a frontier model may attach</h2>
+    <p class="prose">"Use Claude for the smart part" is four different proposals wearing one coat, and they have different answers. Sorting them out produced the rule the whole product rests on: <strong>the Finding is the trust boundary.</strong> Raw work never crosses it. Below it, any model is legal — including the best one available.</p>
+
+    <figure>
+      <div class="canvas">
+        <svg viewBox="0 0 980 480" role="img" aria-label="Four seams where a frontier model could attach to Synapse, drawn against the Finding boundary. Seam one, design-time authoring of few-shots and prompt revisions, is adopted and offline. Seam two, frontier synthesis and retrieval below the boundary, is legal by construction and a single config line. Seam three, escalating raw segments up to a frontier API, crosses the boundary and is rejected. Seam four, an agent contributing a self-written digest back through the local distiller, is adopted but deferred.">
+          <defs>
+            <marker id="c-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" class="a-ink"/>
+            </marker>
+            <marker id="c-cloud" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" class="a-cloud"/>
+            </marker>
+            <marker id="c-edge" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" class="a-edge"/>
+            </marker>
+          </defs>
+
+          <!-- boundary -->
+          <line x1="408" y1="26" x2="408" y2="464" class="s-bound"/>
+
+          <!-- runtime spine -->
+          <rect x="30" y="210" width="150" height="54" rx="6" class="s-box"/>
+          <text x="46" y="234" class="s-title">Raw session</text>
+          <text x="46" y="251" class="s-sub">JSONL on disk</text>
+
+          <rect x="228" y="210" width="150" height="54" rx="6" class="s-box-edge"/>
+          <text x="244" y="234" class="s-title">Local distiller</text>
+          <text x="244" y="251" class="s-sub">~4B on the NPU</text>
+
+          <rect x="438" y="210" width="140" height="54" rx="6" class="s-box-cloud"/>
+          <text x="454" y="234" class="s-title">Synthesis</text>
+          <text x="454" y="251" class="s-sub">shared memory</text>
+
+          <rect x="628" y="210" width="150" height="54" rx="6" class="s-box-cloud"/>
+          <text x="644" y="234" class="s-title">Retrieval · MCP</text>
+          <text x="644" y="251" class="s-sub">ranked findings</text>
+
+          <rect x="828" y="210" width="132" height="54" rx="6" class="s-box"/>
+          <text x="844" y="234" class="s-title">Teammate</text>
+          <text x="844" y="251" class="s-sub">agent asks</text>
+
+          <line x1="184" y1="237" x2="222" y2="237" class="s-line" marker-end="url(#c-ink)"/>
+          <line x1="382" y1="237" x2="432" y2="237" class="s-line-edge" marker-end="url(#c-edge)"/>
+          <line x1="582" y1="237" x2="622" y2="237" class="s-line-cloud" marker-end="url(#c-cloud)"/>
+          <line x1="782" y1="237" x2="822" y2="237" class="s-line-cloud" marker-end="url(#c-cloud)"/>
+          <text x="408" y="200" class="s-flow" text-anchor="middle">Finding[]</text>
+
+          <!-- seam 1 : design time -->
+          <rect x="150" y="52" width="250" height="60" rx="6" class="s-box-cloud"/>
+          <text x="167" y="76" class="s-title">Frontier, offline</text>
+          <text x="167" y="93" class="s-sub">authors few-shots · diagnoses evals</text>
+          <text x="167" y="107" class="s-sub">· weights compaction</text>
+          <text x="132" y="70" class="s-seam" fill="var(--cloud)">①</text>
+          <line x1="275" y1="116" x2="275" y2="204" class="s-line-cloud s-dash" marker-end="url(#c-cloud)"/>
+          <text x="286" y="166" class="s-flow">artifacts only — never a runtime call</text>
+
+          <!-- seam 3 : rejected escalation -->
+          <rect x="628" y="52" width="322" height="60" rx="6" class="s-box"/>
+          <text x="645" y="76" class="s-title">Frontier API — raw-segment escalation</text>
+          <text x="645" y="93" class="s-sub">local model punts the hard segments upstream</text>
+          <text x="610" y="70" class="s-seam" fill="var(--stop)">③</text>
+          <line x1="380" y1="212" x2="622" y2="116" class="s-stop s-dash" marker-end="url(#c-ink)"/>
+          <circle cx="501" cy="164" r="11" fill="var(--panel)" stroke="var(--stop)"/>
+          <line x1="495" y1="158" x2="507" y2="170" class="s-stop"/>
+          <line x1="507" y1="158" x2="495" y2="170" class="s-stop"/>
+          <text x="501" y="141" class="s-stop-text" text-anchor="middle">rejected</text>
+
+          <!-- seam 4 : contribute -->
+          <path d="M 893 268 L 893 302 L 303 302 L 303 270" class="s-line-edge s-dash" marker-end="url(#c-edge)"/>
+          <text x="598" y="296" class="s-flow" text-anchor="middle">④ contribute(text) — the local distiller still gates it</text>
+
+          <!-- seam 2 : below the boundary -->
+          <rect x="438" y="340" width="340" height="60" rx="6" class="s-box-cloud"/>
+          <text x="455" y="364" class="s-title">Frontier synthesis / retrieval</text>
+          <text x="455" y="381" class="s-sub">synthesizer: claude — one config line</text>
+          <text x="420" y="358" class="s-seam" fill="var(--cloud)">②</text>
+          <line x1="508" y1="336" x2="508" y2="270" class="s-line-cloud s-dash" marker-end="url(#c-cloud)"/>
+          <line x1="703" y1="336" x2="703" y2="270" class="s-line-cloud s-dash" marker-end="url(#c-cloud)"/>
+
+          <!-- boundary label -->
+          <rect x="388" y="352" width="40" height="120" class="s-mask"/>
+          <text x="400" y="412" class="s-bell" text-anchor="middle" transform="rotate(-90 400 412)">FINDING BOUNDARY</text>
+          <text x="418" y="412" class="s-bell-sub" text-anchor="middle" transform="rotate(-90 418 412)">raw work never crosses</text>
+        </svg>
+      </div>
+      <figcaption>The same boundary from the first diagram, now read as a policy line. Seams ① and ② attach without touching it. Seam ③ crosses it in the wrong direction and is the one that got rejected. Seam ④ crosses right-to-left but carries nothing new — the agent already holds the session in its own context.</figcaption>
+    </figure>
+
+    <div class="seams">
+      <div class="seam is-adopted">
+        <div class="n">①</div>
+        <div class="body">
+          <h3>Frontier as teacher, offline</h3>
+          <p>Claude runs over the fixture segments and its best outputs are frozen into the distiller's prompt as few-shots — including one that deliberately abstracts rather than quotes, which attacks the 4B's two worst expected failure modes. After a benchmark run, the low-scoring cases go back to Claude for failure diagnosis and a proposed prompt revision. About fifty lines on top of the existing harness. Frontier as prompt engineer; never a runtime dependency.</p>
+          <p>There is a passive version of this too: the agent's own end-of-turn summary is <em>already</em> frontier-written distillation, so compaction weights segments toward assistant text. The 4B summarizes Claude's summaries plus the error lines, not thirty thousand tokens of raw log.</p>
+        </div>
+        <div class="mark"><span class="st adopted">in build week</span></div>
+      </div>
+
+      <div class="seam is-adopted">
+        <div class="n">②</div>
+        <div class="body">
+          <h3>Frontier synthesis below the boundary</h3>
+          <p>Because synthesis and retrieval only ever see findings — already abstracted, already redacted — pointing them at a frontier model is legal by construction and costs one config line. Cloud AI 100 stays the demo path because the hardware thesis is the point, but a team that wants maximum merge quality flips <span class="m">synthesizer: claude</span> and loses nothing but the Qualcomm story. This is also the honest framing of the benchmark: the Claude-versus-8B delta is a number we publish, not one we hide.</p>
+        </div>
+        <div class="mark"><span class="st free">config line</span></div>
+      </div>
+
+      <div class="seam is-rejected">
+        <div class="n">③</div>
+        <div class="body">
+          <h3>Escalating hard segments upstream</h3>
+          <p>The tempting one: let the local distiller punt segments it finds hard to a frontier API. Rejected — it ships raw work off-device and deletes the privacy invariant that <em>is</em> the product. Teams that don't need the invariant already have a supported tier for this: set <span class="m">distiller: claude</span> and the whole pipeline runs on frontier models. What is not on offer is doing it silently, per-segment, while still claiming the guarantee.</p>
+        </div>
+        <div class="mark"><span class="st rejected">rejected</span></div>
+      </div>
+
+      <div class="seam is-deferred">
+        <div class="n">④</div>
+        <div class="body">
+          <h3>Contribute — the agent hands over an insight on purpose</h3>
+          <p>MCP is already connected for retrieval, so the agent can push as well as pull. A <span class="m">contribute(text)</span> tool lets the agent write a few sentences of free-form natural language about something it just figured out; the handler wraps that as a synthetic segment and runs it through the <em>same local distiller</em>, tagged <span class="m">provenance: contributed</span>. Frontier does the hard thinking, the local gate does the structuring — and the invariant gets stronger, not weaker: the local distiller becomes the sole entrance to shared memory regardless of how capable the source was.</p>
+          <p>The toggle is tool availability, not a router in code. The tool description carries the judgment — <em>call this when you've learned something non-obvious a teammate would benefit from</em> — so the agent's own tool-selection is the complexity detector. Compliance is probabilistic, which is fine: the passive path is always running underneath. One contract cost was paid up front to keep this cheap later — <span class="m">provenance</span> is in the <span class="m">Finding</span> schema from day zero.</p>
+        </div>
+        <div class="mark"><span class="st deferred">first stretch</span></div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="eyebrow">Backup strategies</div>
+    <h2>What we switch to when something is red</h2>
+    <p class="prose">Every risky piece has a written ladder, a trigger, and a drop-dead time. The abstraction layer is what makes most of these cost zero code — which is the actual argument for having built it.</p>
+
+    <div class="ladders">
+
+      <div class="ladder">
+        <h3>Distiller runtime</h3>
+        <div class="rungs">
+          <span class="rung primary">GenieX qairt · NPU</span><span class="chev">→</span>
+          <span class="rung">GenieX llama_cpp · GGUF</span><span class="chev">→</span>
+          <span class="rung last">Ollama on the Mac</span>
+        </div>
+        <p class="trigger"><b>Trigger:</b> spike red by end of Day 2. Same server, same provider class for the first two rungs — only the backend changes. If it falls all the way to Ollama, the NPU gets presented as separately validated with whatever partial numbers exist, and the build does not block on it.</p>
+      </div>
+
+      <div class="ladder">
+        <h3>Distiller quality</h3>
+        <div class="rungs">
+          <span class="rung primary">Qwen3-4B-Instruct</span><span class="chev">→</span>
+          <span class="rung">few-shots + prompt-optimizer loop</span><span class="chev">→</span>
+          <span class="rung">Gemma-4-E4B / Qwen3-1.7B</span><span class="chev">→</span>
+          <span class="rung last">Qwen3-8B bundle</span>
+        </div>
+        <p class="trigger"><b>Trigger:</b> the eval table, not taste. Drop to 1.7B if 4B causes thermal or memory pressure while the developer is working; climb to 8B only if the table says 4B genuinely disappoints. There is also an <em>amber</em> path: if output is close but not schema-valid, keep the NPU, accept the lower rate, and narrate the tolerant parse as the design working.</p>
+      </div>
+
+      <div class="ladder">
+        <h3>Synthesizer</h3>
+        <div class="rungs">
+          <span class="rung primary">Cloud AI 100 · Llama-3.1-8B</span><span class="chev">→</span>
+          <span class="rung">Claude</span><span class="chev">→</span>
+          <span class="rung last">Ollama, fully offline</span>
+        </div>
+        <p class="trigger"><b>Trigger:</b> venue WiFi, credit pool exhaustion, or rate limits. One environment variable each way, zero code. The edge path never depends on the network at all, so long as the model bundle is cached before the day.</p>
+      </div>
+
+      <div class="ladder">
+        <h3>Structured output</h3>
+        <div class="rungs">
+          <span class="rung">native json_schema</span><span class="chev">→</span>
+          <span class="rung primary">prompt-instructed JSON + tolerant parse</span><span class="chev">→</span>
+          <span class="rung">one retry</span><span class="chev">→</span>
+          <span class="rung last">drop the finding</span>
+        </div>
+        <p class="trigger"><b>Trigger:</b> already live. Neither the NPU nor Cirrascale honors a schema, so the middle rung is the normal path, and schema calls to Cloud AI 100 route through <span class="m">/completions</span> because the chat endpoint's tool-call parser eats JSON objects before we ever see them. Capability-flagged and measured per provider rather than assumed.</p>
+      </div>
+
+      <div class="ladder">
+        <h3>Retrieval</h3>
+        <div class="rungs">
+          <span class="rung primary">LLM-as-retriever</span><span class="chev">→</span>
+          <span class="rung last">bge-large embeddings + reranker</span>
+        </div>
+        <p class="trigger"><b>Trigger:</b> retrieval quality visibly poor at demo scale. At tens of findings per session, handing the model the whole set and asking it to rank is enough. The upgrade is unusually cheap because both the embedding model and a reranker sit on the same key we already use — but it stays out of core scope, because it is a scaling story rather than a demo problem.</p>
+      </div>
+
+    </div>
+  </section>
+
+  <section>
+    <div class="eyebrow">Stretch backlog</div>
+    <h2>Ranked by what it would prove</h2>
+
+    <div class="tablewrap">
+      <table>
+        <thead>
+          <tr><th>Item</th><th>Status</th><th>What it buys</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>contribute(text)</td><td><span class="st deferred">first up</span></td><td>The strongest demo beat available: an agent visibly hands an insight to team memory, and a teammate's agent retrieves it seconds later. The thesis in one moment. Small by design — it reuses the existing distiller.</td></tr>
+          <tr><td>Awareness hook pack</td><td><span class="st deferred">first up</span></td><td>The SessionStart briefing, the per-turn freshness pointer, and the shipped skill. Turns retrieval from something the user has to ask for into something the agent does on its own — the difference between a demo that works and a tool someone keeps using.</td></tr>
+          <tr><td>CodexSource</td><td><span class="st deferred">~1 day</span></td><td>The agent-agnostic proof. Adding a second adapter and changing nothing else is the claim; shipping one demonstrates it instead of asserting it.</td></tr>
+          <tr><td>Team dashboard</td><td><span class="st deferred">stretch</span></td><td>Makes the shared memory visible to humans rather than only to agents — the artifact that would survive the hackathon.</td></tr>
+          <tr><td>Cross-session persistence</td><td><span class="st deferred">stretch</span></td><td>Today findings live in memory and a restart wipes them. Persistence turns a session tool into team knowledge that accumulates.</td></tr>
+          <tr><td>Vector retrieval</td><td><span class="st deferred">scaling</span></td><td>Only matters past hackathon scale — but the infrastructure is already on the key, so it is a small step rather than a project.</td></tr>
+          <tr><td>Mobile contributions</td><td><span class="st deferred">stretch</span></td><td>Photos and voice notes from a lab bench. Fits the original use case — a lab engineer's on-target context meeting a developer's code context.</td></tr>
+          <tr><td>Offline queue + inotify follower</td><td><span class="st free">hardening</span></td><td>The follower currently polls and keeps its offset in-process. Neither matters for a short demo run; both matter the day someone actually uses it.</td></tr>
+          <tr><td>Llama-3.1-70B</td><td><span class="st free">ask</span></td><td>Not on our key today. If office hours can enable it, better synthesis for a one-line config change.</td></tr>
+          <tr><td>Auth beyond opt-in join</td><td><span class="st free">named gap</span></td><td>Anyone with the URL can push or query. Intentional for the hackathon and documented as a limitation rather than an oversight.</td></tr>
+          <tr><td>Fine-tuned distiller</td><td><span class="st rejected">out</span></td><td>Explicitly out of scope. The whole point is that a pre-optimized off-the-shelf bundle is good enough — fine-tuning would undercut the argument as much as help it.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <div class="eyebrow">Best case</div>
+    <h2>If all of it lands</h2>
+    <p class="prose">The optimistic end state, written as the demo we would give rather than a feature list. Everything here is composed from items above; nothing new is invented.</p>
+
+    <div class="scenario">
+      <div class="beat">
+        <div class="n">01</div>
+        <div>
+          <p>A lab engineer hits a failure on real hardware and opens a shared session from their Copilot+ PC, declaring its purpose in a sentence. Two teammates join with one command each. <b>Nobody changes how they work</b> — they keep using their own agent, unmodified, and a worker starts reading the transcript it was already writing.</p>
+          <span class="from">core · session create / join</span>
+        </div>
+      </div>
+
+      <div class="beat">
+        <div class="n">02</div>
+        <div>
+          <p>One of them is on Codex rather than Claude Code. It makes no difference to anything downstream: a second source adapter normalizes into the same event shape and the rest of the pipeline never learns which agent it came from. <b>The agent-agnostic claim is demonstrated rather than asserted.</b></p>
+          <span class="from">stretch · CodexSource</span>
+        </div>
+      </div>
+
+      <div class="beat">
+        <div class="n">03</div>
+        <div>
+          <p>On each machine a 4B model on the NPU distills segments into findings continuously, while the developer keeps working and never notices — that is the whole reason it is on the NPU and not the CPU. Raw transcripts stay on the device. <b>Only abstracted findings go anywhere</b>, and a deterministic n-gram check on every one of them proves it rather than promising it.</p>
+          <span class="from">core · distiller + verbatim-copy metric</span>
+        </div>
+      </div>
+
+      <div class="beat">
+        <div class="n">04</div>
+        <div>
+          <p>The lab engineer's agent works out something genuinely subtle — the failure only reproduces under a specific timing condition. It decides that is worth telling the team, calls <span class="m">contribute</span>, and writes three sentences. The local model turns them into findings tagged as contributed. <b>Frontier does the hard thinking; the local gate still decides what enters shared memory.</b></p>
+          <span class="from">stretch · contribute module</span>
+        </div>
+      </div>
+
+      <div class="beat">
+        <div class="n">05</div>
+        <div>
+          <p>Synthesis merges all three streams, drops the trivia the small models over-produced, and notices that two contributors have reached opposite conclusions about the same subsystem. It does not quietly pick a winner — <b>it surfaces the disagreement as a conflict</b>, which is often the most valuable thing in the room.</p>
+          <span class="from">core · synthesis + conflict detection</span>
+        </div>
+      </div>
+
+      <div class="beat">
+        <div class="n">06</div>
+        <div>
+          <p>A developer's agent, minutes later and on a different machine, opens a file in the subsystem the pointer just named. Nobody tells it to check anything — the skill triggers on the work itself, and it asks in plain language what is already known. It gets back ranked findings, including the timing insight and the flagged conflict. <b>It skips an hour of rediscovery</b>, and its human never typed the words "look at the shared learnings".</p>
+          <span class="from">core · MCP retrieval &nbsp;+&nbsp; stretch · awareness layer</span>
+        </div>
+      </div>
+
+      <div class="beat">
+        <div class="n">07</div>
+        <div>
+          <p>On a dashboard the team watches shared memory assemble itself in real time, attributed by contributor. When the session ends the knowledge persists, so the next person to touch this subsystem inherits it instead of starting cold. <b>A session tool becomes team memory.</b></p>
+          <span class="from">stretch · dashboard + cross-session persistence</span>
+        </div>
+      </div>
+
+      <div class="beat">
+        <div class="n">08</div>
+        <div>
+          <p>And the benchmark table is on screen the whole time: the same corpus through the NPU 4B, Cloud AI 100's 8B, and Claude, with quality, cost, latency and schema-valid rate side by side. <b>The honest delta is the argument</b>, not a thing to explain away — this is what the hardware division of labor actually buys, in numbers, on real silicon.</p>
+          <span class="from">core · eval harness + QUAD profiling</span>
+        </div>
+      </div>
+    </div>
+
+    <p class="note">Read pessimistically, the same page still works: passive capture on a laptop, distillation on Ollama, synthesis on Claude, retrieval over MCP, and a benchmark table with one hardware column missing. Every stretch item above is additive, and every fallback is a config line — that property was designed in, and it is the reason this list can be this ambitious.</p>
+  </section>
+
+  <footer>
+    <span>Sources: docs/brainstorming/2026-07-25-synapse-design.md · plans 0 / A / B / C · the three 2026-08-03 amendments (provider layer · hybrid frontier/local · segment budget &amp; compaction).</span>
+    <span>Diagrams: Snapdragon Workspace board, Synapse frames.</span>
+  </footer>
+
+</div>
