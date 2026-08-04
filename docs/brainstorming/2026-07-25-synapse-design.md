@@ -4,6 +4,7 @@
 **Date:** 2026-07-25
 **Amended:** 2026-08-03 — provider layer (hosted Cirrascale AI-100, GenieX NPU runtime, model selection); see `2026-08-03-aic100-cirrascale-amendment.md`. Amended sections marked ⟨A⟩.
 **Amended:** 2026-08-03 — hybrid frontier/local strategy (Part 1: design-time frontier leverage, local-only runtime; Part 2: contribute module, deferred); see `2026-08-03-hybrid-frontier-local-amendment.md`. Amended sections marked ⟨B⟩.
+**Amended:** 2026-08-03 — segment token budget + compaction + 4B quality calibration; see `2026-08-03-segment-budget-compaction-amendment.md`. Amended sections marked ⟨C⟩.
 **Event:** Snapdragon Multiverse internal hackathon (build week Aug 3–7 2026; prep week ~Jul 27–31)
 **Team:** Siddsing (architect/integration), Akhil (edge worker / low-level), Aditya (ML/distillation, owns NPU laptop)
 
@@ -59,7 +60,7 @@ Two planes: **data plane** (workers → ingest API) and **retrieval/control plan
 | Contract | Shape (essentials) |
 |---|---|
 | `AgentEvent` | `{role, kind: text\|thinking\|tool_use\|tool_result, content, tool_name?, ts, session_id, cwd, git_branch}` — agent-agnostic, internal to worker |
-| `Segment` | bounded run of `AgentEvent`s split on turn boundary — the distiller's input |
+| `Segment` | bounded run of `AgentEvent`s split on turn boundary **and token budget (~2–2.5K tok; final number from NPU spike prefill/context measurement), events deterministically compacted (tool_result head/tail truncation, thinking trimmed, trivial calls dropped)** ⟨C⟩ — the distiller's input |
 | `Finding` | `{type: learning\|decision\|dead_end\|open_question, text, contributor, ts, source_session, refs?, provenance: distilled\|contributed}` ⟨B⟩ — `text` is **abstracted, not verbatim code** (distiller redacts by design); `provenance` defaults to `distilled`, reserved for the Part-2 contribute module |
 | `SynapseSession` | `{shared_id, purpose, members[], created_by}` |
 | `LocalBinding` | `{local_agent_session_id → shared_id, contributor}` — set at join |
@@ -113,7 +114,7 @@ synthesizer: claude                   synthesizer: aic100
 **Then three parallel tracks:**
 
 - **Siddsing:** `ModelProvider`+`FakeProvider` first (unblocks teammates — top Day-0 priority). ~~AI-100 spike Day 1–2~~ ⟨A⟩ **spike retired — GO 2026-08-03**: hosted Cirrascale endpoint verified end-to-end (ping/chat/embeddings); residual work is the `/completions` schema path in `AIC100Provider`. Freed time → Synthesis (incremental merge) + MCP (LLM-as-retriever).
-- **Aditya:** NPU spike Day 1–2 ⟨A⟩ **via GenieX**: `/quad-detect` sanity → `geniex serve` with `qairt` AI Hub bundle → run fixture corpus through Qwen3-4B-Instruct-2507 / Gemma-4-E4B-it / Qwen3-1.7B (go/no-go: NPU residency, prefill/generate tok/s, power, **schema-valid JSON rate**; grammar-support probe worth 10 min — fallback GenieX `llama_cpp`, then Mac/CPU Ollama). Then Distiller (TDD vs `FakeProvider`) + eval harness (corpus × provider → quality/cost/latency table).
+- **Aditya:** NPU spike Day 1–2 ⟨A⟩ **via GenieX**: `/quad-detect` sanity → `geniex serve` with `qairt` AI Hub bundle → run fixture corpus through Qwen3-4B-Instruct-2507 / Gemma-4-E4B-it / Qwen3-1.7B (go/no-go: NPU residency, prefill/generate tok/s, power, **schema-valid JSON rate**, **usable compiled context length** ⟨C⟩; grammar-support probe worth 10 min — fallback GenieX `llama_cpp`, then Mac/CPU Ollama). Then Distiller (TDD vs `FakeProvider`) + eval harness (corpus × provider → quality/cost/latency table).
 - **Akhil:** No hardware spike. `ClaudeCodeSource` (JSONL→`AgentEvent`) · follower (tail/rotation/partial/malformed) · segmenter (turn-boundary→`Segment`, must reproduce fixtures) · Sync client (findings push + join, tested vs mock HTTP server).
 
 **Spike discipline:** each risky spike has a one-line success assertion, a drop-dead time, and a fallback. Off-target mode *is* the fallback (e.g. AI-100 red by end of Day 2 → demo synthesis on Claude, present AI-100 as validated separately).
@@ -152,3 +153,4 @@ synthesizer: claude                   synthesizer: aic100
 | Segment/distiller drift between Akhil & Aditya | frozen hand-authored fixture Segments are the shared ground truth |
 | "Isn't this Notion + RAG?" | no human writes notes — agents' own work becomes shared memory, in-loop, in minutes |
 | Cross-machine ordering | wall-clock timestamps assumed sufficient at hackathon scale (named limitation) |
+| Single turn exceeds NPU context / prefill power budget ⟨C⟩ | budgeted sub-turn segments + deterministic compaction; synthesis dedupes across sub-segments; usable bundle context is a spike go/no-go axis |
