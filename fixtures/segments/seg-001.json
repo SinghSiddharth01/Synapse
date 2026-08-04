@@ -1,0 +1,123 @@
+{
+  "id": "seg-001",
+  "agent_session_id": "as-fixture-001",
+  "started_at": "2026-08-04T09:12:00Z",
+  "ended_at": "2026-08-04T09:19:30Z",
+  "events": [
+    {
+      "role": "user",
+      "kind": "text",
+      "content": "The API is opening too many Postgres connections under load. Can you put pgbouncer in front of it?",
+      "ts": "2026-08-04T09:12:00Z",
+      "agent_session_id": "as-fixture-001",
+      "cwd": "/home/dev/checkout-api",
+      "git_branch": "perf/connection-pooling"
+    },
+    {
+      "role": "assistant",
+      "kind": "text",
+      "content": "I'll add pgbouncer in transaction pooling mode — that gives the highest connection reuse, which is what you want under load. Let me wire it up and point the app at it.",
+      "ts": "2026-08-04T09:12:40Z",
+      "agent_session_id": "as-fixture-001",
+      "cwd": "/home/dev/checkout-api",
+      "git_branch": "perf/connection-pooling"
+    },
+    {
+      "role": "assistant",
+      "kind": "tool_use",
+      "content": "pool_mode = transaction\nmax_client_conn = 1000\ndefault_pool_size = 25",
+      "tool_name": "write_file",
+      "ts": "2026-08-04T09:13:10Z",
+      "agent_session_id": "as-fixture-001",
+      "cwd": "/home/dev/checkout-api",
+      "git_branch": "perf/connection-pooling"
+    },
+    {
+      "role": "user",
+      "kind": "tool_result",
+      "content": "wrote pgbouncer.ini (3 lines)",
+      "tool_name": "write_file",
+      "ts": "2026-08-04T09:13:11Z",
+      "agent_session_id": "as-fixture-001",
+      "cwd": "/home/dev/checkout-api",
+      "git_branch": "perf/connection-pooling"
+    },
+    {
+      "role": "assistant",
+      "kind": "tool_use",
+      "content": "pytest tests/integration/test_checkout.py -x",
+      "tool_name": "bash",
+      "ts": "2026-08-04T09:14:20Z",
+      "agent_session_id": "as-fixture-001",
+      "cwd": "/home/dev/checkout-api",
+      "git_branch": "perf/connection-pooling"
+    },
+    {
+      "role": "user",
+      "kind": "tool_result",
+      "content": "FAILED tests/integration/test_checkout.py::test_reserve_stock\nasyncpg.exceptions.InvalidSQLStatementNameError: prepared statement \"__asyncpg_stmt_3__\" does not exist\nHINT: pgbouncer with pool_mode=transaction does not support prepared statements\n15 passed, 8 failed in 22.41s",
+      "tool_name": "bash",
+      "ts": "2026-08-04T09:15:02Z",
+      "agent_session_id": "as-fixture-001",
+      "cwd": "/home/dev/checkout-api",
+      "git_branch": "perf/connection-pooling"
+    },
+    {
+      "role": "assistant",
+      "kind": "thinking",
+      "content": "Transaction mode hands a different backend connection to each transaction, so a prepared statement created on one connection isn't visible on the next. asyncpg prepares implicitly for every query, so essentially every query breaks. Options: disable statement caching in asyncpg, or move to session pooling. Disabling the cache would slow every query in the hot path.",
+      "ts": "2026-08-04T09:15:40Z",
+      "agent_session_id": "as-fixture-001",
+      "cwd": "/home/dev/checkout-api",
+      "git_branch": "perf/connection-pooling"
+    },
+    {
+      "role": "assistant",
+      "kind": "text",
+      "content": "Transaction mode is a dead end here. asyncpg implicitly prepares every query, and transaction pooling rotates the backend connection per transaction, so the prepared statement is never where the driver expects it. I could disable asyncpg's statement cache, but that removes prepared statements from the hot checkout path entirely. Switching to session pooling instead.",
+      "ts": "2026-08-04T09:16:10Z",
+      "agent_session_id": "as-fixture-001",
+      "cwd": "/home/dev/checkout-api",
+      "git_branch": "perf/connection-pooling"
+    },
+    {
+      "role": "assistant",
+      "kind": "tool_use",
+      "content": "pool_mode = session\nmax_client_conn = 1000\ndefault_pool_size = 25",
+      "tool_name": "write_file",
+      "ts": "2026-08-04T09:17:00Z",
+      "agent_session_id": "as-fixture-001",
+      "cwd": "/home/dev/checkout-api",
+      "git_branch": "perf/connection-pooling"
+    },
+    {
+      "role": "assistant",
+      "kind": "tool_use",
+      "content": "pytest tests/integration/test_checkout.py",
+      "tool_name": "bash",
+      "ts": "2026-08-04T09:18:30Z",
+      "agent_session_id": "as-fixture-001",
+      "cwd": "/home/dev/checkout-api",
+      "git_branch": "perf/connection-pooling"
+    },
+    {
+      "role": "user",
+      "kind": "tool_result",
+      "content": "23 passed in 19.02s",
+      "tool_name": "bash",
+      "ts": "2026-08-04T09:19:00Z",
+      "agent_session_id": "as-fixture-001",
+      "cwd": "/home/dev/checkout-api",
+      "git_branch": "perf/connection-pooling"
+    },
+    {
+      "role": "assistant",
+      "kind": "text",
+      "content": "Green on session pooling. Worth flagging: session mode holds a backend connection for the whole client session, so the reuse ratio is much lower than transaction mode. With default_pool_size=25 we haven't actually verified this survives the peak concurrency that started this work — that needs a load test before it ships.",
+      "ts": "2026-08-04T09:19:30Z",
+      "agent_session_id": "as-fixture-001",
+      "cwd": "/home/dev/checkout-api",
+      "git_branch": "perf/connection-pooling"
+    }
+  ]
+}

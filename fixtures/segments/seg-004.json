@@ -1,0 +1,86 @@
+{
+  "id": "seg-004",
+  "agent_session_id": "as-fixture-004",
+  "started_at": "2026-08-04T14:02:00Z",
+  "ended_at": "2026-08-04T14:05:12Z",
+  "events": [
+    {
+      "role": "user",
+      "kind": "text",
+      "content": "can you tidy up the imports in the utils package",
+      "ts": "2026-08-04T14:02:00Z",
+      "agent_session_id": "as-fixture-004",
+      "cwd": "/home/dev/checkout-api",
+      "git_branch": "chore/tidy"
+    },
+    {
+      "role": "assistant",
+      "kind": "tool_use",
+      "content": "ls src/utils",
+      "tool_name": "bash",
+      "ts": "2026-08-04T14:02:20Z",
+      "agent_session_id": "as-fixture-004",
+      "cwd": "/home/dev/checkout-api",
+      "git_branch": "chore/tidy"
+    },
+    {
+      "role": "user",
+      "kind": "tool_result",
+      "content": "dates.py\nstrings.py\n__init__.py",
+      "tool_name": "bash",
+      "ts": "2026-08-04T14:02:21Z",
+      "agent_session_id": "as-fixture-004",
+      "cwd": "/home/dev/checkout-api",
+      "git_branch": "chore/tidy"
+    },
+    {
+      "role": "assistant",
+      "kind": "tool_use",
+      "content": "ruff check --select I --fix src/utils",
+      "tool_name": "bash",
+      "ts": "2026-08-04T14:03:40Z",
+      "agent_session_id": "as-fixture-004",
+      "cwd": "/home/dev/checkout-api",
+      "git_branch": "chore/tidy"
+    },
+    {
+      "role": "user",
+      "kind": "tool_result",
+      "content": "Found 3 errors (3 fixed, 0 remaining).",
+      "tool_name": "bash",
+      "ts": "2026-08-04T14:03:45Z",
+      "agent_session_id": "as-fixture-004",
+      "cwd": "/home/dev/checkout-api",
+      "git_branch": "chore/tidy"
+    },
+    {
+      "role": "assistant",
+      "kind": "tool_use",
+      "content": "git diff --stat",
+      "tool_name": "bash",
+      "ts": "2026-08-04T14:04:30Z",
+      "agent_session_id": "as-fixture-004",
+      "cwd": "/home/dev/checkout-api",
+      "git_branch": "chore/tidy"
+    },
+    {
+      "role": "user",
+      "kind": "tool_result",
+      "content": " src/utils/dates.py   | 4 ++--\n src/utils/strings.py | 2 +-\n 2 files changed, 3 insertions(+), 3 deletions(-)",
+      "tool_name": "bash",
+      "ts": "2026-08-04T14:04:32Z",
+      "agent_session_id": "as-fixture-004",
+      "cwd": "/home/dev/checkout-api",
+      "git_branch": "chore/tidy"
+    },
+    {
+      "role": "assistant",
+      "kind": "text",
+      "content": "Sorted the imports in dates.py and strings.py with ruff. Three import-order issues fixed, nothing else changed.",
+      "ts": "2026-08-04T14:05:12Z",
+      "agent_session_id": "as-fixture-004",
+      "cwd": "/home/dev/checkout-api",
+      "git_branch": "chore/tidy"
+    }
+  ]
+}

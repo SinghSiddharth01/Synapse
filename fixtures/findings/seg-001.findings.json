@@ -1,0 +1,58 @@
+[
+  {
+    "id": "golden-001-a",
+    "type": "dead_end",
+    "text": "pgbouncer in transaction pooling mode is incompatible with drivers that implicitly prepare statements, such as asyncpg. Transaction mode rotates the backend connection per transaction, so a prepared statement is not present on the connection the driver next uses, and queries fail with 'prepared statement does not exist'.",
+    "attributions": [
+      {
+        "contributor": "fixture-author",
+        "agent_session": "as-fixture-001",
+        "agent": "claude-code"
+      }
+    ],
+    "ts": "2026-08-04T09:19:30Z",
+    "refs": []
+  },
+  {
+    "id": "golden-001-b",
+    "type": "decision",
+    "text": "Chose pgbouncer session pooling over transaction pooling for the checkout API. The alternative — disabling the driver's statement cache to make transaction mode work — was rejected because it would remove prepared statements from the hot checkout path.",
+    "attributions": [
+      {
+        "contributor": "fixture-author",
+        "agent_session": "as-fixture-001",
+        "agent": "claude-code"
+      }
+    ],
+    "ts": "2026-08-04T09:19:30Z",
+    "refs": []
+  },
+  {
+    "id": "golden-001-c",
+    "type": "learning",
+    "text": "Session pooling holds a backend connection for the lifetime of a client session, so its connection-reuse ratio is substantially lower than transaction pooling. Choosing it trades pooling efficiency for driver compatibility.",
+    "attributions": [
+      {
+        "contributor": "fixture-author",
+        "agent_session": "as-fixture-001",
+        "agent": "claude-code"
+      }
+    ],
+    "ts": "2026-08-04T09:19:30Z",
+    "refs": []
+  },
+  {
+    "id": "golden-001-d",
+    "type": "open_question",
+    "text": "Whether session pooling at the current pool size survives the peak concurrency that motivated adding a pooler is unverified. The integration suite passes, but no load test has been run, so the original connection-exhaustion problem may not actually be solved.",
+    "attributions": [
+      {
+        "contributor": "fixture-author",
+        "agent_session": "as-fixture-001",
+        "agent": "claude-code"
+      }
+    ],
+    "ts": "2026-08-04T09:19:30Z",
+    "refs": []
+  }
+]
