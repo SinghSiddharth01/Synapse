@@ -1,0 +1,20 @@
+[project]
+name = "synapse-distiller"
+version = "0.1.0"
+description = "Segment -> Finding[] distillation, on-device"
+requires-python = ">=3.12"
+dependencies = [
+    "synapse-contracts",
+    "synapse-providers",
+]
+
+[tool.uv.sources]
+synapse-contracts = { workspace = true }
+synapse-providers = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/synapse_distiller"]

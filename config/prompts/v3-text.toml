@@ -1,0 +1,96 @@
+name = "v3-text"
+description = "v2-hardened rules, few-shots as assistant prose only. NOT DEFAULT — see the accuracy note below."
+
+# NOT the default pack, though it is ~60 tokens cheaper than v2-hardened and a
+# better structural match for distil_kinds = ["text"].
+#
+# ⚠️ CORRECTION. An earlier version of this note blamed these prose-only
+# few-shots for the seg-001 factual inversion. That was wrong. v2-hardened
+# produces the SAME inversion when render_style = "content", so the cause is not
+# this pack. The fact is simply fragile: two of three tested configurations
+# state that session pooling gives *higher* connection reuse when the segment
+# says its reuse ratio is much lower. The model is overriding an explicit
+# statement with a prior, and which way it lands moves under small perturbations.
+#
+# This pack is kept for re-testing on a larger corpus, not deleted.
+
+# Differs from v2-hardened in ONE respect: the few-shot inputs contain no
+# tool_use or tool_result lines. Deliberately one variable, so an A/B against
+# v2 measures the few-shot match and nothing else. (The last time two things
+# changed at once here, a contaminated few-shot produced a result that looked
+# like a fix and wasn't.)
+#
+# Why it matters: with distil_kinds = ["text"] the model never sees a
+# tool_result at run time, so a few-shot built around one is teaching from a
+# distribution the real input does not have. The rules below are byte-identical
+# to v2-hardened.
+contaminated_fixtures = []
+
+system = """
+You extract durable, transferable findings from a software engineer's coding-agent session.
+
+Your output becomes shared team memory. Another engineer's agent will read it \
+without seeing the original session, so a finding must stand alone.
+
+RULES
+1. Abstract. Never copy code, file paths, identifiers, config keys, hostnames, \
+stack traces or log lines from the input. State the underlying rule or constraint \
+in your own words. If a finding cannot be written without quoting, omit it.
+2. Only durable insight. A finding must still be useful to a teammate next week. \
+Routine actions with no insight — running tests, formatting, linting, sorting \
+imports, listing files, reading a file, bumping a version, renaming things — are \
+NOT findings, even when they succeed.
+3. Prefer nothing to noise. MOST sessions contain no durable finding. If you are \
+not certain a teammate would still need this next week, return an empty findings \
+array. An empty array is the most common correct answer, not a failure.
+4. Each finding is self-contained: state the constraint, the decision and its \
+rejected alternative, or the open risk, in 1-3 sentences.
+5. One finding per distinct insight. Never merge a failed approach, the decision \
+that replaced it, and an unresolved risk into a single finding — those are three \
+findings of three different types, and a teammate will search for them separately. \
+A session that tries something, abandons it, chooses an alternative, and leaves a \
+risk open yields four findings, not one.
+
+TYPES
+learning       a constraint or behaviour of the system that was discovered
+decision       a choice made, ideally with the alternative that was rejected
+dead_end       an approach that was tried and does not work, and why
+open_question  a risk or unknown that was surfaced and not resolved
+
+OUTPUT
+Return ONLY a JSON object of this exact shape, with no prose before or after:
+{"findings": [{"type": "<one of the four types>", "text": "<1-3 sentences>"}]}
+"""
+
+task_suffix = """
+
+---
+Extract the findings from the session above. One finding per distinct insight, \
+each a different type where the session supports it. Copy no identifiers, config \
+keys or paths. If there is no durable insight, return {"findings": []}.
+"""
+
+# Prose only — no tool_result line, unlike v2's version of this example.
+[[few_shots]]
+input = """
+agent: The migration won't apply as written. The schema change and the data backfill are in the same transaction, and the backfill leaves pending trigger events on the table that block the alteration. Splitting it into two migrations so each runs in its own transaction.
+"""
+output = '''{"findings": [{"type": "learning", "text": "A schema alteration cannot run in the same transaction as a data backfill that touches the same table, because the pending trigger events from the backfill block the alteration. Migrations that do both must be split so each runs in its own transaction."}]}'''
+
+# Decontaminated noise example, prose only. Structurally unlike any committed
+# fixture — the point is a clean, successful, entirely routine session.
+[[few_shots]]
+input = """
+developer: bump the http client to the latest patch release
+agent: Bumped the HTTP client to the latest patch version and ran the full suite. Everything passes, no code changes were needed.
+"""
+output = '''{"findings": []}'''
+
+# Measured via scripts/calibrate_prompt.py. Estimate said 850; real count 658.
+# Re-run after ANY edit to the text above — a stale number oversizes the segment
+# budget and truncates segments silently.
+# Keep this block LAST: TOML assigns bare keys to the table above them.
+[calibration]
+overhead_tokens = 658
+measured_against = "qualcomm/Qwen3-4B-Instruct-2507:W4A16"
+measured_on = "2026-08-04"

@@ -1,0 +1,139 @@
+# Synapse configuration.
+#
+# Every value here can be overridden by an environment variable (see config.py
+# for the mapping) so a bake-off can sweep models or prompt packs without
+# editing this file:
+#
+#   $env:SYNAPSE_MODEL       = "qualcomm/Qwen3-4B-Instruct-2507:W4A16"
+#   $env:SYNAPSE_PROMPT_PACK = "v2-hardened"
+#   uv run python scripts/run_npu_eval.py
+
+[distiller]
+model = "qualcomm/Qwen3-4B-Instruct-2507:W4A16"
+
+# v4-condense: the NPU compresses and abstracts, it does not judge importance.
+# v1-v3 asked a 4B to also decide durability, granularity and classification,
+# and it failed all three while succeeding at compression.
+#
+# Measured 2026-08-04 on seg-001, distil_kinds = ["text"], labelled:
+#
+#                        types produced        the reuse-ratio claim
+#   v2-hardened          2 of 4                "enabling sustained reuse"  WRONG
+#   v4-condense          4 of 4                "lower reuse ratio"         RIGHT
+#
+# v4 also stopped merging the dead_end into the decision. The fidelity rule
+# ("never reverse a comparison, never turn a drawback into a benefit") is what
+# fixed the inversion — the model was misstating facts while composing a
+# narrative, and stops when asked only to restate.
+#
+# TRADE-OFFS, both real:
+#   * Identifier leakage got WORSE. verbatim overlap rose 0.00 -> 0.10 and the
+#     seg-004 notes copy two filenames. Compression pulls wording toward the
+#     source. The identifier-leak metric is now the priority.
+#   * Cost rose. 1853 prompt tokens vs 1673, and more output per segment, since
+#     one note per point produces more findings than one merged narrative.
+prompt_pack = "v4-condense"
+
+# Which AgentEvent kinds reach the model. Valid: text, thinking, tool_use,
+# tool_result.
+#
+# Default is text-only, for three reasons:
+#   1. Assistant prose is already a frontier model's distillation of its own
+#      work — Plan A.5 says to weight retained content toward it.
+#   2. It roughly halves the prompt (51% of seg-001's characters, 40% of
+#      seg-004's), which matters on a 4096-token bundle at ~11 tok/s.
+#   3. Most quotable identifiers live in tool_use arguments and tool_result
+#      output, so restricting to prose shrinks the leak surface by construction
+#      rather than by a prompt rule the model has been observed to ignore.
+#
+# Trade-off: a dead_end needs the error that caused it. In seg-001 the assistant
+# restates the error in prose, so the finding survives — but an agent that pivots
+# without narrating why would lose it. Widen to include tool_result if the
+# dead_end recall measured by the eval harness drops.
+distil_kinds = ["text"]
+
+# How much structure wraps each event's content.
+#   "content"   the prose alone, blocks separated by blank lines
+#   "labelled"  prefixed with role / kind / tool name
+#
+# TESTED 2026-08-04, back-to-back, same pack and kinds, temperature 0:
+#   content   1661 prompt tokens · seg-001 decision factually INVERTED
+#   labelled  1673 prompt tokens · seg-001 decision correct
+#
+# "content" saves 12 tokens — 0.7%, because role labels are ~3 tokens each — and
+# in that run it flipped a fact. Not worth it. Kept as an option for re-testing
+# on a larger corpus, but "labelled" is the default.
+#
+# Independent of the above: "content" is only coherent while distil_kinds is
+# homogeneous. Add tool_use or tool_result and "labelled" is required, since the
+# tool name carries which step failed — usually the load-bearing detail in a
+# dead_end.
+render_style = "labelled"
+
+# Bounds how much prompt can be prefilled per call. Combined with the model's
+# measured prefill rate, this is the second of the two limits on segment size.
+max_seconds_per_call = 30.0
+
+# Leave unset to derive the budget from the capability record and prompt pack.
+# Set it only to make segments *smaller* than the derived value — an override
+# larger than the context allows is rejected, because it would truncate every
+# prompt silently.
+# segment_budget = 2000
+
+[worker]
+# How often to check the transcript for new content.
+#
+# Cheap to lower: a tick with no new bytes costs a single stat() call, because
+# the follower compares file size before opening anything. The expensive step is
+# distillation, and that only runs when a turn has actually closed. Latency here
+# barely matters — findings are not user-facing in real time, and one segment
+# takes ~10s on the NPU regardless.
+#   env: SYNAPSE_POLL_INTERVAL
+poll_interval_seconds = 30.0
+
+# A turn is only known to be complete once the next one begins, so the newest
+# turn is always held back. Without this, the last turn of a conversation would
+# sit in the buffer forever after the developer stops typing.
+#   env: SYNAPSE_IDLE_FLUSH
+idle_flush_seconds = 120.0
+
+# Offset, pending-turn buffer, and the write-ahead log all live here.
+state_dir = ".synapse"
+
+# "file" writes upstream pushes to sink_file — the orchestrator does not exist
+# yet, so this is what "upstream" means for now. "http" POSTs Finding[] to
+# upstream_url. Both use the identical serialization and the identical
+# write-ahead path.
+sink = "file"
+sink_file = ".synapse/upstream.jsonl"
+upstream_url = "http://127.0.0.1:8787/producer/findings"
+
+# Start from the end of an already-running conversation rather than distilling
+# its whole history. A live transcript is routinely multiple megabytes; from
+# scratch that is hours of NPU time for context nobody asked for.
+attach_at_end = true
+
+[provider]
+base_url = "http://127.0.0.1:18181/v1"
+max_tokens = 900
+temperature = 0.0
+timeout_s = 300.0
+
+# One block per model. usable_context and prefill_toks_per_sec must be MEASURED
+# on the target hardware — model cards are wrong about both. Prompt overhead is
+# deliberately absent: it is derived from the prompt pack, so editing a prompt
+# re-budgets automatically instead of leaving a stale number here.
+[capability."qualcomm/Qwen3-4B-Instruct-2507:W4A16"]
+usable_context = 4096          # measured 2026-08-04; hard ceiling, no --nctx on qairt
+prefill_toks_per_sec = 250.0   # PROVISIONAL — needs a seed-pinned measurement
+response_reserve = 500
+notes = "QAIRT/W4A16, NPU-exclusive, Snapdragon X Elite X1E80100."
+
+# Example of a second arm for the bake-off. llama.cpp Q4_0 also lands on the
+# Hexagon NPU and, unlike qairt, honours --nctx — so usable_context here is a
+# choice rather than a ceiling. Numbers below are UNMEASURED placeholders.
+# [capability."Qwen/Qwen3-4B-Instruct-2507-GGUF:Q4_0"]
+# usable_context = 8192
+# prefill_toks_per_sec = 250.0
+# response_reserve = 500
+# notes = "UNMEASURED placeholder — do not report numbers from this record."

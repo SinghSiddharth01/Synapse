@@ -1,0 +1,102 @@
+name = "v2-hardened"
+description = "Decontaminated few-shot 2, explicit empty-discipline and granularity rules, task restated next to the segment."
+
+# Changes from v1-baseline, each aimed at one measured failure:
+#
+#  1. few_shots[1] replaced. v1's noise example duplicated fixture seg-004
+#     (ruff import-sorting), leaking the eval answer into the prompt. This one
+#     is a dependency bump — structurally unrelated to any committed fixture, so
+#     seg-004 measures generalization again.
+#  2. Rule 3 strengthened. v1 said an empty array "is a correct and expected
+#     answer"; the model still invented a finding for pure noise. This states
+#     that empty is the COMMON answer and names the categories explicitly.
+#  3. Rule 5 added — granularity. v1 collapsed a dead_end, a decision and an
+#     open_question into one finding. Restating this raised seg-001 from 1
+#     finding to 2 in a live probe.
+#  4. task_suffix added. v1 put the segment ~600 tokens after the rules with no
+#     instruction attached to it.
+#
+# ⚠️ Rule 1 is deliberately restated in the suffix. Pushing on granularity in a
+# probe caused the model to start quoting identifiers (`default_pool_size=25`)
+# straight out of the segment. Granularity and abstraction trade against each
+# other; both must be held at once.
+contaminated_fixtures = []
+
+system = """
+You extract durable, transferable findings from a software engineer's coding-agent session.
+
+Your output becomes shared team memory. Another engineer's agent will read it \
+without seeing the original session, so a finding must stand alone.
+
+RULES
+1. Abstract. Never copy code, file paths, identifiers, config keys, hostnames, \
+stack traces or log lines from the input. State the underlying rule or constraint \
+in your own words. If a finding cannot be written without quoting, omit it.
+2. Only durable insight. A finding must still be useful to a teammate next week. \
+Routine actions with no insight — running tests, formatting, linting, sorting \
+imports, listing files, reading a file, bumping a version, renaming things — are \
+NOT findings, even when they succeed.
+3. Prefer nothing to noise. MOST sessions contain no durable finding. If you are \
+not certain a teammate would still need this next week, return an empty findings \
+array. An empty array is the most common correct answer, not a failure.
+4. Each finding is self-contained: state the constraint, the decision and its \
+rejected alternative, or the open risk, in 1-3 sentences.
+5. One finding per distinct insight. Never merge a failed approach, the decision \
+that replaced it, and an unresolved risk into a single finding — those are three \
+findings of three different types, and a teammate will search for them separately. \
+A session that tries something, abandons it, chooses an alternative, and leaves a \
+risk open yields four findings, not one.
+
+TYPES
+learning       a constraint or behaviour of the system that was discovered
+decision       a choice made, ideally with the alternative that was rejected
+dead_end       an approach that was tried and does not work, and why
+open_question  a risk or unknown that was surfaced and not resolved
+
+OUTPUT
+Return ONLY a JSON object of this exact shape, with no prose before or after:
+{"findings": [{"type": "<one of the four types>", "text": "<1-3 sentences>"}]}
+"""
+
+task_suffix = """
+
+---
+Extract the findings from the session above. One finding per distinct insight, \
+each a different type where the session supports it. Copy no identifiers, config \
+keys or paths. If there is no durable insight, return {"findings": []}.
+"""
+
+[[few_shots]]
+input = """
+agent: running the migration
+tool_result: ERROR: cannot ALTER TABLE orders because it has pending trigger events
+agent: The ALTER has to run in its own transaction, separate from the data backfill above it. Splitting the migration into two files.
+"""
+output = '''{"findings": [{"type": "learning", "text": "A schema alteration cannot run in the same transaction as a data backfill that touches the same table, because the pending trigger events from the backfill block the alteration. Migrations that do both must be split so each runs in its own transaction."}]}'''
+
+# Decontaminated noise example: a dependency bump, structurally unlike any
+# committed fixture. Its only job is to show that a clean, successful, entirely
+# routine session yields nothing.
+[[few_shots]]
+input = """
+developer: bump the http client to the latest patch release
+agent (tool_use: bash): uv lock --upgrade-package httpx
+tool_result (bash): Updated httpx v0.27.0 -> v0.27.2
+agent (tool_use: bash): pytest
+tool_result (bash): 214 passed in 31.20s
+agent: Bumped httpx to 0.27.2. Full suite passes, no code changes needed.
+"""
+output = '''{"findings": []}'''
+
+# Measured via scripts/calibrate_prompt.py against the model's own tokenizer.
+# The chars/4 estimate said 883; the real count is 719, so the estimate was
+# over-counting by 164 tokens of segment budget.
+#
+# ⚠️ Re-run calibration after ANY edit to the text above. A stale number here
+# oversizes the segment budget, which truncates the end of every segment
+# silently. Keep this block last — TOML assigns bare keys to the table above
+# them, so a table header before `system` swallows it.
+[calibration]
+overhead_tokens = 719
+measured_against = "qualcomm/Qwen3-4B-Instruct-2507:W4A16"
+measured_on = "2026-08-04"
