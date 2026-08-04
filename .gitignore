@@ -8,3 +8,14 @@ api-1.json
 .env
 
 .DS_Store
+
+# Python / uv
+.venv/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+
+# Worker runtime state: follow offsets, the pending-turn buffer, and the
+# write-ahead log. Machine-local and per-session — committing it would push one
+# developer's transcript position onto everyone else's checkout.
+.synapse/
