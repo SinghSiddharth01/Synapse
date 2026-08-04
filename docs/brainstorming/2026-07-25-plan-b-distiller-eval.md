@@ -1,5 +1,11 @@
 # Synapse — Plan B: Distiller + Eval Harness (Aditya)
 
+> # ⚠️ SUPERSEDED 2026-08-03
+> **Do not execute this plan.** It was written against the pre-revision architecture (remote MCP server, worker→service egress, pre-Attribution contracts) and carries inline code snippets whose shapes no longer exist.
+>
+> Current plans live in [`docs/plans/`](../plans/README.md). Vocabulary in `/CONTEXT.md`.
+> Kept for history — the contract block in Plan 0 Task 2 remains the source the new Plan 0 copies from.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Turn a `Segment` into a validated `Finding[]` by calling the model behind `ModelProvider`, produce an on-target NPU implementation, and build the eval harness that measures quality-vs-Claude, cost, and latency — the numbers that answer *"why not just call Claude?"*.
@@ -9,6 +15,8 @@
 **Tech Stack:** Python 3.12, pytest, Pydantic v2, ONNX Runtime + QNN Execution Provider (X Elite laptop), Ollama (Mac fallback), Anthropic SDK (baseline).
 
 **Owner:** Aditya (owns the X Elite laptop for the NPU spike).
+
+> **⟨CONTRACT REVISION 2026-08-03⟩** — the frozen contracts changed. Inline snippets below still show the old shapes; see the revision table at the top of `2026-07-25-plan-0-foundation.md` before writing code. Affecting this plan most: the distiller stamps `Finding.id` and builds `attributions: list[Attribution]` rather than a bare `contributor`; `provenance` defaults to `distilled`; `status`/`merged_from`/`merged_into` are service-written and producers leave them at defaults. Vocabulary: `/CONTEXT.md`.
 
 > **⟨AMENDED 2026-08-03 D⟩** — see `2026-08-03-agent-detection-demo-storage-amendment.md`. (1) Spike/eval measurements (usable compiled context, prefill tok/s) populate **per-model capability rows** that the segmenter's budget derivation reads — one row per candidate model, not one global number. (2) The distiller prompt is **explicitly first-pass** (Claude-suggested); the eval loop + failure-analysis → prompt-revision loop is the tuning mechanism, and the prompt is not a contract. (3) The eval harness's usage/latency numbers also feed the **pre-recorded A/B demo** (baseline vs Synapse deltas: tokens, wall-clock, duplicated exploration).
 

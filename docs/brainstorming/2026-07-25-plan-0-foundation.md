@@ -1,6 +1,29 @@
 # Synapse — Plan 0: Foundation (Day 0 Blocking)
 
+> # ⚠️ SUPERSEDED 2026-08-03
+> **Do not execute this plan.** It was written against the pre-revision architecture (remote MCP server, worker→service egress, pre-Attribution contracts) and carries inline code snippets whose shapes no longer exist.
+>
+> Current plans live in [`docs/plans/`](../plans/README.md). Vocabulary in `/CONTEXT.md`.
+> Kept for history — the contract block in Plan 0 Task 2 remains the source the new Plan 0 copies from.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+> ## ⟨CONTRACT REVISION 2026-08-03⟩ — read before writing any code
+>
+> A domain-modeling session revised the frozen contracts. **The schema block in Task 2 and the fixture goldens are authoritative.** Inline snippets elsewhere in this plan and in Plans A/B/C still show the pre-revision shapes — translate them using the table below rather than copying them verbatim. Vocabulary is defined in `/CONTEXT.md`; working notes and remaining open questions in `2026-08-03-local-orchestrator-domain-model-amendment.md`.
+>
+> | Was | Now | Why |
+> |---|---|---|
+> | `AgentEvent.session_id`, `Segment.session_id` | `agent_session_id` | "Session" meant four things. An *Agent Session* is one conversation; a *Shared Session* is the collaboration unit. Never just "session". |
+> | `Finding.contributor: str` + `Finding.source_session: str` | `Finding.attributions: list[Attribution]` where `Attribution = {contributor, agent_session, agent}` | Two loose strings could drift apart. A list because a merged Finding carries every source. `agent` is captured free at detection and is what shows a finding crossing Codex → Claude Code. |
+> | *(no id)* | `Finding.id: FindingId`, stamped client-side at distil time | `SyncClient` retries on 5xx, so duplicate delivery is expected, not hypothetical. Ingest upserts by id. Also lets `Conflict` and lineage reference findings instead of embedding copies. |
+> | `Conflict.finding_a: Finding` (by value) | `Conflict.finding_a: FindingId` | A by-value conflict is a frozen snapshot that can never be updated or resolved. |
+> | *(none)* | `Finding.provenance`, `.status`, `.merged_from`, `.merged_into` | Synthesis merges *semantically* — two findings meaning the same thing produce a **new** `SYNTHESIZED` Finding capturing the essence of both, carrying both attributions. Never discard-one, or the second half of a pooled insight is lost; never rewrite an original in place either, or its id points at text its author never wrote. Originals become **tombstones**: `merged_into` set, text retained, excluded from retrieval. Tombstones rather than deletes for three correctness reasons — ingest upserts by id so a 5xx retry must find a known id; `Conflict` holds ids and must follow `merged_into` forward; and the merge is an 8B model's judgement performing the only irreversible action in the system. `RETRIEVABLE == merged_into is None and status is KEPT`. |
+> | *(none)* | `SessionContext.memory_version: int` | Increments once per merge. The entire staleness calculation for the awareness layer. |
+>
+> **Two rules that fall out and are easy to get wrong:**
+> 1. **Retrieval reads the Finding Log, not `working_memory`.** The prose is bounded and exists to keep the merge prompt fixed-cost; it is read by the next merge and nothing else. If `query()` ranks over raw pushed findings instead of the curated Log, synthesis's dedup and trivia filter protect nothing a teammate ever sees.
+> 2. **Awareness suppresses a Finding only when *every* attribution is the asking agent's own Agent Session** — scoped to Agent Session, not Contributor. One person's two agents must still learn from each other, and a Synthesized Finding carrying a teammate's contribution is always shown.
 
 **Goal:** Scaffold the Synapse monorepo, freeze all cross-track contracts, land the `FakeProvider`, commit hand-authored fixture Segments + golden Findings, and get a red walking-skeleton test that will turn green when the real implementations arrive.
 
@@ -439,13 +462,24 @@ Create `packages/contracts/src/synapse_contracts/schemas.py`:
 """Frozen cross-track schemas.
 
 These types define the handoff points between components:
-- AgentEvent: what the Source adapter produces per raw JSONL line (internal to worker)
+- AgentEvent: what the Source adapter produces per raw transcript line (internal to worker)
 - Segment: bounded run of AgentEvents; the Distiller's input (worker → distiller boundary)
+- Attribution: where a Finding came from — Contributor / Agent Session / Agent
 - Finding: distilled unit of team intelligence (distiller → service boundary)
-- SynapseSession / LocalBinding: shared-session identity and per-machine attribution
+- SynapseSession / LocalBinding: Shared Session identity and per-machine attribution
 - Conflict: two Findings the synthesizer judged to disagree
-- SessionContext: merged working memory + conflicts, returned by synthesis
+- SessionContext: Working Memory + conflicts, returned by synthesis
 - ModelResult: what any ModelProvider.complete() returns; usage/latency baked in
+
+Vocabulary is defined in /CONTEXT.md. In particular: an *Agent Session* is one
+conversation with a coding agent; a *Shared Session* is the collaboration unit.
+Never call either one just "session".
+
+Shared Memory is two things, deliberately: the Working Memory (bounded prose,
+on SessionContext) keeps the merge prompt fixed-cost, while the Finding Log
+(every Finding, behind the service's storage interface) is what retrieval ranks
+over. Retrieval must read the Log, not the prose — otherwise synthesis's dedup
+and trivia filter protect nothing a teammate actually sees.
 """
 
 from __future__ import annotations
@@ -465,31 +499,71 @@ class AgentEvent(BaseModel):
     content: str
     tool_name: str | None = None
     ts: datetime
-    session_id: str
+    agent_session_id: str
     cwd: str | None = None
     git_branch: str | None = None
 
 
 class Segment(BaseModel):
-    """A bounded run of AgentEvents split on turn boundary.
+    """A bounded run of AgentEvents split on turn boundary AND token budget.
 
     This is the distiller's input. Hand-authored fixture Segments in
     fixtures/segments/*.json pin the boundary between Akhil (segmenter)
     and Aditya (distiller); the segmenter must reproduce them exactly.
+
+    The budget is derived per model from the resolved distiller's measured
+    capability record — never a shared hard-coded constant.
     """
 
     id: str
-    session_id: str
+    agent_session_id: str
     events: list[AgentEvent]
     started_at: datetime
     ended_at: datetime
 
 
+FindingId = str
+
+
 class FindingType(StrEnum):
+    """Provisional taxonomy — all four are epistemic. Real output may later
+    need referential/procedural/artifactual kinds. Adding a member is a
+    one-line change all tracks pick up on the next pull; do not build
+    tolerance machinery for it. See /CONTEXT.md.
+    """
+
     LEARNING = "learning"
     DECISION = "decision"
     DEAD_END = "dead_end"
     OPEN_QUESTION = "open_question"
+
+
+class Provenance(StrEnum):
+    """How a Finding was produced — orthogonal to who it came from."""
+
+    DISTILLED = "distilled"      # worker, from a transcript Segment
+    CONTRIBUTED = "contributed"  # agent prose via contribute(), locally distilled
+    SYNTHESIZED = "synthesized"  # written by synthesis when merging (service-side)
+
+
+class FindingStatus(StrEnum):
+    """Synthesis's quality verdict. Merge state is expressed by merged_into, not here."""
+
+    KEPT = "kept"        # stands on its own (default until synthesis says otherwise)
+    TRIVIAL = "trivial"  # restates an action without insight; filtered from retrieval
+
+
+class Attribution(BaseModel):
+    """Where a Finding came from, at three levels.
+
+    Carried as one value so the levels cannot drift apart. Read at different
+    levels for different jobs: `contributor` for attribution and conflicts,
+    `agent_session` for awareness suppression, `agent` for the cross-agent story.
+    """
+
+    contributor: str      # the human, e.g. "aditya"
+    agent_session: str    # their Agent Session id
+    agent: str            # the Agent product, e.g. "claude-code" | "codex"
 
 
 class Finding(BaseModel):
@@ -498,47 +572,95 @@ class Finding(BaseModel):
     `text` is abstracted, not verbatim code. The distiller redacts by design
     so that raw work stays on the device — only sanitized findings cross the
     device boundary.
+
+    `id` is stamped client-side at distil time so a retried push is idempotent
+    (ingest upserts by id) and so Conflict and lineage can reference findings
+    rather than embedding copies.
+
+    `attributions` is a list because a Synthesized Finding carries every source
+    it was merged from. Awareness suppresses a Finding only when *every*
+    attribution is the asking agent's own Agent Session.
     """
 
+    id: FindingId
     type: FindingType
     text: str
-    contributor: str
+    attributions: list[Attribution]
     ts: datetime
-    source_session: str
     refs: list[str] = Field(default_factory=list)
+    provenance: Provenance = Provenance.DISTILLED
+
+    # Written by synthesis, service-side. Producers leave these at defaults.
+    #
+    # A merged-away Finding becomes a TOMBSTONE: merged_into is set, and it keeps
+    # its text and attributions but is excluded from retrieval. It is not deleted,
+    # for three reasons that are about correctness rather than history:
+    #   1. ingest upserts by id, so a 5xx retry must find a known id or it
+    #      re-inserts a finding that has already been merged away;
+    #   2. Conflict references FindingIds and must be able to follow merged_into
+    #      forward rather than dangle;
+    #   3. the merge decision is made by an 8B model we expect to be imperfect,
+    #      and it is the only irreversible action in the system.
+    #
+    # RETRIEVABLE  ==  merged_into is None and status is KEPT
+    status: FindingStatus = FindingStatus.KEPT
+    merged_from: list[FindingId] = Field(default_factory=list)  # set on a SYNTHESIZED finding
+    merged_into: FindingId | None = None                        # set on a tombstone
 
 
 class SynapseSession(BaseModel):
-    """A shared team-intelligence session."""
+    """A Shared Session — the collaboration unit."""
 
     shared_id: str
     purpose: str
-    members: list[str]
+    members: list[str]  # Contributors (humans)
     created_by: str
 
 
 class LocalBinding(BaseModel):
-    """Maps a local agent-session ID to a shared Synapse session, with attribution."""
+    """Maps one Agent Session to one Shared Session, carrying the Contributor.
 
-    local_agent_session_id: str
+    Effectively the Attribution template for an Agent Session plus the Shared
+    Session it feeds. Owned by the orchestrator, which stamps it onto every
+    Finding arriving from any local producer. Local state, not a service
+    contract — one laptop can hold several, one per Agent Session.
+    """
+
+    agent_session_id: str
     shared_id: str
     contributor: str
+    agent: str
 
 
 class Conflict(BaseModel):
-    """Two Findings the synthesizer judged to disagree."""
+    """Two Findings the synthesizer judged to disagree.
 
-    finding_a: Finding
-    finding_b: Finding
+    References ids rather than embedding copies, so the Finding Log stays the
+    single source of truth and a conflict can later be updated or resolved.
+    """
+
+    finding_a: FindingId
+    finding_b: FindingId
     description: str
 
 
 class SessionContext(BaseModel):
-    """Merged working memory + conflicts, organized by session purpose."""
+    """Working Memory + conflicts, organized by purpose. Returned by synthesis.
+
+    This is only half of Shared Memory. `working_memory` is bounded prose,
+    rewritten each merge to keep the merge prompt fixed-cost. The Finding Log
+    lives behind the service's storage interface and is what retrieval ranks
+    over — its shape is a deliberate first pass and expected to evolve.
+
+    `memory_version` increments once per merge. It is the whole staleness
+    calculation for the awareness layer: the watermark endpoint compares it
+    against each member's last-seen value.
+    """
 
     shared_id: str
     purpose: str
     working_memory: str
+    memory_version: int = 0
     conflicts: list[Conflict] = Field(default_factory=list)
 
 
@@ -583,12 +705,16 @@ from synapse_contracts.schemas import (
 
 __all__ = [
     "AgentEvent",
+    "Attribution",
     "Conflict",
     "Finding",
+    "FindingId",
+    "FindingStatus",
     "FindingType",
     "LocalBinding",
     "ModelResult",
     "ModelUsage",
+    "Provenance",
     "Segment",
     "SessionContext",
     "SynapseSession",
@@ -990,19 +1116,27 @@ Create `fixtures/findings/seg-001.findings.json`:
 ```json
 [
   {
+    "id": "f-0001",
     "type": "learning",
     "text": "Auth middleware rejects tokens whose 'iat' claim is more than 60 seconds in the future — used to diagnose flaky tests where the test clock drifts.",
-    "contributor": "siddsing",
+    "attributions": [
+      {"contributor": "siddsing", "agent_session": "local-fixture-abc", "agent": "claude-code"}
+    ],
     "ts": "2026-07-25T12:04:30Z",
-    "source_session": "local-fixture-abc",
-    "refs": ["auth/middleware.py:88-102"]
+    "refs": ["auth/middleware.py:88-102"],
+    "provenance": "distilled",
+    "status": "kept"
   },
   {
+    "id": "f-0002",
     "type": "dead_end",
     "text": "Increasing the test-runner's global timeout does not fix the flakiness — the tokens are rejected before the test's assertion runs.",
-    "contributor": "siddsing",
+    "attributions": [
+      {"contributor": "siddsing", "agent_session": "local-fixture-abc", "agent": "claude-code"}
+    ],
     "ts": "2026-07-25T12:03:00Z",
-    "source_session": "local-fixture-abc"
+    "provenance": "distilled",
+    "status": "kept"
   }
 ]
 ```

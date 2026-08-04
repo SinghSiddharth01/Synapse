@@ -1,5 +1,11 @@
 # Synapse — Plan A: Edge Worker (Akhil)
 
+> # ⚠️ SUPERSEDED 2026-08-03
+> **Do not execute this plan.** It was written against the pre-revision architecture (remote MCP server, worker→service egress, pre-Attribution contracts) and carries inline code snippets whose shapes no longer exist.
+>
+> Current plans live in [`docs/plans/`](../plans/README.md). Vocabulary in `/CONTEXT.md`.
+> Kept for history — the contract block in Plan 0 Task 2 remains the source the new Plan 0 copies from.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build the on-device worker that observes a coding agent's session, normalizes it into `AgentEvent`s, batches them into `Segment`s on turn boundaries, and syncs distilled `Finding`s to the Synapse service — all with zero modification to the agent being observed.
@@ -9,6 +15,8 @@
 **Tech Stack:** Python 3.12, pytest, `httpx`, `pytest-httpserver` (for the mock ingest server).
 
 **Owner:** Akhil.
+
+> **⟨CONTRACT REVISION 2026-08-03⟩** — the frozen contracts changed. Inline snippets below still show the old shapes; see the revision table at the top of `2026-07-25-plan-0-foundation.md` before writing code. Affecting this plan most: `session_id` → `agent_session_id` on `AgentEvent`/`Segment`; `Finding.contributor` + `.source_session` → `attributions: list[Attribution]`; `Finding.id` is stamped client-side at distil time so retried pushes are idempotent. Vocabulary: `/CONTEXT.md`.
 
 > **⟨AMENDED 2026-08-03 D⟩** — see `2026-08-03-agent-detection-demo-storage-amendment.md`. (1) The source layer gains an **agent registry + auto-detection**: the worker watches registered transcript roots (Claude Code `~/.claude/projects/`, Codex's session dir) and spawns the matching follower+adapter on fresh activity — no per-agent configuration, and compaction summaries the agent writes are ingested as events. (2) **`CodexSource` is elevated from stretch to the demo pair** — required by recording day. (3) The segmenter's token budget is **per-model**: read from the resolved distiller's capability record (usable context, prefill tok/s), never a hard-coded constant; the ~2–2.5K figure below is the expected value for a 4K qairt bundle, not a global.
 

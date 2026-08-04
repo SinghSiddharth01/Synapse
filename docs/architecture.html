@@ -465,7 +465,7 @@
     <p class="thesis">Every engineer's coding agent learns something. None of them tell each other. Synapse is the listener in between.</p>
     <div class="meta">
       <span><b>Status</b> &nbsp;approved design, pre-implementation</span>
-      <span><b>Spec</b> &nbsp;2026-07-25, amended 2026-08-03 ×5</span>
+      <span><b>Spec</b> &nbsp;2026-07-25, amended 2026-08-03 ×6</span>
       <span><b>Measured</b> &nbsp;NPU/GenieX benchmarks, 2026-07-30 on the X Elite</span>
       <span><b>Event</b> &nbsp;Snapdragon Multiverse, build week Aug 3–7</span>
     </div>
@@ -480,18 +480,18 @@
 
     <div class="invariant prose">
       <div class="label">The invariant everything else serves</div>
-      <p>Raw work never leaves the device. The <span class="m">Finding</span> is the trust boundary — above it, only abstracted text crosses the wire; below it, any model is fair game.</p>
+      <p>Raw work never leaves the device. The <span class="m">Finding</span> is the trust boundary — above it, only abstracted text crosses the wire; below it, any model is fair game. Structurally: the worker holds transcripts and no network, the orchestrator holds the network and no raw work, and findings are the only thing that passes between them.</p>
     </div>
   </section>
 
   <section>
     <div class="eyebrow">The flow, end to end</div>
     <h2>One transcript in, ranked findings back out</h2>
-    <p class="prose">Read it as two planes sharing one service: transcripts flow <em>down</em> the left column and across to the service (the data plane), and queries come <em>back</em> along the bottom rail (the retrieval plane). The dashed wall is the only thing the product really promises.</p>
+    <p class="prose">Everything on the developer's machine sits left of the dashed wall. The <strong>edge worker</strong> is the only thing that ever sees a raw transcript; the <strong>orchestrator</strong> is the only thing that talks to the network. Findings enter Synapse through one door and leave through one door, which is what makes the promise auditable rather than aspirational.</p>
 
     <figure>
       <div class="canvas">
-        <svg viewBox="0 0 960 664" role="img" aria-label="Synapse end-to-end architecture: a coding agent's JSONL transcript passes through a five-stage edge worker on the developer's machine — file follower, source adapter, segmenter, distiller, sync client — after which only distilled findings cross a dashed device boundary to the Synapse service, where an ingest API, synthesis on Cloud AI 100, and an MCP server return ranked findings to the agent.">
+        <svg viewBox="0 0 980 630" role="img" aria-label="Synapse architecture. On the developer's machine, an edge worker holds read-only access to the coding agent's transcript and runs follow, adapt, segment and distil, writing findings to a durable log. It posts findings to a local orchestrator, which hosts the MCP server the agent connects to, owns the local binding, keeps its own durable log, and is the single egress point. Only findings cross the dashed device boundary to the remote Synapse service, where ingest, synthesis on Cloud AI 100 and retrieval maintain the shared memory.">
           <defs>
             <marker id="ar-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
               <path d="M 0 0 L 10 5 L 0 10 z" class="a-ink"/>
@@ -504,90 +504,107 @@
             </marker>
           </defs>
 
-          <!-- zones -->
-          <rect x="44" y="104" width="340" height="492" rx="10" class="s-zone-edge"/>
-          <text x="60" y="128" class="s-zonelabel" fill="var(--edge)">EDGE WORKER · SNAPDRAGON X ELITE</text>
-
-          <rect x="572" y="206" width="344" height="334" rx="10" class="s-zone-cloud"/>
-          <text x="588" y="230" class="s-zonelabel" fill="var(--cloud)">SYNAPSE SERVICE · ANY LAPTOP</text>
+          <!-- machine zone -->
+          <rect x="24" y="86" width="600" height="514" rx="10" class="s-zone-edge"/>
+          <text x="42" y="110" class="s-zonelabel" fill="var(--edge)">DEVELOPER'S MACHINE · SNAPDRAGON X ELITE</text>
 
           <!-- agent -->
-          <rect x="64" y="30" width="300" height="52" rx="6" class="s-box"/>
-          <text x="84" y="51" class="s-title">Coding agent — Claude Code / Codex / any</text>
-          <text x="84" y="68" class="s-sub">writes its session transcript, unmodified</text>
-          <line x1="214" y1="86" x2="214" y2="140" class="s-line" marker-end="url(#ar-ink)"/>
+          <rect x="42" y="126" width="264" height="52" rx="6" class="s-box"/>
+          <text x="60" y="147" class="s-title">Coding agent</text>
+          <text x="60" y="164" class="s-sub">Claude Code · Codex · any, unmodified</text>
 
-          <!-- edge stages -->
-          <rect x="68" y="150" width="292" height="52" rx="6" class="s-box-edge"/>
-          <text x="86" y="171" class="s-title">File follower</text>
-          <text x="86" y="188" class="s-sub">tail · rotation · partial &amp; malformed lines</text>
+          <!-- worker -->
+          <rect x="42" y="222" width="264" height="130" rx="6" class="s-box-edge"/>
+          <text x="60" y="245" class="s-title">Edge worker</text>
+          <text x="60" y="263" class="s-sub">detect agent · follow · adapt</text>
+          <text x="60" y="279" class="s-sub">segment (per-model budget) · compact</text>
+          <text x="60" y="295" class="s-sub">distil — 4B SLM on the Hexagon NPU</text>
+          <text x="60" y="317" class="s-flow" fill="var(--edge)">durable log — written before any send</text>
+          <text x="60" y="337" class="s-sub">the only component that sees raw work</text>
 
-          <rect x="68" y="242" width="292" height="52" rx="6" class="s-box-edge"/>
-          <text x="86" y="263" class="s-title">Source adapter</text>
-          <text x="86" y="280" class="s-sub">auto-selected by agent detection · normalize</text>
+          <!-- RO access -->
+          <path d="M 174 218 L 174 182" class="s-line-edge s-dash" marker-end="url(#ar-edge)"/>
+          <text x="184" y="204" class="s-flow">RO access to the transcript</text>
 
-          <rect x="68" y="334" width="292" height="52" rx="6" class="s-box-edge"/>
-          <text x="86" y="355" class="s-title">Segmenter + compaction</text>
-          <text x="86" y="372" class="s-sub">turn boundary AND token budget</text>
+          <!-- orchestrator -->
+          <rect x="346" y="222" width="260" height="130" rx="6" class="s-box-edge"/>
+          <text x="364" y="245" class="s-title">Orchestrator</text>
+          <text x="364" y="263" class="s-sub">MCP server · owns LocalBinding</text>
+          <text x="364" y="279" class="s-sub">producer endpoint: Finding[] only</text>
+          <text x="364" y="295" class="s-sub">stamps Attribution</text>
+          <text x="364" y="317" class="s-flow" fill="var(--edge)">durable log — retained for resync</text>
+          <text x="364" y="337" class="s-sub">the sole egress point</text>
 
-          <rect x="68" y="426" width="292" height="52" rx="6" class="s-box-edge"/>
-          <text x="86" y="447" class="s-title">Distiller</text>
-          <text x="86" y="464" class="s-sub">~4B SLM · GenieX on the Hexagon NPU</text>
+          <!-- worker -> orchestrator -->
+          <line x1="310" y1="270" x2="340" y2="270" class="s-line-edge" marker-end="url(#ar-edge)"/>
+          <text x="326" y="262" class="s-flow" text-anchor="middle">Finding[]</text>
+          <line x1="340" y1="300" x2="310" y2="300" class="s-line-edge s-dash" marker-end="url(#ar-edge)"/>
+          <text x="326" y="316" class="s-flow" text-anchor="middle">contribute → distil</text>
 
-          <rect x="68" y="518" width="292" height="52" rx="6" class="s-box-edge"/>
-          <text x="86" y="539" class="s-title">Sync client</text>
-          <text x="86" y="556" class="s-sub">POST findings · join shared session</text>
+          <!-- agent <-> orchestrator (MCP) -->
+          <path d="M 306 152 L 476 152 L 476 218" class="s-line-cloud" marker-end="url(#ar-cloud)"/>
+          <path d="M 466 218 L 466 162 L 306 162" class="s-line-cloud" marker-end="url(#ar-cloud)"/>
+          <text x="392" y="140" class="s-flow" text-anchor="middle">MCP over localhost · query · contribute</text>
+          <text x="392" y="186" class="s-flow" text-anchor="middle">briefing rides `instructions` at connect</text>
 
-          <line x1="214" y1="206" x2="214" y2="236" class="s-line-edge" marker-end="url(#ar-edge)"/>
-          <line x1="214" y1="298" x2="214" y2="328" class="s-line-edge" marker-end="url(#ar-edge)"/>
-          <line x1="214" y1="390" x2="214" y2="420" class="s-line-edge" marker-end="url(#ar-edge)"/>
-          <line x1="214" y1="482" x2="214" y2="512" class="s-line-edge" marker-end="url(#ar-edge)"/>
+          <!-- machine footnote -->
+          <rect x="42" y="384" width="564" height="66" rx="6" class="s-box"/>
+          <text x="60" y="406" class="s-title">Why two local processes rather than one</text>
+          <text x="60" y="424" class="s-sub">The worker holds raw transcripts and no network. The orchestrator holds the network and no raw work.</text>
+          <text x="60" y="440" class="s-sub">Findings are the only thing that passes between them — so the boundary is structural, not a promise.</text>
 
-          <text x="226" y="226" class="s-flow">JSONL lines</text>
-          <text x="226" y="318" class="s-flow">AgentEvent</text>
-          <text x="226" y="410" class="s-flow">Segment ≤ per-model budget</text>
-          <text x="226" y="502" class="s-flow">Finding[]</text>
+          <text x="42" y="482" class="s-flow" fill="var(--ink-faint)">MCP identifies the client product, not the conversation — the Agent Session is resolved via the worker's</text>
+          <text x="42" y="498" class="s-flow" fill="var(--ink-faint)">live-session detection. Named limit: one active Agent Session per agent product per machine.</text>
 
-          <!-- device boundary -->
-          <line x1="478" y1="16" x2="478" y2="648" class="s-bound"/>
-          <rect x="456" y="52" width="40" height="212" class="s-mask"/>
-          <text x="470" y="158" class="s-bell" text-anchor="middle" transform="rotate(-90 470 158)">DEVICE BOUNDARY</text>
-          <text x="488" y="158" class="s-bell-sub" text-anchor="middle" transform="rotate(-90 488 158)">only Findings cross</text>
+          <!-- boundary -->
+          <line x1="656" y1="20" x2="656" y2="612" class="s-bound"/>
+          <rect x="636" y="150" width="40" height="212" class="s-mask"/>
+          <text x="648" y="256" class="s-bell" text-anchor="middle" transform="rotate(-90 648 256)">DEVICE BOUNDARY</text>
+          <text x="666" y="256" class="s-bell-sub" text-anchor="middle" transform="rotate(-90 666 256)">only Findings cross</text>
 
-          <!-- crossing -->
-          <line x1="360" y1="544" x2="588" y2="280" class="s-line-edge" marker-end="url(#ar-edge)"/>
-          <text x="467" y="400" class="s-flow" text-anchor="middle" transform="rotate(-49 467 400)">Finding[] over HTTPS</text>
+          <!-- egress -->
+          <line x1="610" y1="270" x2="700" y2="270" class="s-line-edge" marker-end="url(#ar-edge)"/>
+          <text x="700" y="248" class="s-flow" text-anchor="middle">HTTPS</text>
 
-          <!-- service stages -->
-          <rect x="596" y="250" width="296" height="52" rx="6" class="s-box-cloud"/>
-          <text x="614" y="271" class="s-title">Ingest API</text>
-          <text x="614" y="288" class="s-sub">findings in · tagged contributor + shared_id</text>
+          <!-- service -->
+          <rect x="700" y="126" width="256" height="386" rx="10" class="s-zone-cloud"/>
+          <text x="716" y="150" class="s-zonelabel" fill="var(--cloud)">SYNAPSE SERVICE</text>
+          <text x="716" y="166" class="s-sub">remote — a teammate's laptop for the demo</text>
 
-          <rect x="596" y="350" width="296" height="52" rx="6" class="s-box-cloud"/>
-          <text x="614" y="371" class="s-title">Synthesis</text>
-          <text x="614" y="388" class="s-sub">Llama-3.1-8B on Cloud AI 100 (hosted)</text>
+          <rect x="716" y="186" width="224" height="52" rx="6" class="s-box-cloud"/>
+          <text x="732" y="207" class="s-title">Ingest</text>
+          <text x="732" y="224" class="s-sub">idempotent upsert by Finding.id</text>
 
-          <rect x="596" y="450" width="296" height="52" rx="6" class="s-box-cloud"/>
-          <text x="614" y="471" class="s-title">MCP server</text>
-          <text x="614" y="488" class="s-sub">HTTP/SSE · create · join · query</text>
+          <rect x="716" y="266" width="224" height="68" rx="6" class="s-box-cloud"/>
+          <text x="732" y="287" class="s-title">Synthesis</text>
+          <text x="732" y="304" class="s-sub">Llama-3.1-8B on Cloud AI 100</text>
+          <text x="732" y="320" class="s-sub">semantic merge · conflicts · trivia</text>
 
-          <line x1="744" y1="306" x2="744" y2="344" class="s-line-cloud" marker-end="url(#ar-cloud)"/>
-          <line x1="744" y1="406" x2="744" y2="444" class="s-line-cloud" marker-end="url(#ar-cloud)"/>
-          <text x="756" y="323" class="s-flow">merge · dedupe · flag conflicts</text>
-          <text x="756" y="423" class="s-flow">SessionContext + Conflict[]</text>
+          <rect x="716" y="362" width="224" height="68" rx="6" class="s-box-cloud"/>
+          <text x="732" y="383" class="s-title">Shared Memory</text>
+          <text x="732" y="400" class="s-sub">Working Memory — bounded prose</text>
+          <text x="732" y="416" class="s-sub">Finding Log — what retrieval ranks</text>
 
-          <!-- retrieval rail back to the agent -->
-          <path d="M 744 506 L 744 630 L 16 630 L 16 56 L 58 56" class="s-line-cloud" stroke-dasharray="1 0" marker-end="url(#ar-cloud)"/>
-          <text x="420" y="620" class="s-flow" text-anchor="middle">retrieval plane — query(nl) → ranked Finding[], pull-only</text>
+          <rect x="716" y="450" width="224" height="44" rx="6" class="s-box-cloud"/>
+          <text x="732" y="471" class="s-title">Retrieval</text>
+          <text x="732" y="486" class="s-sub">ranked Finding[] · memory_version</text>
+
+          <line x1="828" y1="242" x2="828" y2="260" class="s-line-cloud" marker-end="url(#ar-cloud)"/>
+          <line x1="828" y1="338" x2="828" y2="356" class="s-line-cloud" marker-end="url(#ar-cloud)"/>
+          <line x1="828" y1="434" x2="828" y2="444" class="s-line-cloud" marker-end="url(#ar-cloud)"/>
+
+          <!-- retrieval return -->
+          <path d="M 716 472 L 660 472 L 660 560 L 476 560 L 476 358" class="s-line-cloud" marker-end="url(#ar-cloud)"/>
+          <text x="568" y="552" class="s-flow" text-anchor="middle">ranked Finding[] back to the agent</text>
         </svg>
       </div>
-      <figcaption>Reconstructed from <a href="https://miro.com/app/board/uXjVH4YqbFQ=/?moveToWidget=3458764679158496052">Synapse — End-to-End Architecture Flow</a> on the Snapdragon Workspace board, updated to the 2026-08-03 amendments (GenieX on the edge, hosted Cirrascale AI-100 in the cloud). The follower is drawn ahead of the source adapter here, which is the actual data-flow order.</figcaption>
+      <figcaption>Revised 2026-08-03: the MCP server moved onto the machine as an orchestrator, and the edge worker no longer talks to the service at all. That collapses the old two-plane split — data and retrieval now share one local hub — and leaves a single egress point to audit. Both hops write findings to a durable log <em>before</em> attempting to send, because distillation is the most expensive step in the system and cannot be repeated.</figcaption>
     </figure>
   </section>
 
   <section>
     <div class="eyebrow">Major components</div>
-    <h2>Eight stages and three things that cut across them</h2>
+    <h2>The stages, and the things that cut across them</h2>
     <p class="prose">Numbered in the order a transcript travels. Each stage is defined by what it takes in and what it hands on — which is why the contracts get frozen before any of them get written.</p>
 
     <div class="stages">
@@ -638,17 +655,30 @@
       <div class="stage on-edge">
         <div class="n">05</div>
         <div class="body">
-          <h3>Sync client</h3>
-          <p>Pushes findings to the service tagged with contributor and shared session id, and performs the join that binds a local agent session to a shared one. Retries on 5xx. This is the only outbound path on the device.</p>
-          <div class="io"><b>in</b> Finding[] &nbsp;→&nbsp; <b>out</b> HTTPS POST</div>
+          <h3>Producer client</h3>
+          <p>Posts findings to the local orchestrator. Findings are written to a durable log <em>the moment the distiller returns</em>, before any send is attempted — distillation is the most expensive step in the system and is unrepeatable, since the worker never re-reads a transcript position. A dropped finding is NPU work permanently lost.</p>
+          <div class="io"><b>in</b> Finding[] &nbsp;→&nbsp; <b>out</b> durable log, then localhost POST</div>
         </div>
         <div class="who"><span>Akhil</span></div>
+      </div>
+
+      <div class="band edge">Orchestrator — local hub, one per machine, the sole egress</div>
+
+      <div class="stage on-edge">
+        <div class="n">06</div>
+        <div class="body">
+          <h3>Orchestrator</h3>
+          <p>The single place findings enter Synapse from this machine, whoever produced them — the worker passively, or the agent deliberately via <span class="m">contribute</span>. It accepts <span class="m">Finding[]</span> and nothing else, stamps Attribution from the LocalBinding it owns, and forwards over HTTPS.</p>
+          <p>It also hosts the MCP server the agent connects to, which is what makes the awareness layer possible at all: at connect time it already knows the agent product, the Agent Session and the binding, so the arrival briefing can ride the protocol itself. Its own durable log is retained after sending, which turns a service restart from total loss into a resync.</p>
+          <div class="io"><b>in</b> Finding[] from any producer &nbsp;→&nbsp; <b>out</b> HTTPS to the service</div>
+        </div>
+        <div class="who"><span>split by interface</span></div>
       </div>
 
       <div class="band cloud">Service — runs on any laptop, reaches the accelerator over HTTPS</div>
 
       <div class="stage on-cloud">
-        <div class="n">06</div>
+        <div class="n">07</div>
         <div class="body">
           <h3>Ingest API</h3>
           <p>Receives findings from every member's worker and handles session create and join. Frozen as a contract on day zero so the sync client can be built and tested against a mock server before the service exists.</p>
@@ -658,20 +688,22 @@
       </div>
 
       <div class="stage on-cloud">
-        <div class="n">07</div>
+        <div class="n">08</div>
         <div class="body">
           <h3>Synthesis</h3>
-          <p>The reduce half of the map-reduce. Merges each new batch into the running shared memory, deduplicates, flags contradictions as conflicts, organizes against the session's stated purpose, and filters out trivia the small model over-produced. Runs on Llama-3.1-8B on hosted Cloud AI 100.</p>
-          <div class="io"><b>in</b> Finding[] &nbsp;→&nbsp; <b>out</b> SessionContext + Conflict[]</div>
+          <p>The reduce half of the map-reduce, on Llama-3.1-8B on hosted Cloud AI 100. Rewrites the bounded working memory, flags contradictions as conflicts, and filters out trivia the small model over-produced.</p>
+          <p>Its subtlest job is merging. Two findings that <em>mean</em> the same thing produce a <strong>new</strong> finding capturing the essence of both and carrying both attributions — never discard-one, because <em>"the window is 40 ms"</em> plus <em>"it fails above ~40 ms under load"</em> must not quietly lose "under load". Pooling those halves is the entire product. The originals become tombstones: text kept, excluded from retrieval, never deleted — a retry must still recognise their ids, conflicts must follow them forward, and this merge is an 8B model performing the only irreversible action in the system.</p>
+          <div class="io"><b>in</b> Finding[] &nbsp;→&nbsp; <b>out</b> Working Memory + Conflict[] + curated Finding Log</div>
         </div>
         <div class="who"><span>Siddsing</span></div>
       </div>
 
       <div class="stage on-cloud">
-        <div class="n">08</div>
+        <div class="n">09</div>
         <div class="body">
-          <h3>MCP server</h3>
-          <p>The agent-facing surface, over remote HTTP/SSE: <span class="m">create_session</span>, <span class="m">join_session</span>, <span class="m">query</span>. Retrieval is the large model reading the query against the shared memory and ranking, not a vector index. Nothing reaches an agent that has not joined a session — and once it has, keeping it aware is a design problem in its own right (see <a href="#awareness">retrieval &amp; awareness</a>).</p>
+          <h3>Retrieval</h3>
+          <p>The large model reads the query against the curated Finding Log and ranks — not a vector index. It must rank over the <em>Log</em>, not the working-memory prose: if it ranked raw pushed findings instead, synthesis's dedup and trivia filter would protect nothing a teammate ever sees. Tombstoned and trivial findings never surface.</p>
+          <p>Nothing reaches an agent whose machine has not joined a session — and once it has, keeping it aware is a design problem in its own right (see <a href="#awareness">retrieval &amp; awareness</a>).</p>
           <div class="io"><b>in</b> natural-language query &nbsp;→&nbsp; <b>out</b> ranked Finding[]</div>
         </div>
         <div class="who"><span>Siddsing</span></div>
@@ -725,11 +757,12 @@
         <tbody>
           <tr><td>AgentEvent</td><td>One normalized turn part — role, kind (text / thinking / tool_use / tool_result), content, timestamp, cwd, branch. Agent-agnostic and internal to the worker.</td></tr>
           <tr><td>Segment</td><td>A bounded run of events, split on turn boundary and a per-model token budget (derived from the distiller's measured capabilities, never hard-coded), deterministically compacted. The distiller's unit of work.</td></tr>
-          <tr><td>Finding</td><td>The atom of shared knowledge: type (learning / decision / dead_end / open_question), abstracted text, contributor, timestamp, provenance. This is what crosses the device boundary.</td></tr>
+          <tr><td>Attribution</td><td>Where a Finding came from, at three levels — Contributor (the human), Agent Session (the conversation), Agent (the product). One value, so the levels cannot drift apart. Attribution is read at a different level for each job: the human for credit and conflicts, the session for awareness suppression, the product for the cross-agent story.</td></tr>
+          <tr><td>Finding</td><td>The atom of shared knowledge: an id stamped at distil time, a type, abstracted text, a <em>list</em> of attributions, and provenance. This is what crosses the device boundary. The id makes a retried push idempotent and lets conflicts and merge lineage reference findings rather than embed copies.</td></tr>
           <tr><td>SynapseSession</td><td>The shared session: id, stated purpose, members. Opt-in by construction — you create one or you join one.</td></tr>
-          <tr><td>LocalBinding</td><td>Maps a local agent session to a shared session id plus contributor. Set once, at join.</td></tr>
-          <tr><td>Conflict</td><td>Two findings that disagree, plus a description. Surfaced rather than silently resolved.</td></tr>
-          <tr><td>SessionContext</td><td>The merged shared working memory with its conflicts, organized against the session's purpose. What retrieval reads.</td></tr>
+          <tr><td>LocalBinding</td><td>Maps one Agent Session to one Shared Session, carrying the Contributor — effectively the Attribution template for that conversation. Owned by the orchestrator, held in a local file so it survives a restart. One laptop holds several.</td></tr>
+          <tr><td>Conflict</td><td>Two findings that disagree, plus a description. References finding <em>ids</em>, not embedded copies, so a conflict can be updated or resolved rather than frozen at the moment it was found. Surfaced, never silently reconciled.</td></tr>
+          <tr><td>SessionContext</td><td>Working Memory — bounded prose, rewritten each merge to keep synthesis fixed-cost — plus conflicts and a <span class="m">memory_version</span>. Only half of shared memory: the Finding Log is the other half, and it is the half retrieval ranks over.</td></tr>
           <tr><td>ModelProvider</td><td><span class="m">complete(messages, schema?) → ModelResult</span> carrying data, token usage, latency, and whether the output validated. Usage and latency being in the contract is what makes the benchmark nearly free.</td></tr>
         </tbody>
       </table>
@@ -842,7 +875,7 @@
 
     <figure>
       <div class="canvas">
-        <svg viewBox="0 0 1000 400" role="img" aria-label="A timeline of one agent session. Before joining, Synapse is dormant and injects nothing. On join_session an arrival briefing is injected carrying purpose, finding counts, topics and conflicts. On subsequent turns a watermark is checked silently. When a teammate's findings merge and the shared memory version moves from v14 to v17, the next turn injects a freshness pointer naming the changed topics, and the agent calls query itself.">
+        <svg viewBox="0 0 1000 400" role="img" aria-label="A timeline of one agent session. Before joining, Synapse is dormant and injects nothing. On joining, an arrival briefing arrives via the MCP instructions field carrying purpose, finding counts, topics and conflicts. On subsequent turns a watermark is checked silently. When a teammate's findings merge and the shared memory version moves from v14 to v17, the next turn injects a freshness pointer naming the changed topics, and the agent calls query itself.">
           <defs>
             <marker id="d-cloud" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
               <path d="M 0 0 L 10 5 L 0 10 z" class="a-cloud"/>
@@ -861,7 +894,7 @@
           <text x="658" y="88" class="s-zonelabel" text-anchor="middle" fill="var(--cloud)">MEMBER — AWARENESS ARMED</text>
 
           <line x1="324" y1="44" x2="324" y2="372" class="s-bound"/>
-          <text x="324" y="34" class="s-bell" text-anchor="middle">join_session()</text>
+          <text x="324" y="34" class="s-bell" text-anchor="middle">synapse join</text>
 
           <!-- turn markers -->
           <rect x="199" y="96" width="68" height="30" rx="5" class="s-box"/>
@@ -880,7 +913,7 @@
           <text x="233" y="210" class="s-flow" text-anchor="middle" fill="var(--ink-faint)">— nothing —</text>
 
           <rect x="356" y="170" width="200" height="54" rx="5" class="s-box-cloud"/>
-          <text x="368" y="188" class="s-flow" fill="var(--cloud)">arrival briefing</text>
+          <text x="368" y="188" class="s-flow" fill="var(--cloud)">briefing @ initialize</text>
           <text x="368" y="203" class="s-flow">purpose · 14 findings</text>
           <text x="368" y="217" class="s-flow">5 topics · 2 conflicts</text>
 
@@ -921,11 +954,11 @@
       <div class="seam is-adopted">
         <div class="n">②</div>
         <div class="body">
-          <h3>Arrival briefing — the late-joiner answer</h3>
-          <p><span class="m">join_session</span> returns a briefing in its own tool result: the session purpose, who is in it, finding counts by type, the topic labels present, open conflicts, and the current memory version. Someone joining at hour three learns in one call that forty findings predate them and what they are about — without reading any of them.</p>
-          <p>"Joined late" is not the only way to arrive cold, though. A new terminal tomorrow morning, a resumed session, and a context compaction all produce an agent that has forgotten. The <span class="m">SessionStart</span> hook re-injects the briefing on <span class="m">startup</span>, <span class="m">resume</span>, <span class="m">clear</span> and <span class="m">compact</span> — that last matcher being the one that matters most, since compaction is precisely when an agent silently loses the fact that team memory exists.</p>
+          <h3>Arrival briefing — carried by the protocol itself</h3>
+          <p>Because the orchestrator is local, at MCP <span class="m">initialize</span> it already knows the agent product, the Agent Session and therefore the binding — so <strong>the agent never has to be told which session it is in</strong>, and there is no <span class="m">attach</span> tool to call. The spec returns an <span class="m">instructions</span> string in the initialize response, generated per connection, and Claude Code uses it. The briefing rides there: purpose, members, counts by type, topic labels, open conflicts, current memory version.</p>
+          <p>That moves the whole signal out of the per-agent tier and into the floor — any MCP client is briefed on connect, with no install and no hook. Someone joining at hour three learns in one round trip that forty findings predate them and what they are about, without reading any of them. The one thing <span class="m">instructions</span> cannot do is refresh: it is sent once per connection, which is exactly why signal ③ exists.</p>
         </div>
-        <div class="mark"><span class="st adopted">join call</span><br><span class="st deferred">hook</span></div>
+        <div class="mark"><span class="st adopted">any client</span></div>
       </div>
 
       <div class="seam is-deferred">
@@ -988,7 +1021,9 @@ description: Use when starting work in a joined Synapse session — before
           <li>Measured on real silicon: the NPU is the <em>slowest</em> compute unit for LLM decode (memory-bandwidth-bound) — yet wins 14.8× on batched convolution on the same chip. The NPU case for the distiller is contention and power, never speed: it runs always-on work off the critical path while CPU and GPU stay free for the developer. Workload shape, not silicon.</li>
           <li>Frontier models are design-time only: they author few-shots and diagnose eval failures. Nothing frontier sits in the runtime path.</li>
           <li>The demo is pre-recorded A/B: the same task without Synapse and with it, side-by-side, with measured deltas — tokens, wall-clock, duplicated exploration. A live run is the encore, which is also what collapses the venue-WiFi risk.</li>
-          <li>Capture is agent-detected, not agent-configured: a registry of transcript roots spawns the right adapter, and Claude Code + Codex are the demo pair.</li>
+          <li>Capture is agent-detected, not agent-configured: a registry of transcript roots spawns the right adapter, and Claude Code + Codex are the demo pair. Codex takes MCP servers over localhost HTTP, so the orchestrator is reachable from both.</li>
+          <li>The A/B measures agents, not humans — the same task replayed from fixed repo state, once cold and once with shared memory populated from a real capture. No human learning effect, and runnable N times for variance instead of one anecdote.</li>
+          <li>Findings are durable the instant they are produced and retained after sending, so an orchestrator restart loses nothing and a service restart is a resync rather than a total loss.</li>
         </ul>
       </div>
       <div class="col open">
@@ -1000,6 +1035,7 @@ description: Use when starting work in a joined Synapse session — before
           <li>Expect the 4B to land around 0.5–0.7 against Claude goldens. Recorded up front so results get read against expectations, not hopes.</li>
           <li>Distiller and synthesis prompts are first-pass Claude drafts, explicitly not contracts — the eval loop exists to fine-tune them, and mid-week changes are expected.</li>
           <li>How shared memory is stored for semantic retrieval. In-memory + LLM-as-retriever is the first pass, behind a storage interface; vector RAG, a findings graph, and a purpose→topic hierarchy are the candidate backends once evidence demands one.</li>
+          <li>Who builds the orchestrator. The work is split at its three interfaces so it never blocks on one person, but the component itself was in nobody's plan until the architecture moved — and it is the most expensive item in a five-day build.</li>
         </ul>
       </div>
     </div>
@@ -1307,8 +1343,8 @@ description: Use when starting work in a joined Synapse session — before
   </section>
 
   <footer>
-    <span>Sources: docs/brainstorming/2026-07-25-synapse-design.md · plans 0 / A / B / C · the four 2026-08-03 amendments (provider layer · hybrid frontier/local · segment budget &amp; compaction · agent detection, demo &amp; storage) · the 2026-07-30 NPU benchmarks (measured on the X Elite).</span>
-    <span>Diagrams: Snapdragon Workspace board, Synapse frames.</span>
+    <span>Sources: docs/brainstorming/2026-07-25-synapse-design.md · docs/plans/ (0 / A / B / C / D) · CONTEXT.md · docs/adr/ · the 2026-08-03 amendments and orchestrator working notes · the 2026-07-30 NPU benchmarks, measured on the X Elite.</span>
+    <span>Revised 2026-08-03: local orchestrator, Attribution, semantic merge with tombstones, write-ahead durability, protocol-native briefing.</span>
   </footer>
 
 </div>

@@ -1,5 +1,11 @@
 # Synapse — Plan C: Providers + Synthesis + MCP (Siddsing)
 
+> # ⚠️ SUPERSEDED 2026-08-03
+> **Do not execute this plan.** It was written against the pre-revision architecture (remote MCP server, worker→service egress, pre-Attribution contracts) and carries inline code snippets whose shapes no longer exist.
+>
+> Current plans live in [`docs/plans/`](../plans/README.md). Vocabulary in `/CONTEXT.md`.
+> Kept for history — the contract block in Plan 0 Task 2 remains the source the new Plan 0 copies from.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Deliver the model-facing spine of Synapse — the `ClaudeProvider` baseline, the OpenAI-compatible HTTP adapter that unifies Ollama and AI-100 behind one class, the Synthesis service that merges findings into shared working memory, and the MCP server that agents pull from. Plus the AI-100 hardware spike.
@@ -9,6 +15,8 @@
 **Tech Stack:** Python 3.12, Anthropic SDK (`anthropic>=0.40`), MCP Python SDK (`mcp>=1.0`), `httpx`, `pytest-httpserver`.
 
 **Owner:** Siddsing.
+
+> **⟨CONTRACT REVISION 2026-08-03⟩** — the frozen contracts changed. Inline snippets below still show the old shapes; see the revision table at the top of `2026-07-25-plan-0-foundation.md` before writing code. Affecting this plan most: **synthesis merges semantically** — two Findings meaning the same thing produce a new `SYNTHESIZED` Finding capturing the essence of both and carrying both attributions, with the originals marked `SUPERSEDED` rather than discarded; `Conflict` now references `FindingId`s, so the `finding_a_index` → object mapping in Task 4 resolves to ids; `SessionContext.memory_version` increments per merge; and **`query_findings` must rank over the curated Finding Log, not raw pushed findings** — otherwise the dedup and trivia filter protect nothing a teammate reads. Vocabulary: `/CONTEXT.md`.
 
 > **⟨AMENDED 2026-08-03 D⟩** — see `2026-08-03-agent-detection-demo-storage-amendment.md`. (1) `InMemorySynthesizer` state goes behind a **narrow storage interface** (store findings / get context / query candidates) so a retrieval-optimized backend — vector RAG, findings graph, or purpose→topic hierarchy — can swap in later without touching synthesis or MCP; the backend choice is deferred, in-memory + LLM-as-retriever remains the first pass. (2) The synthesis prompt and merge strategy are **explicitly first-pass** (Claude-suggested), tuned via the eval loop — not a contract. (3) Nothing in the service may assume a specific coding agent; agent-specific awareness delivery lives in per-agent integration packs (Claude Code pack = hooks + skill), with the MCP-native surface as the universal floor. (4) The demo is **pre-recorded A/B**; venue-network risk applies only to the live encore.
 

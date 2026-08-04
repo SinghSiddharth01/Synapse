@@ -7,6 +7,7 @@
 **Amended:** 2026-08-03 — segment token budget + compaction + 4B quality calibration; see `2026-08-03-segment-budget-compaction-amendment.md`. Amended sections marked ⟨C⟩.
 **Amended:** 2026-08-03 — agent auto-detection, pre-recorded A/B demo, per-model segment budget, shared-memory storage seam; see `2026-08-03-agent-detection-demo-storage-amendment.md`. Amended sections marked ⟨D⟩.
 **Amended:** 2026-08-03 — measured NPU/GenieX evidence folded in (benchmarks taken 2026-07-30, superseding ⟨A⟩ where they disagree); see `2026-07-30-npu-llm-benchmarks-and-geniex-findings.md`. Amended sections marked ⟨E⟩.
+**Amended:** 2026-08-03 — domain-model + architecture revision: **local Orchestrator** (§4 rewritten; the old "MCP transport is remote HTTP/SSE" is retired), Attribution, Finding identity, semantic merge with tombstones, two-store Shared Memory, write-ahead durability. See `2026-08-03-local-orchestrator-domain-model-amendment.md`, `/CONTEXT.md`, and `docs/adr/`. Amended sections marked ⟨F⟩.
 **Event:** Snapdragon Multiverse internal hackathon (build week Aug 3–7 2026; prep week ~Jul 27–31)
 **Team:** Siddsing (architect/integration), Akhil (edge worker / low-level), Aditya (ML/distillation, owns NPU laptop)
 
@@ -35,29 +36,39 @@ A teammate creates an opt-in shared session from their Copilot+ PC, declaring it
 
 ## 4. Architecture
 
+⟨F⟩ Revised: the MCP server moved onto the developer's machine as an **Orchestrator**. The Edge Worker no longer talks to the service at all.
+
 ```
-   Coding agent (Claude Code / Codex)  ── writes JSONL it already writes
-              │
-   EDGE WORKER (per machine, Akhil) ─────────────────────────────────
-     Agent detect (registry of transcript roots) ⟨D⟩
-     Source adapter (ClaudeCodeSource / CodexSource) → AgentEvent
-     File follower (tail, rotation, partial/malformed lines)
-     Segmenter → Segment (turn-boundary batches of AgentEvent)
-              │  Segment
-     Distiller (Aditya) ── ModelProvider(SLM) → Finding[]   raw work stays local
-              │  Finding[]
-     Sync client ── POST findings + session join over HTTP
-   ─ ─ ─ ─ ─ ─│─ ─ device boundary: only Findings cross ─ ─ ─ ─ ─ ─ ─
-              ▼
-   SYNAPSE SERVICE (any laptop, Siddsing) ⟨A⟩ ──────────────────────
-     Ingest API (findings in)
-     Synthesis (ModelProvider(large) → incremental merge → SessionContext + Conflict[])
+   Coding agent (Claude Code / Codex / any) ── writes the transcript it already writes
+        │  MCP (localhost HTTP)                        ▲ RO access
+        ▼                                              │
+   ORCHESTRATOR (local, one per machine) ──────────────┼──────────────
+     MCP server: query(nl) · contribute(text)          │
+       briefing rides `instructions` at initialize     │
+     Producer endpoint: accepts Finding[] ONLY  ◄──────┤
+     Owns LocalBinding; stamps Attribution             │
+     Durable log (write-ahead, retained → resync)      │
+        │                                              │
+        │                          EDGE WORKER (local, same machine)
+        │                            Agent detect (registry of transcript roots) ⟨D⟩
+        │                            Follower → Source adapter → AgentEvent
+        │                            Segmenter → Segment (turn boundary + per-model budget)
+        │                            Distiller ── ModelProvider(SLM on NPU) → Finding[]
+        │                            Durable log (write-ahead) ── POST findings
+   ─ ─ ─│─ ─ device boundary: only Findings cross · ONE egress point ─ ─ ─
+        ▼
+   SYNAPSE SERVICE (any laptop; a teammate's, for the demo) ⟨A⟩ ──────
+     Ingest API (idempotent upsert by Finding.id)
+     Synthesis → Working Memory + Conflict[] + memory_version
+       semantic merge → Synthesized Finding; originals become tombstones
        └─ calls hosted Cloud AI 100 (Cirrascale, Llama-3.1-8B) over HTTPS ⟨A⟩
-     MCP server (HTTP/SSE): create_session / join_session / query(nl) → ranked Finding[]
-       Retrieval = LLM-as-retriever (query + shared-memory doc → ranked findings)
+     Finding Log behind a storage seam ← what retrieval ranks over
+     Retrieval = LLM-as-retriever (query + Working Memory + candidates → ranked)
 ```
 
-Two planes: **data plane** (workers → ingest API) and **retrieval/control plane** (agents → MCP). One service hosts both; MCP transport is **remote HTTP/SSE** — agents point at the service host. ⟨A⟩ The service is decoupled from the accelerator: it runs on any machine and reaches Cloud AI 100 through the hosted Cirrascale API, so only distilled Findings ever cross either boundary (device → service, service → cloud).
+⟨F⟩ **The two-plane framing is retired.** Data and retrieval both run through the local Orchestrator, which is the sole egress — one boundary to audit rather than two. The Edge Worker owns raw transcripts and returns only Findings; the Orchestrator hosts MCP so agent-authored prose lands in it transiently, but **nothing reaches the service that has not passed through the distiller**. The service stays decoupled from the accelerator: it runs anywhere and reaches Cloud AI 100 over HTTPS.
+
+⟨F⟩ **Caller identity is a known protocol limit.** MCP gives a server only `clientInfo: {name, title, version}` at initialize — the client *product*, not a conversation. The Orchestrator resolves the Agent Session as `clientInfo.name` → product, then the worker's live-session detection. Named limitation: one active Agent Session per Agent product per machine. The distilled path is unaffected — it never touches MCP.
 
 ## 5. Contracts (frozen Day 0, in `synapse/contracts`)
 
@@ -65,14 +76,15 @@ Two planes: **data plane** (workers → ingest API) and **retrieval/control plan
 |---|---|
 | `AgentEvent` | `{role, kind: text\|thinking\|tool_use\|tool_result, content, tool_name?, ts, session_id, cwd, git_branch}` — agent-agnostic, internal to worker |
 | `Segment` | bounded run of `AgentEvent`s split on turn boundary **and token budget (derived per model from its measured capability record — usable context, prefill tok/s, prompt reserves — never a shared hard-coded constant ⟨D⟩; ~2–2.5K on a 4K qairt bundle), events deterministically compacted (tool_result head/tail truncation, thinking trimmed, trivial calls dropped)** ⟨C⟩ — the distiller's input |
-| `Finding` | `{type: learning\|decision\|dead_end\|open_question, text, contributor, ts, source_session, refs?, provenance: distilled\|contributed}` ⟨B⟩ — `text` is **abstracted, not verbatim code** (distiller redacts by design); `provenance` defaults to `distilled`, reserved for the Part-2 contribute module |
-| `SynapseSession` | `{shared_id, purpose, members[], created_by}` |
-| `LocalBinding` | `{local_agent_session_id → shared_id, contributor}` — set at join |
-| `Conflict` | `{finding_a, finding_b, description}` |
-| `SessionContext` | merged shared memory + `Conflict[]`, organized by `purpose` |
+| `Attribution` ⟨F⟩ | `{contributor, agent_session, agent}` — where a Finding came from, at three levels, carried as one value so they cannot drift apart |
+| `Finding` ⟨F⟩ | `{id, type, text, attributions[], ts, refs?, provenance: distilled\|contributed\|synthesized, status: kept\|superseded\|trivial, merged_from[], merged_into?}` — `text` is **abstracted, not verbatim code**; `id` is stamped client-side at distil time so retried pushes are idempotent; `attributions` is a list because a merged Finding carries every source; `status`/`merged_*` are service-written |
+| `SynapseSession` | `{shared_id, purpose, members[] (Contributors), created_by}` |
+| `LocalBinding` ⟨F⟩ | `{agent_session_id → shared_id, contributor, agent}` — set at join; owned by the local orchestrator, which stamps it onto every Finding from any local producer |
+| `Conflict` ⟨F⟩ | `{finding_a: FindingId, finding_b: FindingId, description}` — references, not embedded copies, so a conflict can be updated or resolved |
+| `SessionContext` ⟨F⟩ | Working Memory (bounded prose) + `Conflict[]` + `memory_version`, organized by `purpose`. **Only half of Shared Memory** — the Finding Log lives behind the service's storage interface and is what retrieval ranks over |
 | `ModelProvider` | `complete(messages, response_schema?) -> ModelResult{data, usage{in,out}, latency_ms, provider_id, schema_valid}` |
 | Ingest API | request/response for findings-push + session create/join (so Sync client can test against a mock) |
-| MCP tools | `create_session(purpose)`, `join_session(shared_id)`, `query(nl) -> ranked Finding[]` |
+| MCP tools ⟨F⟩ | `query(nl) -> ranked Finding[]`, `contribute(text)` (stretch). **No `attach`/`join` tool** — joining is a local CLI (`synapse join <shared_id>`), and at initialize the Orchestrator already knows the binding, so the agent is never told which Shared Session it is in. The arrival briefing rides the MCP `instructions` field. |
 
 ## 6. ModelProvider — on/off-target mode
 
@@ -161,4 +173,8 @@ synthesizer: claude                   synthesizer: aic100
 | Cross-machine ordering | wall-clock timestamps assumed sufficient at hackathon scale (named limitation) |
 | Shared-memory store is naive (in-memory + LLM-as-retriever) ⟨D⟩ | acceptable at hackathon scale; a narrow storage interface isolates the choice; RAG / graph / hierarchy evaluated as the scaling story |
 | Distiller & synthesis prompts are first-pass Claude drafts ⟨D⟩ | explicitly not contracts; eval loop + prompt-optimizer (hybrid amendment) is the tuning mechanism |
+| Findings lost on a transient failure — NPU work is expensive and unrepeatable ⟨F⟩ | write-ahead durable log at worker and orchestrator: persist on produce, before any send; replay unsent on restart |
+| Service restart wipes in-memory Shared Memory for everyone ⟨F⟩ | logs are retained after send, so every orchestrator can `resync`; safe because ingest upserts by `Finding.id` |
+| MCP cannot identify which Agent Session is calling ⟨F⟩ | `clientInfo.name` → product + worker live-session lookup. Named limit: one Agent Session per product per machine |
+| Demo A/B baseline is contaminated by human learning ⟨F⟩ | A/B the *agents* on a replayed capture from fixed repo state, N runs for variance; pre-populated findings must come from a real distilled capture |
 | Single turn exceeds NPU context / prefill power budget ⟨C⟩ | budgeted sub-turn segments + deterministic compaction; synthesis dedupes across sub-segments; usable bundle context is a spike go/no-go axis |
