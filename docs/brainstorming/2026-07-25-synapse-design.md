@@ -6,6 +6,7 @@
 **Amended:** 2026-08-03 — hybrid frontier/local strategy (Part 1: design-time frontier leverage, local-only runtime; Part 2: contribute module, deferred); see `2026-08-03-hybrid-frontier-local-amendment.md`. Amended sections marked ⟨B⟩.
 **Amended:** 2026-08-03 — segment token budget + compaction + 4B quality calibration; see `2026-08-03-segment-budget-compaction-amendment.md`. Amended sections marked ⟨C⟩.
 **Amended:** 2026-08-03 — agent auto-detection, pre-recorded A/B demo, per-model segment budget, shared-memory storage seam; see `2026-08-03-agent-detection-demo-storage-amendment.md`. Amended sections marked ⟨D⟩.
+**Amended:** 2026-08-03 — measured NPU/GenieX evidence folded in (benchmarks taken 2026-07-30, superseding ⟨A⟩ where they disagree); see `2026-07-30-npu-llm-benchmarks-and-geniex-findings.md`. Amended sections marked ⟨E⟩.
 **Event:** Snapdragon Multiverse internal hackathon (build week Aug 3–7 2026; prep week ~Jul 27–31)
 **Team:** Siddsing (architect/integration), Akhil (edge worker / low-level), Aditya (ML/distillation, owns NPU laptop)
 
@@ -21,7 +22,7 @@ Synapse observes any coding agent's session **unmodified** (by reading the sessi
 
 A teammate creates an opt-in shared session from their Copilot+ PC, declaring its purpose; teammates join with one command. Each member holds a different slice of context for the same task. A per-user small model distills each agent's activity into structured findings — learnings, decisions, dead ends, open questions — each tagged with contributor and time. **Raw work stays on device; only distilled findings leave the machine.** A large model on Cloud AI 100 merges everyone's findings into one shared working memory, flags conflicts, and organizes against the session's purpose. Agents retrieve on demand through MCP (pull-only, natural-language queries, ranked results).
 
-**Division of labor (the "Why Qualcomm" thesis):** edge distillation on the Snapdragon X Elite NPU (continuous, ingest/prefill-heavy — the NPU's strength) + cloud synthesis on Cloud AI 100 (sustained low-cost multi-user serving).
+**Division of labor (the "Why Qualcomm" thesis) ⟨E⟩:** edge distillation on the Snapdragon X Elite NPU — always-on and **off the critical path**, leaving CPU and GPU free for the developer's own compile/test loop (power efficiency expected but **not yet measured**; measured decode throughput says the NPU is *not* the fast path — the case is contention + power, never speed) + cloud synthesis on Cloud AI 100 (sustained low-cost multi-user serving).
 
 **Demo vehicles ⟨D⟩:** Claude Code (capture verified) **and** OpenAI Codex are the demo pair. The worker **auto-detects** which agent is active from a registry of known transcript roots and selects the matching `Source` adapter — no per-agent workflow exists anywhere downstream of the adapter. Design is agent-agnostic by construction (new agent = one registry entry + one Source, nothing else changes); the hackathon scopes it to these two agents, the solution applies to any. The demo itself is **pre-recorded A/B**: the same task run without Synapse and with it, side-by-side, with measured deltas (wall-clock, tokens, duplicated exploration) — a live run is the encore, not the dependency.
 
@@ -29,6 +30,7 @@ A teammate creates an opt-in shared session from their Copilot+ PC, declaring it
 
 - **Passive capture is real.** Claude Code writes `~/.claude/projects/<slug>/<uuid>.jsonl`, one JSON event per line. A real 5,579-line session confirmed: events carry `type` (user/assistant/system), `timestamp`, `cwd`, `gitBranch`, `sessionId`, `uuid`/`parentUuid`; `message.content` is a list of typed parts (`thinking` / `text` / `tool_use` / `tool_result`); 1,212 tool calls in that session. The "what the agent learned / tried / hit a wall on" signal is directly present. Capture = tailing these files, zero agent modification. This corpus is also the eval fixture + TDD corpus.
 - **On-device LLM on X Elite NPU is turnkey — via GenieX ⟨A⟩:** `geniex serve` exposes an OpenAI-compatible API at `localhost:18181/v1` with `qairt` (NPU-exclusive, pre-compiled AI Hub bundles) and `llama_cpp` backends. Distiller candidates from the GenieX-optimized catalog: Qwen3-4B-Instruct-2507 (primary), Gemma-4-E4B-it, Qwen3-1.7B. (Original ONNX-QNN/Phi-3.5/Llama-3.2-3B path is stale — those models aren't in the GenieX catalog.)
+  ⟨E⟩ **Measured 2026-07-30 on the X1E80100:** server mode verified live (OpenAI-shaped, ready ~1 s — Plan B Task 5 de-risked). But the NPU is the **slowest** compute unit for LLM decode on `llama_cpp` (14.2 tok/s @ ~4B vs CPU 21.3, GPU 17.6; decode is memory-bandwidth-bound — the same chip wins 14.8× on batched conv). Design budget: ~14 tok/s at 4B, fine for a background distiller. The `qairt` path is **blocked** (AI Hub 503) — `llama_cpp` GGUF is the validated path, with models cached from Docker Hub/HF; whether `qairt` reverses the ranking is the biggest open edge variable. Gemma-4-E4B ships mistyped as `vlm` and **silently drops prompts** (fix: `geniex model set-type … llm`). Add a GPU arm to the bake-off (Adreno is 2.9× the NPU at 1.7B).
 - **AI-100 serves LLMs via an OpenAI-compatible-shaped API — hosted ⟨A⟩:** Cirrascale Inference Cloud (`https://aisuite.cirrascale.com/apis/v2`, bearer key, `Llama-3.1-8B` only), verified live 2026-08-03. No self-hosting. Caveats: `response_format` ignored; JSON output must route via `/completions` (chat endpoint misparses it into empty tool calls). AI-100, Ollama, and GenieX all sit behind one HTTP adapter.
 
 ## 4. Architecture
@@ -82,9 +84,9 @@ Every model-using component depends only on `ModelProvider`. A **mode is a pair*
 | `ClaudeProvider` | Anthropic SDK | off-target + **quality/cost baseline** |
 | `OllamaProvider` | local Ollama (Llama-3.2-3B) | off-target dev on Mac + offline demo fallback |
 | `AIC100Provider` ⟨A⟩ | Cirrascale hosted Cloud AI 100 (`Llama-3.1-8B`) | synthesis — reachable from Day 1, dev included |
-| `NPUProvider` ⟨A⟩ | GenieX `serve` @ `localhost:18181/v1` (`qairt`/`llama_cpp` on Hexagon) | on-target distillation |
+| `NPUProvider` ⟨A⟩ | GenieX `serve` @ `localhost:18181/v1` (`llama_cpp` **verified live** ⟨E⟩; `qairt` blocked by AI Hub 503) | on-target distillation |
 
-Ollama / AI-100 / GenieX share one OpenAI-compatible HTTP adapter (differ by base URL); only Claude needs a distinct adapter. **Structured output is capability-flagged**: providers without native constrained decoding (NPU **and** aic100 ⟨A⟩ — Cirrascale ignores `response_format` and schema calls route via `/completions`) use prompt-instructed JSON + tolerant parse + one retry; the conformance test *measures* schema-valid rate per provider rather than assuming it.
+Ollama / AI-100 / GenieX share one OpenAI-compatible HTTP adapter (differ by base URL); only Claude needs a distinct adapter. **Structured output is capability-flagged**: providers without native constrained decoding (NPU **and** aic100 ⟨A⟩ — Cirrascale ignores `response_format` and schema calls route via `/completions`) use prompt-instructed JSON + tolerant parse + one retry; the conformance test *measures* schema-valid rate per provider rather than assuming it. ⟨E⟩ GenieX's CLI exposes `--enable-json` / GBNF grammar flags — if the probe finds them plumbed through `serve`'s HTTP API, the edge path gets sampler-**guaranteed** JSON (`native_structured_output=True`), potentially *better* structured-output guarantees than the cloud synthesizer.
 
 Config example:
 ```
@@ -150,7 +152,9 @@ synthesizer: claude                   synthesizer: aic100
 | Synthesis quality on single 8B model (no 70B on our key) ⟨A⟩ | tight working-memory bound + simple prompts; benchmark table Claude-vs-aic100 *is* the demo narrative; ask office hours re 70B |
 | Cirrascale chat endpoint misparses JSON output into empty tool calls ⟨A⟩ | schema calls route via `/completions` + tolerant extraction (probed + verified) |
 | Venue WiFi down ⟨A⟩ | demo is pre-recorded A/B ⟨D⟩ — network only threatens the live encore; for that, synthesis falls back to `synthesizer: ollama` (one env var); edge path (GenieX) is fully local |
-| NPU/aic100 can't emit structured JSON | capability flag + prompt-instructed JSON + tolerant parse; measured, not assumed |
+| NPU/aic100 can't emit structured JSON | capability flag + prompt-instructed JSON + tolerant parse; measured, not assumed; ⟨E⟩ GenieX GBNF flags may make the edge path sampler-guaranteed — probe |
+| Model mistyped as `vlm` silently drops the prompt → confident fabricated findings poison shared memory ⟨E⟩ | assert `usage.prompt_tokens > 1` on every distiller call (hard-fail the finding); canary fixture in the eval harness; verify `ModelType` after every pull |
+| AI Hub down (503) blocks `qairt` bundles ⟨E⟩ | `llama_cpp` GGUF validated as the working path; cache candidates from Docker Hub/HF now; re-check 503 periodically |
 | Provider parity (3B mangles schema Claude honors) | shared conformance test; this *is* the quality signal to measure |
 | Segment/distiller drift between Akhil & Aditya | frozen hand-authored fixture Segments are the shared ground truth |
 | "Isn't this Notion + RAG?" | no human writes notes — agents' own work becomes shared memory, in-loop, in minutes |

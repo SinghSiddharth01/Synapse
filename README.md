@@ -22,7 +22,7 @@ A teammate creates an opt-in shared session from their Copilot+ PC, declaring it
 
 ## Why Qualcomm's Connected Ecosystem
 
-Per-user distillation runs constantly, so it must be local, private, and power-efficient. The Snapdragon X Elite's Hexagon NPU makes always-on observation viable without stealing CPU cycles from the developer's work, with pre-optimized models from Qualcomm AI Hub. Cross-team synthesis needs a large model serving many users at low cost — the sustained-inference workload Cloud AI 100 is built for.
+Per-user distillation runs constantly, so it must be local, private, and power-efficient. The Snapdragon X Elite's Hexagon NPU runs that always-on distillation off the critical path — leaving CPU and GPU free for the developer's own compile/test loop — with models served locally through GenieX. Cross-team synthesis needs a large model serving many users at low cost — the sustained-inference workload Cloud AI 100 is built for.
 
 Edge distillation on Snapdragon plus cloud synthesis on Cloud AI 100 is the division of labor this hardware was designed for.
 

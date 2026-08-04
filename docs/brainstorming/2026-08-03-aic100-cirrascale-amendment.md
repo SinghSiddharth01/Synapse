@@ -3,6 +3,7 @@
 **Status:** Adopted 2026-08-03 (hackathon Day 1)
 **Amends:** `2026-07-25-synapse-design.md` §3/§4/§6/§9/§12 · Plan B Tasks 4–6 · Plan C Tasks 2–3
 **Verified:** Cirrascale endpoint probed live 2026-08-03 (ping, chat, embeddings, structured-output); GenieX server mode confirmed from github.com/qualcomm/geniex; model catalog from aihub.qualcomm.com (GenieX-runtime filter)
+**Superseded in part:** `2026-07-30-npu-llm-benchmarks-and-geniex-findings.md` (measured on hardware, newer evidence despite the earlier date) overrides Parts 2–4 where they disagree — `qairt` blocked by AI Hub 503 (`llama_cpp` is the validated path), NPU slowest for LLM decode (rationale is contention/power, not speed), Gemma-4-E4B `vlm` prompt-drop bug, GBNF flags found.
 
 The hackathon materials resolved both hardware unknowns in the design — and both landed on *hosted/turnkey* rather than *DIY bring-up*. Net effect: **both Day-1–2 hardware spikes shrink, every non-Claude provider now speaks OpenAI-compatible HTTP, and the freed time goes to Synthesis + MCP + eval.**
 

@@ -465,7 +465,8 @@
     <p class="thesis">Every engineer's coding agent learns something. None of them tell each other. Synapse is the listener in between.</p>
     <div class="meta">
       <span><b>Status</b> &nbsp;approved design, pre-implementation</span>
-      <span><b>Spec</b> &nbsp;2026-07-25, amended 2026-08-03 ×4</span>
+      <span><b>Spec</b> &nbsp;2026-07-25, amended 2026-08-03 ×5</span>
+      <span><b>Measured</b> &nbsp;NPU/GenieX benchmarks, 2026-07-30 on the X Elite</span>
       <span><b>Event</b> &nbsp;Snapdragon Multiverse, build week Aug 3–7</span>
     </div>
   </header>
@@ -627,7 +628,8 @@
         <div class="n">04</div>
         <div class="body">
           <h3>Distiller</h3>
-          <p>The one piece of judgment on the device. A ~4B instruct model turns a segment into structured findings, abstracting rather than quoting — the redaction is a property of the prompt, measured by a deterministic verbatim-copy metric rather than assumed.</p>
+          <p>The one piece of judgment on the device. A ~4B instruct model turns a segment into structured findings, abstracting rather than quoting — the redaction is a property of the prompt, measured by a deterministic verbatim-copy metric rather than assumed. Measured throughput at 4B on the NPU is ~14 tok/s — fine for a background worker, and stated as a design budget up front rather than discovered during integration.</p>
+          <p>It also carries a guard learned on real hardware: a mistyped model can silently drop its prompt and stream confident, fluent, <em>invented</em> findings into shared memory. Every distiller call asserts the prompt was actually consumed (<span class="m">usage.prompt_tokens</span>), and a canary fixture fails a model outright before it is ever scored — knowledge poisoning is the one failure the pipeline must never pass through quietly.</p>
           <div class="io"><b>in</b> Segment &nbsp;→&nbsp; <b>out</b> Finding[]</div>
         </div>
         <div class="who"><span>Aditya</span></div>
@@ -746,7 +748,7 @@
         </thead>
         <tbody>
           <tr><td>FakeProvider</td><td><span class="tag test">test</span></td><td>scripted deterministic output</td><td>Every unit and contract test. No keys, no GPU, no network — quality is measured by the eval harness, never gated in CI.</td></tr>
-          <tr><td>NPUProvider</td><td><span class="tag edge">on-target</span></td><td><span class="m">geniex serve</span> at localhost:18181</td><td>Distillation on the Hexagon NPU. Candidates: Qwen3-4B-Instruct, Gemma-4-E4B, Qwen3-1.7B — picked by bake-off, not on paper.</td></tr>
+          <tr><td>NPUProvider</td><td><span class="tag edge">on-target</span></td><td><span class="m">geniex serve</span> at localhost:18181</td><td>Distillation on the Hexagon NPU — server verified live on the X Elite (OpenAI-shaped, ready ~1 s after launch). Candidates: Qwen3-4B-Instruct, Gemma-4-E4B (after its vlm-mistype fix), Qwen3-1.7B — picked by a bake-off that now includes a GPU arm.</td></tr>
           <tr><td>AIC100Provider</td><td><span class="tag cloud">on-target</span></td><td>hosted Cirrascale Inference Cloud</td><td>Synthesis on Cloud AI 100. Llama-3.1-8B; verified live and reachable from anywhere, so it is in the loop from day one.</td></tr>
           <tr><td>OllamaProvider</td><td><span class="tag test">off-target</span></td><td>local Ollama</td><td>Mac dev loop, and the offline fallback for both roles if the venue network fails.</td></tr>
           <tr><td>ClaudeProvider</td><td><span class="tag test">off-target</span></td><td>Anthropic SDK</td><td>The quality and cost baseline the small models are measured against — and, at design time, the author of the distiller's few-shot examples.</td></tr>
@@ -754,7 +756,7 @@
       </table>
     </div>
 
-    <p class="note">Ollama, Cirrascale, and GenieX all speak OpenAI-compatible HTTP and differ only by base URL, so four of the five providers share one adapter. Structured output is capability-flagged rather than assumed: neither the NPU nor Cirrascale honors a JSON schema, so those calls use prompt-instructed JSON with a tolerant parse and one retry, and the conformance test <em>measures</em> the schema-valid rate per provider.</p>
+    <p class="note">Ollama, Cirrascale, and GenieX all speak OpenAI-compatible HTTP and differ only by base URL, so four of the five providers share one adapter. Structured output is capability-flagged rather than assumed: neither the NPU nor Cirrascale honors a JSON schema, so those calls use prompt-instructed JSON with a tolerant parse and one retry, and the conformance test <em>measures</em> the schema-valid rate per provider. One asymmetry worth watching: GenieX's CLI exposes GBNF grammar flags, so if the probe finds them plumbed through the server, the edge path gets sampler-<em>guaranteed</em> JSON — better structured-output guarantees than the cloud synthesizer, whose endpoint ignores schemas outright.</p>
   </section>
 
   <section>
@@ -982,7 +984,8 @@ description: Use when starting work in a joined Synapse session — before
         <ul>
           <li>Passive capture is real — confirmed against a 5,579-line session with 1,212 tool calls. That corpus is also the fixture and eval set.</li>
           <li>Cloud AI 100 is a hosted endpoint, verified end-to-end on Aug 3. No box to provision; the spike is retired.</li>
-          <li>The NPU path is <span class="m">geniex serve</span>, an OpenAI-compatible server — no custom runtime bring-up.</li>
+          <li>The NPU path is <span class="m">geniex serve</span>, verified live on the X Elite — OpenAI-shaped responses a second after launch, so <span class="m">NPUProvider</span> stays a thin subclass.</li>
+          <li>Measured on real silicon: the NPU is the <em>slowest</em> compute unit for LLM decode (memory-bandwidth-bound) — yet wins 14.8× on batched convolution on the same chip. The NPU case for the distiller is contention and power, never speed: it runs always-on work off the critical path while CPU and GPU stay free for the developer. Workload shape, not silicon.</li>
           <li>Frontier models are design-time only: they author few-shots and diagnose eval failures. Nothing frontier sits in the runtime path.</li>
           <li>The demo is pre-recorded A/B: the same task without Synapse and with it, side-by-side, with measured deltas — tokens, wall-clock, duplicated exploration. A live run is the encore, which is also what collapses the venue-WiFi risk.</li>
           <li>Capture is agent-detected, not agent-configured: a registry of transcript roots spawns the right adapter, and Claude Code + Codex are the demo pair.</li>
@@ -991,8 +994,8 @@ description: Use when starting work in a joined Synapse session — before
       <div class="col open">
         <h3>Still open</h3>
         <ul>
-          <li>Usable compiled context length of the GenieX bundle — likely 4K, must be measured. The segment budget keys off it.</li>
-          <li>Distiller model choice, decided by bake-off across Qwen3-4B, Gemma-4-E4B and Qwen3-1.7B on schema-valid rate, prefill throughput and power.</li>
+          <li>Whether the NPU-exclusive <span class="m">qairt</span> path beats <span class="m">llama_cpp</span> — unknowable while AI Hub returns 503. The validated path meanwhile is <span class="m">llama_cpp</span> GGUF with models cached from Docker Hub, and this is the biggest open variable in the edge story.</li>
+          <li>Distiller model choice, decided by a bake-off that now spans NPU, CPU and GPU arms — at 1.7B the Adreno is 2.9× the NPU. Power is still the one unmeasured number, and it is the number the efficiency argument rests on.</li>
           <li>Synthesis quality on a single 8B model — 70B is not on our key. The honest Claude-vs-8B delta is the demo narrative rather than a thing to hide.</li>
           <li>Expect the 4B to land around 0.5–0.7 against Claude goldens. Recorded up front so results get read against expectations, not hopes.</li>
           <li>Distiller and synthesis prompts are first-pass Claude drafts, explicitly not contracts — the eval loop exists to fine-tune them, and mid-week changes are expected.</li>
@@ -1152,11 +1155,11 @@ description: Use when starting work in a joined Synapse session — before
       <div class="ladder">
         <h3>Distiller runtime</h3>
         <div class="rungs">
-          <span class="rung primary">GenieX qairt · NPU</span><span class="chev">→</span>
-          <span class="rung">GenieX llama_cpp · GGUF</span><span class="chev">→</span>
+          <span class="rung primary">GenieX llama_cpp · NPU (validated)</span><span class="chev">→</span>
+          <span class="rung">GenieX llama_cpp · GPU / CPU</span><span class="chev">→</span>
           <span class="rung last">Ollama on the Mac</span>
         </div>
-        <p class="trigger"><b>Trigger:</b> spike red by end of Day 2. Same server, same provider class for the first two rungs — only the backend changes. If it falls all the way to Ollama, the NPU gets presented as separately validated with whatever partial numbers exist, and the build does not block on it.</p>
+        <p class="trigger"><b>Trigger:</b> already exercised once for real — the planned first rung, <span class="m">qairt</span> bundles from AI Hub, is blocked by a server-side 503, so the validated <span class="m">llama_cpp</span> path became primary and qairt is now the <em>upside</em> rung if AI Hub recovers (it could reverse the compute-unit ranking). The middle rung is one <span class="m">-c</span> flag on the same server. If it falls all the way to Ollama, the NPU gets presented with whatever partial numbers exist, and the build does not block on it.</p>
       </div>
 
       <div class="ladder">
@@ -1188,7 +1191,7 @@ description: Use when starting work in a joined Synapse session — before
           <span class="rung">one retry</span><span class="chev">→</span>
           <span class="rung last">drop the finding</span>
         </div>
-        <p class="trigger"><b>Trigger:</b> already live. Neither the NPU nor Cirrascale honors a schema, so the middle rung is the normal path, and schema calls to Cloud AI 100 route through <span class="m">/completions</span> because the chat endpoint's tool-call parser eats JSON objects before we ever see them. Capability-flagged and measured per provider rather than assumed.</p>
+        <p class="trigger"><b>Trigger:</b> already live. Neither the NPU nor Cirrascale honors a schema today, so the middle rung is the normal path, and schema calls to Cloud AI 100 route through <span class="m">/completions</span> because the chat endpoint's tool-call parser eats JSON objects before we ever see them. Capability-flagged and measured per provider rather than assumed — and GenieX's GBNF grammar flags may yet promote the edge path to the first rung, if the probe finds them exposed over HTTP.</p>
       </div>
 
       <div class="ladder">
@@ -1304,7 +1307,7 @@ description: Use when starting work in a joined Synapse session — before
   </section>
 
   <footer>
-    <span>Sources: docs/brainstorming/2026-07-25-synapse-design.md · plans 0 / A / B / C · the four 2026-08-03 amendments (provider layer · hybrid frontier/local · segment budget &amp; compaction · agent detection, demo &amp; storage).</span>
+    <span>Sources: docs/brainstorming/2026-07-25-synapse-design.md · plans 0 / A / B / C · the four 2026-08-03 amendments (provider layer · hybrid frontier/local · segment budget &amp; compaction · agent detection, demo &amp; storage) · the 2026-07-30 NPU benchmarks (measured on the X Elite).</span>
     <span>Diagrams: Snapdragon Workspace board, Synapse frames.</span>
   </footer>
 
