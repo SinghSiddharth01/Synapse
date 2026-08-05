@@ -473,6 +473,63 @@ async def test_the_last_finding_of_a_large_push_still_gets_its_own_partners():
         "the union was capped by insertion order, not by relevance")
 
 
+async def test_a_multi_subsystem_backlog_flush_shares_the_window_by_rank_not_arrival():
+    """The `others = [f for _, f in sorted(best.values(), key=...)][:CANDIDATE_WINDOW]`
+    line's own comment: dict-insertion-order truncation "lets the first two
+    pushed findings fill all 20 slots, so findings 3..N of a backlog flush
+    contribute no partners at all." The sibling test above pins that a
+    SINGLE late pushed finding still finds its ONE partner -- but a dict with
+    fewer than CANDIDATE_WINDOW unique entries never actually gets truncated
+    at all, insertion order or not, so it cannot tell "capped by rank" apart
+    from "never capped." Reverting the sort to bare dict-insertion order
+    (`[f for _, f in best.values()][:CANDIDATE_WINDOW]`) leaves that test, and
+    the rest of the suite, green.
+
+    This scenario forces real truncation: 5 subsystems x 12 established
+    findings each (60, comfortably over CANDIDATE_WINDOW=20 on its own) and
+    one backlog flush of 5 pushed findings, one per subsystem, each
+    lexically anchored to only its own subsystem's vocabulary -- so each of
+    the 5 candidate() calls returns mostly same-subsystem matches, and the
+    union across all 5 easily exceeds 20 unique ids. Rank-sorted truncation
+    splits the 20-slot window close to evenly across subsystems regardless
+    of which pushed finding was processed first; insertion-order truncation
+    lets whichever subsystems' searches ran FIRST in the `for finding in
+    pushed:` loop fill the window before later ones get a look, starving
+    them down to as little as their own pushed finding and nothing else."""
+    store = InMemoryStore()
+    sid = store.create_session(purpose="p", created_by="s").shared_id
+    noop = {"working_memory": "wm", "merges": [], "trivial_ids": [], "conflicts": []}
+    provider = _RecordingProvider(scripts=[noop, noop])
+    synth = Synthesizer(provider)
+    attrs = [Attribution(contributor="a", agent_session="as-1", agent="claude-code")]
+    subsystems = ["pool", "tokenizer", "gateway", "decoder", "scheduler"]
+
+    established = [
+        Finding(id=f"f-{sub}-est-{i:02d}", type="learning",
+               text=f"the {sub} subsystem trips a fault when allocation attempt {i} "
+                    "exceeds its ceiling",
+               attributions=attrs, ts=TS)
+        for sub in subsystems for i in range(12)
+    ]
+    await synth.merge(store, sid, established)
+
+    pushed = [
+        Finding(id=f"f-{sub}-new", type="learning",
+               text=f"the {sub} subsystem trips a fault under sustained allocation pressure",
+               attributions=attrs, ts=TS)
+        for sub in subsystems
+    ]
+    await synth.merge(store, sid, pushed)
+
+    ids = provider.seen[1]
+    for sub in subsystems:
+        partners = sum(1 for i in ids if i.startswith(f"f-{sub}-est-"))
+        assert partners >= 3, (
+            f"subsystem {sub!r} got only {partners} established partner(s) in the merge "
+            f"prompt out of {len(ids)} total candidates — the 20-slot window was not "
+            "shared by rank across subsystems (candidate ids seen: " + ", ".join(ids) + ")")
+
+
 async def test_a_shared_symbol_is_marked_on_the_candidate_line_the_model_reads():
     """The flagship mechanism, put in front of the model rather than only in
     front of the ranker.
