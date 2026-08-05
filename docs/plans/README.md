@@ -8,28 +8,30 @@ The old plans accumulated five amendment layers and ~30 inline code snippets sho
 
 ## Reading order
 
-| Plan | Track | Status as of 2026-08-04 |
+| Plan | Track | Status as of 2026-08-05 |
 |---|---|---|
-| [Plan 0 — Foundation](./2026-08-03-plan-0-foundation.md) | all three, together | contracts + `FakeProvider` built · **fixtures 2 of 5, both solo-authored — the cross-track blocker** |
-| [Plan A — Capture](./2026-08-03-plan-a-capture.md) | local, no model, no network | running end to end on real data · **A.5 compaction and A.5b triage unbuilt** · no `CodexSource` |
-| [Plan B — Model](./2026-08-03-plan-b-model.md) | distillation, NPU, measurement | distiller + NPU + eval built and measured · **reframed by `adr/0003`** · privacy metric unfit |
-| [Plan C — Service](./2026-08-03-plan-c-service.md) | ingest, synthesis, memory, retrieval | **nothing built** |
-| [Plan D — Orchestrator](./2026-08-03-plan-d-orchestrator.md) | the local hub | **transport shell only**; D.2's binding landed in the worker |
+| [Plan 0 — Foundation](./2026-08-03-plan-0-foundation.md) | all three, together | contracts + `FakeProvider` built · fixtures complete at 8 of 8 (E1) — **still solo-authored, PROVISIONAL until co-review**, no longer a cross-track blocker |
+| [Plan A — Capture](./2026-08-03-plan-a-capture.md) | local, no model, no network | running end to end on real data · **A.5b triage built and merged (E2)** · **A.5 compaction still unbuilt** · no `CodexSource` |
+| [Plan B — Model](./2026-08-03-plan-b-model.md) | distillation, NPU, measurement | distiller + NPU + eval built and measured · **reframed by `adr/0003`** · privacy metric now includes `identifier_leaks()` (E1), not just the 8-gram check |
+| [Plan C — Service](./2026-08-03-plan-c-service.md) | ingest, synthesis, memory, retrieval | **built and merged (E3)**: ingest, synthesis (semantic merge + tombstones), retrieval, watermark, `AIC100Provider` — verified against `FakeProvider` only, live Cirrascale flip still open |
+| [Plan D — Orchestrator](./2026-08-03-plan-d-orchestrator.md) | the local hub | **built and merged (E4)**: producer endpoint, durable `Relay`, `query`/`contribute` MCP tools, watermark-driven briefing; D.2's binding landed in the worker earlier |
 
-Detail: [`docs/2026-08-04-implementation-report.md`](../2026-08-04-implementation-report.md) · summary: [`docs/STATE.md`](../STATE.md)
+All four exec plans below are merged; the closed loop across all three packages is verified in-process (zero real sockets — a real-socket two-machine run is still open, see `docs/STATE.md`). Detail: [`docs/2026-08-04-implementation-report.md`](../2026-08-04-implementation-report.md) (pre-merge state) · current summary: [`docs/STATE.md`](../STATE.md)
 
 ## Execution plans (`exec/`)
 
 The plans above are the **specs**. The `exec/` plans are their execution layer: bite-sized TDD tasks with the failing test written out, the run command, the expected output, and a commit per green — written so someone with zero context on this repo can execute them. In dependency order:
 
-| Exec plan | Implements | Depends on | Parallel-safe owner |
-|---|---|---|---|
-| [E1 — Corpus + privacy metric](./exec/2026-08-04-e1-corpus-and-privacy-metric.md) | Plan 0.3 completion · Plan B.7's leak detector | nothing | Aditya (+ co-author gate on goldens) |
-| [E2 — Triage](./exec/2026-08-04-e2-triage.md) | Plan A.5b | E1 Task 4 for its final task only | Akhil |
-| [E3 — Service](./exec/2026-08-04-e3-service.md) | Plan C.1–C.6 + `AIC100Provider` | nothing (fixture pair inlined if E1 lags) | Siddsing |
-| [E4 — Orchestrator content](./exec/2026-08-04-e4-orchestrator-content.md) | Plan D.1/D.3/D.4 + amendment F Q11 verification | E3 Tasks 1–4 (its Task 1 is independent — run it first) | split by interface |
+| Exec plan | Implements | Depends on | Status | Parallel-safe owner |
+|---|---|---|---|---|
+| [E1 — Corpus + privacy metric](./exec/2026-08-04-e1-corpus-and-privacy-metric.md) | Plan 0.3 completion · Plan B.7's leak detector | nothing | **Merged** — dev + adversarial review + adjudicated fixes, verifier clean | Aditya (+ co-author gate on goldens) |
+| [E2 — Triage](./exec/2026-08-04-e2-triage.md) | Plan A.5b | E1 Task 4 for its final task only | **Merged** — verifier clean; its Task 4 dependency on E1 is satisfied (see integration items) | Akhil |
+| [E3 — Service](./exec/2026-08-04-e3-service.md) | Plan C.1–C.6 + `AIC100Provider` | nothing (fixture pair inlined if E1 lags) | **Merged** — verifier clean; two residual findings closed post-merge (see integration items) | Siddsing |
+| [E4 — Orchestrator content](./exec/2026-08-04-e4-orchestrator-content.md) | Plan D.1/D.3/D.4 + amendment F Q11 verification | E3 Tasks 1–4 (its Task 1 is independent — run it first) | **Merged** — verifier clean, no residual findings | split by interface |
 
-E1/E2/E3 can start simultaneously. E4 Task 1 (the `instructions` sentinel probe) should run **today** regardless — it is nearly free and validates the assumption the whole briefing tier rests on. Still parked: Codex adapter, compaction (A.5), A/B measurement (B.8), freshness pointer + relevance skill.
+**Integration items** — work landed on `main` directly after all four branch merges, closing seams between them rather than within a single plan: triage repinned against the now-complete corpus expectation map (satisfies E2 Task 4's dependency on E1); the three-package closed-loop test (worker → orchestrator → service → query, E4 Task 5, in-process only — see `docs/STATE.md`'s caveat on which producer-routing branch it exercises); E3's `CANDIDATE_WINDOW`-starvation fix pinned at the route; and a `POST /v1/sessions/{sid}/synthesize` resync-self-heal endpoint. Two docs-only passes also repaired amendments the verifiers had flagged as incomplete or self-contradictory (E2's Task 3 deviations, E3's Task 5 extractor amendment) — the E2 plan still has one known-false sentence outstanding, see `docs/STATE.md`'s "What remains".
+
+Still parked: Codex adapter, compaction (A.5), A/B measurement (B.8), freshness pointer + relevance skill.
 
 ## Supporting documents
 
