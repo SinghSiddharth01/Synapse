@@ -22,20 +22,30 @@ def _sixgrams(text: str) -> set[tuple[str, ...]]:
     return {tuple(words[i:i+6]) for i in range(len(words) - 5)}
 
 
+# Frozen evidence for the v1-baseline incident (see
+# config/prompts/v1-baseline.toml), and the ONLY exemption this CI guard will
+# ever grant. This literal is deliberately duplicated rather than read from
+# the pack's own `contaminated_fixtures` declaration: letting a pack declare
+# its own exemption from the guard that checks it means any pack can silently
+# widen the exemption surface just by editing its TOML (add
+# `contaminated_fixtures = ["seg-005a"]` to any pack and this test stops
+# checking that pair, with no other test failing to flag it). Every NEW
+# fixture must pass clean against every pack, no exceptions beyond this one.
+#
+# `contaminated_fixtures` still exists on PromptPack and is still read —
+# by scripts/run_npu_eval.py, to decide whether to VOID a score in the
+# harness's own report. That is a display decision the harness is allowed to
+# make from pack-declared data; it is not the same thing as this test's pass/
+# fail exemption surface, which must not be pack-controllable.
+KNOWN_CONTAMINATED = {("seg-004", "v1-baseline.toml")}
+
+
 @pytest.mark.parametrize("fixture_id", available_fixtures())
 def test_fixture_shares_no_sixgram_with_any_pack(fixture_id):
     fixture_text = " ".join(e.content for e in load_segment(fixture_id).events)
     fixture_grams = _sixgrams(fixture_text)
     for pack_path in sorted(_packs_dir().glob("*.toml")):
-        pack = load_pack_by_name(pack_path.stem)
-        # The exemption is read from the pack's own declaration
-        # (`contaminated_fixtures` in the TOML — frozen evidence for the
-        # v1-baseline incident, see config/prompts/v1-baseline.toml) rather
-        # than a literal duplicated in this test file. scripts/run_npu_eval.py
-        # reads the exact same declaration to decide whether to VOID a score,
-        # so deleting or emptying it disarms this test and the harness's VOID
-        # banner together instead of letting them drift apart silently.
-        if pack.is_contaminated_for(fixture_id):
+        if (fixture_id, pack_path.name) in KNOWN_CONTAMINATED:
             continue
         overlap = fixture_grams & _sixgrams(pack_path.read_text(encoding="utf-8"))
         assert not overlap, (
@@ -47,16 +57,20 @@ def test_fixture_shares_no_sixgram_with_any_pack(fixture_id):
 def test_v1_baseline_declares_its_known_contamination():
     """Frozen evidence: v1-baseline's few-shots literally duplicate seg-004's
     tool_result wording (the incident that motivated this whole test file).
-    The exemption above is only safe to grant because the pack declares it
-    itself — this pins the declaration so it cannot silently disappear (which
-    would make the exemption above a no-op, which is fine) without anyone
-    reconsidering it, and pins that the overlap it excuses is still real
-    rather than a stale blanket permission."""
+
+    This does NOT feed the CI guard above — KNOWN_CONTAMINATED is the sole
+    source of truth for that, precisely so the guard's exemption surface is
+    not pack-controllable. What this pins is the *harness's* VOID display
+    (scripts/run_npu_eval.py reads pack.is_contaminated_for(...) to decide
+    whether to print the VOID banner): that the declaration in the pack's own
+    TOML has not silently disappeared, and that the overlap it excuses is
+    still real rather than a stale blanket permission."""
     pack = load_pack_by_name("v1-baseline")
     assert pack.is_contaminated_for("seg-004"), (
         "v1-baseline must declare contaminated_fixtures = [\"seg-004\"] — "
-        "this is the single source of truth for both this test's exemption "
-        "and scripts/run_npu_eval.py's VOID banner"
+        "this is scripts/run_npu_eval.py's sole input for its VOID banner "
+        "(the CI guard above uses its own frozen KNOWN_CONTAMINATED literal, "
+        "not this declaration)"
     )
     fixture_text = " ".join(e.content for e in load_segment("seg-004").events)
     assert pack.source_path is not None
@@ -69,15 +83,15 @@ def test_v1_baseline_declares_its_known_contamination():
 
 
 def test_only_v1_baseline_declares_any_contamination():
-    """Reading the exemption from each pack's own TOML (rather than a
-    hardcoded literal in this file) fixes a real drift risk, but it also
-    widens the exemption surface from one frozen pair to "whatever any pack
-    declares" — nothing else pinned that the set stays that small. Adding
-    `contaminated_fixtures = [...]` to any pack other than v1-baseline would
-    silently exempt a fixture from `test_fixture_shares_no_sixgram_with_any_pack`
-    with no test failing to flag it. This test is the plan's frozen-literal
-    invariant restored on top of the pack-declared mechanism: it must fail,
-    forcing deliberate review, the moment a second pack claims an exemption."""
+    """The CI guard above is driven entirely by the frozen KNOWN_CONTAMINATED
+    literal, so a pack cannot widen that guard's exemption surface by editing
+    its own TOML — that risk is closed structurally, not by a test. What a
+    pack CAN still do is mislead the harness's VOID display (which does read
+    pack.is_contaminated_for), by declaring `contaminated_fixtures` for a
+    fixture it does not actually share wording with, making the harness void
+    a score that was not actually compromised, or vice versa. This test
+    guards that surface: only v1-baseline (frozen evidence of a real
+    incident) declares any contamination at all."""
     for pack_name in available_packs():
         pack = load_pack_by_name(pack_name)
         if pack_name == "v1-baseline":
@@ -89,8 +103,8 @@ def test_only_v1_baseline_declares_any_contamination():
             assert pack.contaminated_fixtures == (), (
                 f"{pack_name} declares contaminated_fixtures = "
                 f"{list(pack.contaminated_fixtures)} — only v1-baseline/seg-004 "
-                "is frozen evidence of a real incident. A new exemption here "
-                "silently disarms test_fixture_shares_no_sixgram_with_any_pack "
-                "for that fixture; if this is deliberate, update this test in "
-                "the same commit so the widening is reviewed, not silent"
+                "is frozen evidence of a real incident. This does not affect "
+                "the CI guard above (KNOWN_CONTAMINATED is pack-independent), "
+                "but it would mislead scripts/run_npu_eval.py's VOID display; "
+                "if this is deliberate, update this test in the same commit"
             )
