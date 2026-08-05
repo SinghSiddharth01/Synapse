@@ -1,5 +1,6 @@
 """Shape tests for every committed fixture. Prose quality is co-review's job."""
 import json
+import os
 import re
 
 import pytest
@@ -49,7 +50,7 @@ def test_seg003_error_is_buried_in_an_oversized_tool_result():
     assert "dead_end" in types
 
 
-def test_seg003_buried_error_reaches_the_model_only_via_prose_under_shipped_config():
+def test_seg003_buried_error_reaches_the_model_only_via_prose_under_shipped_config(monkeypatch):
     """The test above pins that seg-003's tool_result *file* is oversized with
     a buried error, but asserted nothing about system behaviour on it. Under
     the shipped config (config/synapse.toml: distil_kinds = ("text",)),
@@ -60,7 +61,18 @@ def test_seg003_buried_error_reaches_the_model_only_via_prose_under_shipped_conf
     seg-003 exercises the same code path as seg-002 today; no compaction or
     budget-splitting behaviour is pinned by this fixture until distil_kinds
     is widened and/or A.5 (compaction) lands. This test pins the current,
-    honest state so that claim cannot silently go stale in either direction."""
+    honest state so that claim cannot silently go stale in either direction.
+
+    load_config() layers SYNAPSE_* environment variables over the committed
+    TOML (config.py's whole point — a bake-off sweeps models/packs without
+    editing a tracked file), so this test must clear them first. Otherwise
+    it fails spuriously for anyone with, say, SYNAPSE_DISTIL_KINDS exported
+    to sweep a pack — exactly the workflow config/synapse.toml's own header
+    and scripts/run_npu_eval.py's docstring prescribe — and the failure talks
+    about fixture semantics rather than about the runner's shell."""
+    for key in list(os.environ):
+        if key.startswith("SYNAPSE_"):
+            monkeypatch.delenv(key, raising=False)
     segment = load_segment("seg-003")
     config = load_config()
     rendered = render_segment(segment, config.distil_kinds, config.render_style)
