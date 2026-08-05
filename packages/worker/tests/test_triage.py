@@ -137,13 +137,19 @@ def test_readonly_with_substantial_prose_is_kept():
 
 def test_error_count_ending_in_zero_is_not_read_as_a_clean_report():
     # Regression: LINT_CLEAN_RE's old "0 errors" alternative had no left word
-    # boundary, so it matched inside "10 errors", "130 errors", etc. and both
-    # vetoed the error-signal keep AND satisfied the lint-clean skip.
+    # boundary, so it matched inside "10 errors", "130 errors", etc. -- any
+    # count ending in 0. This has to be a SINGLE-line tool_result: a two-line
+    # construction (a detail line plus a separate summary line) is already
+    # caught by the per-line split in `_has_uncleared_error` regardless of
+    # the boundary, since the detail line alone trips ERROR_RE with no clean
+    # phrase on it -- that shape pins the per-line split, not the boundary.
+    # This single line is both the count AND (via the substring "0 errors"
+    # inside "10 errors") the clean-report match, which is what actually
+    # distinguishes `0 errors` from `\b0 errors\b`, and it is the real shape
+    # mypy's own summary line takes.
     d = triage(_seg([
         _ev(role="user", kind="tool_result", tool_name="Bash",
-            content="src/loop.py:44: error: Incompatible types\n"
-                    "Found 10 errors in 3 files (checked 40 source files)"),
-        _ev(content="Ten type errors; I'll fix the offset type first."),
+            content="Found 10 errors in 3 files (checked 40 source files)"),
     ]))
     assert d.keep and d.reason == "error-signal"
 
