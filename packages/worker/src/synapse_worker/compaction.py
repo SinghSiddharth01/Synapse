@@ -125,11 +125,21 @@ MAX_SURVIVOR_LINES = HEAD_TAIL_LINES
 _OMISSION_MARKER = "⋯ compacted ⋯"
 _THINKING_TRIMMED_MARKER = "⋯ (thinking trimmed) ⋯"
 
-# What a trivial read-only tool_result's content collapses to. Fixed and
-# short (well under TRIVIAL_RESULT_MAX_CHARS, no words `_LIKELY_ERROR_LINE_RE`
-# matches) so that classifying THIS string is itself always a no-op verdict
-# -- see the module docstring's idempotence argument.
-_TRIVIAL_RESULT_MARKER = "⋯ (trivial read-only result omitted) ⋯"
+# What a trivial read-only tool_result's content collapses to.
+#
+# AMENDMENT (fixer pass, major): this was originally a 38-char prose marker
+# ("⋯ (trivial read-only result omitted) ⋯"). Most trivial results -- the
+# common case this branch exists for -- are themselves well under 38 chars
+# ("DEBUG = True" is 12), so replacing them with a longer marker made
+# compaction GROW the segment on the single most common turn shape,
+# measured through a real WorkerLoop.tick() as "4/4 events kept · 26 chars
+# added" on exactly the scenario test_stats.py's ordering test uses. Empty
+# is the only value that can never grow anything, by construction (`len("")
+# == 0 <= len(content)` for every possible `content`, including empty
+# results) -- still well under TRIVIAL_RESULT_MAX_CHARS, still matches no
+# `_LIKELY_ERROR_LINE_RE` word, so classifying it is still always a no-op
+# verdict on a second pass. See the module docstring's idempotence argument.
+_TRIVIAL_RESULT_MARKER = ""
 
 
 def _strip_binary(content: str) -> str:
