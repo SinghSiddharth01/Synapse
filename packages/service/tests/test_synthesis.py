@@ -162,6 +162,79 @@ async def test_conflict_on_a_finding_merged_in_the_same_round_resolves_forward()
     assert conflict.finding_b == "f-c"
 
 
+async def test_malformed_merge_entry_is_skipped_not_fatal():
+    """A schema_valid verdict can still carry malformed nested entries -- the
+    real AIC100Provider's schema gate only inspects TOP-level required keys,
+    never array items (packages/providers/src/synapse_providers/aic100.py's
+    _satisfies_schema). merge() must skip the bad entry and still complete
+    the round, rather than crash mid-application: leaving tombstones written
+    but memory_version un-bumped would contradict this module's own
+    docstring ("a model failure ... leaves findings landed and version
+    unchanged") and invariant 5 (merge is the only irreversible action)."""
+    store = InMemoryStore()
+    sid = store.create_session(purpose="p", created_by="s").shared_id
+    a, b = _pair()
+    script = {"working_memory": "wm",
+              "merges": [{"source_ids": ["f-005a-01", "f-005b-01"]}],  # missing text/type
+              "trivial_ids": [], "conflicts": []}
+    ctx = await Synthesizer(FakeProvider(scripts=[script])).merge(store, sid, [a, b])
+
+    assert ctx.memory_version == 1                     # round still completed
+    assert store.get(sid, "f-005a-01").merged_into is None   # never tombstoned
+    assert store.get(sid, "f-005b-01").merged_into is None
+
+
+async def test_merges_of_the_wrong_top_level_type_does_not_crash():
+    """AIC100Provider's schema gate only checks that the OBJECT has the
+    right top-level keys, not that each key holds the right TYPE -- a
+    string where 'merges' should be a list is schema_valid=True per the
+    provider's own gate."""
+    store = InMemoryStore()
+    sid = store.create_session(purpose="p", created_by="s").shared_id
+    a, b = _pair()
+    script = {"working_memory": "wm", "merges": "not-a-list",
+              "trivial_ids": [], "conflicts": []}
+    ctx = await Synthesizer(FakeProvider(scripts=[script])).merge(store, sid, [a, b])
+    assert ctx.memory_version == 1
+
+
+async def test_conflict_entry_missing_a_key_is_skipped_not_fatal():
+    store = InMemoryStore()
+    sid = store.create_session(purpose="p", created_by="s").shared_id
+    a, b = _pair()
+    script = {"working_memory": "wm", "merges": [], "trivial_ids": [],
+              "conflicts": [{"a": "f-005a-01", "description": "missing b"}]}
+    ctx = await Synthesizer(FakeProvider(scripts=[script])).merge(store, sid, [a, b])
+    assert ctx.memory_version == 1
+    assert ctx.conflicts == []
+
+
+async def test_a_second_valid_merge_still_applies_after_a_malformed_one_before_it():
+    """The partial-application failure mode: a crash on entry N must not
+    leave entries before N half-applied while entries after N never run."""
+    store = InMemoryStore()
+    sid = store.create_session(purpose="p", created_by="s").shared_id
+    a, b = _pair()
+    third = Finding(id="f-c", type="learning", text="an unrelated third finding",
+                    attributions=a.attributions, ts=TS)
+    fourth = Finding(id="f-d", type="learning", text="a fourth finding, same idea as f-c",
+                     attributions=a.attributions, ts=TS)
+    script = {
+        "working_memory": "wm",
+        "merges": [
+            {"source_ids": ["f-005a-01", "f-005b-01"]},          # malformed: no text/type
+            {"source_ids": ["f-c", "f-d"], "text": "merged", "type": "learning"},
+        ],
+        "trivial_ids": [], "conflicts": [],
+    }
+    ctx = await Synthesizer(FakeProvider(scripts=[script])).merge(
+        store, sid, [a, b, third, fourth])
+
+    assert store.get(sid, "f-005a-01").merged_into is None     # malformed entry: skipped
+    assert store.get(sid, "f-c").merged_into is not None       # valid entry: still applied
+    assert ctx.memory_version == 1
+
+
 async def test_unknown_ids_from_the_model_are_ignored_not_fatal():
     """An unknown id in a verdict must not crash the merge -- but a verdict
     that resolves to a single live source must not mint a Synthesized

@@ -114,9 +114,29 @@ class Synthesizer:
 
         known = {f.id for f in store.all_findings(shared_id)}
 
-        for merge in verdicts.get("merges", []):
+        raw_merges = verdicts.get("merges", [])
+        if not isinstance(raw_merges, list):
+            logger.warning("Synthesis verdict's 'merges' was %s, not a list; ignoring all "
+                           "of it rather than crashing", type(raw_merges).__name__)
+            raw_merges = []
+
+        for merge in raw_merges:
+            # AIC100Provider's schema gate (_satisfies_schema) only checks the
+            # TOP-level object's required keys; it never inspects array items.
+            # A schema_valid=True verdict can still carry a merge entry that
+            # isn't a dict at all, or is missing source_ids/text/type, or has
+            # source_ids of the wrong type. Skip just that entry rather than
+            # crash mid-application -- a KeyError/TypeError here would leave
+            # earlier tombstones written and memory_version un-bumped,
+            # contradicting this module's own "zero loss" docstring.
+            if (not isinstance(merge, dict)
+                    or not isinstance(merge.get("source_ids"), list)
+                    or not isinstance(merge.get("text"), str)
+                    or "type" not in merge):
+                logger.warning("Malformed merge verdict entry %r; skipping", merge)
+                continue
             sources = [store.get(shared_id, fid) for fid in merge["source_ids"]
-                       if fid in known]
+                       if isinstance(fid, str) and fid in known]
             sources = [s for s in sources if s is not None and s.merged_into is None]
             if len(sources) < 2:
                 # A Synthesized Finding captures "two or more Findings it
@@ -151,7 +171,15 @@ class Synthesizer:
             for s in sources:
                 s.merged_into = synthesized.id                     # tombstone: text stays
 
-        for fid in verdicts.get("trivial_ids", []):
+        raw_trivial = verdicts.get("trivial_ids", [])
+        if not isinstance(raw_trivial, list):
+            logger.warning("Synthesis verdict's 'trivial_ids' was %s, not a list; ignoring",
+                           type(raw_trivial).__name__)
+            raw_trivial = []
+        for fid in raw_trivial:
+            if not isinstance(fid, str):
+                logger.warning("Malformed trivial id %r; skipping", fid)
+                continue
             finding = store.get(shared_id, fid)
             if finding is None:
                 logger.warning("Trivial verdict for unknown id %s; ignored", fid)
@@ -159,8 +187,17 @@ class Synthesizer:
             if finding.merged_into is None:
                 finding.status = FindingStatus.TRIVIAL
 
+        raw_conflicts = verdicts.get("conflicts", [])
+        if not isinstance(raw_conflicts, list):
+            logger.warning("Synthesis verdict's 'conflicts' was %s, not a list; ignoring",
+                           type(raw_conflicts).__name__)
+            raw_conflicts = []
         existing_pairs = {frozenset((c.finding_a, c.finding_b)) for c in ctx.conflicts}
-        for c in verdicts.get("conflicts", []):
+        for c in raw_conflicts:
+            if (not isinstance(c, dict) or not isinstance(c.get("a"), str)
+                    or not isinstance(c.get("b"), str) or not isinstance(c.get("description"), str)):
+                logger.warning("Malformed conflict verdict entry %r; skipping", c)
+                continue
             if c["a"] not in known or c["b"] not in known:
                 continue
             # Follow merged_into forward: a source tombstoned by THIS round's
