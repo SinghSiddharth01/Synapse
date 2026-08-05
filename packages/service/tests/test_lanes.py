@@ -212,6 +212,27 @@ def test_backfill_cannot_invent_candidates_that_do_not_exist() -> None:
     assert len(store.candidates("40 ms", top_k=14)) == 1
 
 
+def test_top_k_bound_holds_at_the_low_boundary_with_a_symbol_bearing_query() -> None:
+    """`floor = max(1, top_k // RESERVE_DIVISOR)` is 1 for every top_k <= 9,
+    so both reserved lanes (SYMBOLS, RECENT) can each claim `floor` ids and
+    `budget = top_k - sum(...)` goes negative for top_k in {0, 1} once the
+    query shares a symbol with the corpus (RECENT alone already costs 1, so
+    top_k=0 goes negative even symbol-free). An unclamped negative `budget`
+    turns `fused_ranked[:budget]` into a Python negative slice -- "drop the
+    last |budget| items" -- which returned close to the whole 30-finding
+    store instead of respecting top_k. `test_top_k_bounds_the_result` and
+    `test_backfill_never_exceeds_top_k` both sit at top_k=5 and never
+    exercise this branch."""
+    store = _store(*((f"f{i}",
+                      f"the pool exhausts above 40 ms under load version 1.9.4, case {i}")
+                     for i in range(30)))
+
+    for top_k in (0, 1, 2):
+        result = store.candidates("40 ms pool 1.9.4", top_k=top_k)
+        assert len(result) <= top_k, (top_k, len(result))
+    assert len(store.candidates("40 ms pool 1.9.4", top_k=2)) == 2
+
+
 def test_the_topic_lane_contributes_nothing_when_it_is_off() -> None:
     """Measured at 0 partners and 0 uniquely, at 422 findings and at 2,022.
     A lane that returns a whole 40-member cluster into an RRF fusion is not

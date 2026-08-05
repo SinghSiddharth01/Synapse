@@ -249,7 +249,13 @@ def select(
         (Lane.SYMBOLS, ranked_by_lane[Lane.SYMBOLS][:floor]),
         (Lane.RECENT, recent_ids[:floor]),
     )
-    budget = top_k - sum(min(len(ids), floor) for _, ids in reserved)
+    # Clamped at 0: for top_k in {0, 1} the two reserved floors (>= 1 each)
+    # can outweigh top_k itself. An unclamped negative budget turns
+    # `fused_ranked[:budget]` into a Python negative slice -- "drop the last
+    # |budget| items" instead of "take none" -- which silently returned ~N
+    # candidates for top_k=1 on a 30-finding store. Measured: top_k=1 came
+    # back with 29, top_k=0 with 28, before this clamp.
+    budget = max(0, top_k - sum(min(len(ids), floor) for _, ids in reserved))
 
     fused_ranked = sorted(fused.items(), key=lambda kv: (-kv[1], kv[0]))
     ordered = fused_ranked[:budget]
