@@ -1,11 +1,13 @@
-"""synapse-orchestrator — the MCP server a coding agent will eventually connect to.
+"""synapse-orchestrator — the MCP server a coding agent connects to.
 
     uv run synapse-orchestrator
+    uv run synapse-orchestrator resync
 
-Currently a transport shell only — see server.py's module docstring for what
-it used to do and why that was removed. Boots and serves streamable-http per
-ADR 0001, but exposes no tools or prompts until Plan D Task D.3's `query` and
-`contribute` exist, which in turn need the Synapse Service (Plan C).
+One Starlette app serves both the MCP surface (`/mcp`) and the producer
+endpoint (`/producer/findings`, Plan D.1) on a single process/port — ADR
+0001's single-egress property. The `Relay` (Plan D.4) is the sole path
+onward to the Synapse Service; `resync` re-pushes its entire retained log,
+the recovery path for a service restart.
 
 Session binding is `synapse-worker join <shared_id>`, not anything through
 this server. See that command's help.
@@ -14,18 +16,43 @@ this server. See that command's help.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import logging
 import sys
+from pathlib import Path
 
-from synapse_orchestrator.server import mcp
+import uvicorn
+
+from synapse_contracts.binding import read_binding
+from synapse_orchestrator.app import build_app
+from synapse_orchestrator.relay import Relay
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="synapse-orchestrator", description=__doc__)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8787)
+    parser.add_argument("--state-dir", default=".synapse")
+    parser.add_argument("--service-url", default="http://127.0.0.1:8899")
     parser.add_argument("-v", "--verbose", action="store_true")
+
+    sub = parser.add_subparsers(dest="command")
+    resync = sub.add_parser(
+        "resync", help="re-push the Relay's entire retained log to the service"
+    )
+    resync.set_defaults(func=cmd_resync)
+
     return parser
+
+
+async def cmd_resync(args: argparse.Namespace) -> int:
+    state_dir = Path(args.state_dir)
+    binding = read_binding(state_dir / "bindings" / "claude-code.json")
+    shared_id = binding.shared_id if binding else "unbound"
+    relay = Relay(state_dir / "relay", args.service_url, shared_id)
+    pushed = await relay.resync()
+    print(f"resync: re-pushed {pushed} finding(s) for session {shared_id!r}")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -39,12 +66,17 @@ def main(argv: list[str] | None = None) -> int:
         datefmt="%H:%M:%S",
     )
 
-    mcp.settings.host = args.host
-    mcp.settings.port = args.port
-    print(f"synapse-orchestrator listening on http://{args.host}:{args.port}/mcp")
-    print("No tools or prompts exposed yet — see server.py. Use "
-          "`synapse-worker join <shared_id>` to bind a session.")
-    mcp.run(transport="streamable-http")
+    if getattr(args, "command", None) == "resync":
+        return asyncio.run(args.func(args))
+
+    state_dir = Path(args.state_dir)
+    binding = read_binding(state_dir / "bindings" / "claude-code.json")
+    shared_id = binding.shared_id if binding else "unbound"
+    relay = Relay(state_dir / "relay", args.service_url, shared_id)
+    app = build_app(relay)
+    print(f"synapse-orchestrator on http://{args.host}:{args.port} "
+          f"(mcp at /mcp, producer at /producer/findings, session: {shared_id})")
+    uvicorn.run(app, host=args.host, port=args.port)
     return 0
 
 

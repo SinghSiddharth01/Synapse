@@ -356,7 +356,7 @@ git commit -m "feat(orchestrator): Relay — write-ahead egress with retained-lo
 - Consumes: `create_mcp` (Task 1), `Relay` (Task 2), `read_binding` from `synapse_contracts.binding`.
 - Produces: `build_app(relay: Relay, mcp_server: FastMCP | None = None) -> Starlette` exposing MCP at `/mcp` **and** `POST /producer/findings` → `{accepted, sent}` / 422 on non-Finding payloads. The worker's `HttpSink` default URL (`http://127.0.0.1:8787/producer/findings` in `config/synapse.toml`) matches this route — keep them aligned.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 # packages/orchestrator/tests/test_producer_endpoint.py
@@ -419,12 +419,12 @@ def test_mcp_surface_is_mounted_on_the_same_app(tmp_path):
     assert any(p.startswith("/mcp") for p in paths)          # one process, one port
 ```
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
 Run: `uv run pytest packages/orchestrator/tests/test_producer_endpoint.py -v`
 Expected: FAIL with `ModuleNotFoundError: synapse_orchestrator.app`.
 
-- [ ] **Step 3: Implement `app.py`**
+- [x] **Step 3: Implement `app.py`**
 
 ```python
 # packages/orchestrator/src/synapse_orchestrator/app.py
@@ -476,7 +476,7 @@ def build_app(relay: Relay, mcp_server=None) -> Starlette:
     return app
 ```
 
-- [ ] **Step 4: Rewire the CLI**
+- [x] **Step 4: Rewire the CLI**
 
 In `cli.py`: replace the `mcp.run(transport="streamable-http")` block with:
 
@@ -504,7 +504,7 @@ and in `main()` after parsing (new args: `--state-dir` default `.synapse`, `--se
 
 Also add a `resync` subcommand — mirror the existing argparse pattern; it builds the same `Relay` and prints `await relay.resync()`. Update `tests/test_cli.py` following its existing invocation pattern so CLI coverage stays 100%.
 
-- [ ] **Step 5: Run, then commit**
+- [x] **Step 5: Run, then commit**
 
 Run: `uv run pytest packages/orchestrator -q` → PASS.
 
