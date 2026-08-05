@@ -112,15 +112,28 @@ async def build_briefing(binding: LocalBinding | None, service_url: str, *,
                 topics_clause = (" The team is working on: "
                                  + ", ".join(f"“{label}”" for label in labels) + ".")
 
+        # Composition order is load-bearing (N3, revision 2). The cap below
+        # truncates from the END, so whatever is interpolated LAST pays for
+        # unbounded growth in whatever came before it. `types` is E3's
+        # service-supplied `by_type` map — unbounded, and the whole reason
+        # the cap exists. The tool-usage sentences are the entire point of
+        # this string being the `instructions` surface (Task 1's sentinel
+        # probe reads them). They go FIRST, right after the fixed-size
+        # identity clause, so the cap's victim is always the growable
+        # content (first `topics_clause`, then `types` itself) rather than
+        # an accident of which field happened to be biggest this round. See
+        # test_briefing_is_hard_capped_when_the_watermark_by_type_map_is_huge
+        # for the 300-type fixture that pins this ordering, not just the cap.
         text = (
             f"{SENTINEL} You are in Synapse Shared Session {_clean(binding.shared_id)} as "
-            f"{_clean(binding.contributor)}. Team memory holds {total} findings ({types}), "
-            f"{conflicts} conflict(s), at version v{version} — "
-            f"{new_since} new since you last looked. Call the `query` tool "
+            f"{_clean(binding.contributor)}. Call the `query` tool "
             "before exploring an unfamiliar subsystem, when debugging something a "
             "teammate may also be working on, or before concluding something is a "
             "dead end. Call `contribute` when you learn something non-obvious a "
-            "teammate would benefit from."
+            "teammate would benefit from. "
+            f"Team memory holds {total} findings ({types}), "
+            f"{conflicts} conflict(s), at version v{version} — "
+            f"{new_since} new since you last looked."
             f"{topics_clause}"
         )
     except Exception as exc:  # FAIL OPEN: nothing escapes this function, ever

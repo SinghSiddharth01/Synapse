@@ -90,7 +90,18 @@ async def test_briefing_is_hard_capped_when_the_watermark_by_type_map_is_huge():
     'Hard-capped ... by design' with no enforcement anywhere. `by_type` is
     E3's watermark-response content, interpolated directly into the highest-
     trust text surface a connecting agent sees (Task 1's sentinel probe) —
-    an oversized map must not ride straight through."""
+    an oversized map must not ride straight through.
+
+    The plan's Step 5 also asks for `assert "query" in text and "contribute"
+    in text` here — this is the ADVERSARIAL fixture (300 synthetic types,
+    ~4500 chars of listing alone), unlike test_briefing_renders_topic_labels'
+    realistic one, so it is the one that actually exercises whether the
+    tool-usage guidance survives truncation rather than just the cap firing.
+    It only holds because the tool-usage sentences are composed BEFORE the
+    `by_type` listing now (briefing.py's composition-order comment) — with
+    the OLD ordering (types listing first) this fixture truncated them away
+    long before topics_clause placement could matter, which is why an
+    earlier pass here recorded this as an unsatisfiable deviation instead."""
     huge_by_type = {f"type-{i}": i for i in range(300)}
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"version": 1, "new_since": 0,
@@ -100,22 +111,7 @@ async def test_briefing_is_hard_capped_when_the_watermark_by_type_map_is_huge():
     assert len(text) <= 1200
     assert text != _DEFAULT_INSTRUCTIONS      # rendered something real, not a bail-out
     assert text.endswith("…")                 # truncated, not silently cut mid-word only
-    # ⟨DEVIATION vs. the plan, recorded⟩ The plan's Step 5 asks for
-    # `assert "query" in text and "contribute" in text` here too. Verified
-    # against the real composition: `by_type`'s rendered listing sits BEFORE
-    # the query/contribute sentences in the string (unchanged by this task,
-    # and this test supplies no `topics`, so nothing after them can be what
-    # pushes the total over 1200 instead). With 300 synthetic types the
-    # listing alone is ~4500 chars, so the cap always falls inside it and
-    # the query/contribute sentences are truncated away long before the
-    # topics_clause placement can matter — the plan's own reasoning
-    # ("growth has to be paid for out of something ... not the sentences
-    # that tell the agent to call query and contribute") does not hold for
-    # THIS fixture without also moving `by_type`'s listing after them, which
-    # this task does not do and which risks other tests' wording. The
-    # property this task actually delivers and CAN pin is
-    # test_briefing_renders_topic_labels, which does carry this assertion
-    # and passes against a realistic (non-adversarial) by_type.
+    assert "query" in text and "contribute" in text
 
 
 async def test_briefing_strips_control_characters_from_service_supplied_values():
