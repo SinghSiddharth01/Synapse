@@ -405,7 +405,7 @@ The 8-gram metric scored **0.00** on a finding containing `default_pool_size=25`
 **Interfaces:**
 - Produces: `identifier_leaks(finding_text: str, segment: Segment, allowlist: frozenset[str] = DEFAULT_ALLOWLIST) -> list[str]`; `FixtureScore.leaked_identifiers: list[str]` populated by `score_fixture`. E1 Task 6 and any future harness read `leaked_identifiers`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 # packages/distiller/tests/test_identifier_leaks.py
@@ -462,12 +462,12 @@ def test_plain_prose_never_flags():
     assert identifier_leaks("The connection pool was exhausted under load.", seg) == []
 ```
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
 Run: `uv run pytest packages/distiller/tests/test_identifier_leaks.py -v`
 Expected: FAIL with `ImportError: cannot import name 'identifier_leaks'`.
 
-- [ ] **Step 3: Implement in evaluation.py**
+- [x] **Step 3: Implement in evaluation.py**
 
 Append to `packages/distiller/src/synapse_distiller/evaluation.py`:
 
@@ -539,12 +539,12 @@ In `score_fixture(...)`, after the existing `overlaps = ...` line:
 
 and pass `leaked_identifiers=leaks` in the `FixtureScore(...)` constructor call.
 
-- [ ] **Step 4: Run to verify they pass**
+- [x] **Step 4: Run to verify they pass**
 
 Run: `uv run pytest packages/distiller/tests/test_identifier_leaks.py packages/distiller/tests/ -q`
 Expected: PASS, and the rest of the distiller suite stays green.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add packages/distiller/src/synapse_distiller/evaluation.py packages/distiller/tests/test_identifier_leaks.py
