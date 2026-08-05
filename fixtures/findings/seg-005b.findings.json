@@ -1,7 +1,7 @@
 [
   {
     "id": "f-005b-01", "type": "learning",
-    "text": "The decode failure reproduces only under load, when background traffic pushes the delay past about 40 ms.",
+    "text": "Under load, once other traffic pushes the response delay past roughly 40 milliseconds, decoding fails; kept idle, the delay stays short and it works fine.",
     "attributions": [{"contributor": "akhil", "agent_session": "as-fixture-005b", "agent": "codex"}],
     "ts": "2026-08-04T11:15:00Z", "refs": [],
     "provenance": "distilled", "status": "kept", "merged_from": [], "merged_into": null
