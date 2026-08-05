@@ -96,8 +96,19 @@ def triage(segment: Segment) -> TriageDecision:
     # ── keep-signals, in order of confidence ────────────────────────────────
     if any(e.kind == "thinking" for e in segment.events):
         return TriageDecision(True, "thinking-present")
+    # Forward-looking, not dead code by design: `ClaudeCodeSource` never emits
+    # role=="system" today (system-typed lines are dropped as bookkeeping in
+    # sources/claude_code.py, and Claude Code's own compaction summaries and
+    # injected context arrive as `isMeta` user turns, filtered out upstream of
+    # this module entirely) — so this rule is currently unreachable via that
+    # one Source adapter. It stays because `AgentEvent.role` permits "system"
+    # in the contract and a future Source (Codex, or a later Claude Code
+    # adapter revision that surfaces compaction summaries as system events)
+    # may emit it; triage must keep whatever that adapter decides is durable
+    # system-level context the moment it starts arriving, without a second
+    # change here.
     if any(e.role == "system" and e.kind == "text" for e in segment.events):
-        return TriageDecision(True, "system-note")  # compaction summaries etc.
+        return TriageDecision(True, "system-note")
     if DECISION_RE.search(all_text) or any(
         e.kind == "thinking" and DECISION_RE.search(e.content) for e in segment.events
     ):

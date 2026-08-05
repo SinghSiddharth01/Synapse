@@ -30,6 +30,16 @@ def test_thinking_block_is_kept():
     assert d.keep and d.reason == "thinking-present"
 
 
+def test_system_note_is_kept():
+    # Unreachable via ClaudeCodeSource today (see the comment on this branch
+    # in triage.py) -- role=="system" never survives that adapter. The rule
+    # is forward-looking for a Source that does emit one, and this test pins
+    # its behaviour at the triage() level so it stays covered and correct
+    # even though nothing in this repo can produce the input yet.
+    d = triage(_seg([_ev(role="system", kind="text", content="conversation compacted")]))
+    assert d.keep and d.reason == "system-note"
+
+
 def test_decision_language_is_kept():
     d = triage(_seg([_ev(content="that approach is a dead end, switching to polling instead")]))
     assert d.keep and d.reason == "decision-language"
