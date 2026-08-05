@@ -1,8 +1,10 @@
 """Shape tests for every committed fixture. Prose quality is co-review's job."""
+import json
+
 import pytest
 
 from synapse_contracts import Finding, Segment
-from synapse_distiller.fixtures import available_fixtures, load_goldens, load_segment
+from synapse_distiller.fixtures import available_fixtures, fixtures_root, load_goldens, load_segment
 
 EXPECTED_IDS = ["seg-001", "seg-002", "seg-003", "seg-004",
                 "seg-005a", "seg-005b", "seg-006", "seg-007"]
@@ -55,3 +57,17 @@ def test_seg005_pair_is_a_merge_candidate():
     # Same fact, different halves: both mention the 40ms window, only b has load.
     assert "40" in a[0].text and "40" in b[0].text
     assert "load" in b[0].text.lower() and "load" not in a[0].text.lower()
+
+
+def test_adversarial_fixtures_have_empty_goldens():
+    assert load_goldens("seg-006") == []
+    assert load_goldens("seg-007") == []
+
+
+def test_triage_expectation_map_covers_the_whole_corpus():
+    raw = json.loads((fixtures_root() / "triage.json").read_text(encoding="utf-8"))
+    assert set(raw) == set(EXPECTED_IDS)
+    assert all(v["expected"] in ("keep", "skip") for v in raw.values())
+    # The two load-bearing entries: all-noise is skipped, quiet insight is kept.
+    assert raw["seg-004"]["expected"] == "skip"
+    assert raw["seg-002"]["expected"] == "keep"

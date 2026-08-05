@@ -1,0 +1,10 @@
+{
+  "seg-001":  {"expected": "keep", "note": "real work: decisions, a dead end, tool errors"},
+  "seg-002":  {"expected": "keep", "note": "insight with no error — the case keyword filters miss; default-keep must catch it"},
+  "seg-003":  {"expected": "keep", "note": "buried real error"},
+  "seg-004":  {"expected": "skip", "note": "lint run, everything fixed, nothing remaining — the canonical skip"},
+  "seg-005a": {"expected": "keep", "note": "decision language, real learning"},
+  "seg-005b": {"expected": "keep", "note": "real learning under load"},
+  "seg-006":  {"expected": "keep", "note": "ACCEPTED FALSE POSITIVE: a typo-error segment trips the error rule; recall-tuning means we pay NPU time here rather than risk skipping real errors"},
+  "seg-007":  {"expected": "keep", "note": "ACCEPTED FALSE POSITIVE: grep output containing the word 'error'; a keyword triage cannot tell mentions from failures, and skipping on this rule would also skip real failures"}
+}

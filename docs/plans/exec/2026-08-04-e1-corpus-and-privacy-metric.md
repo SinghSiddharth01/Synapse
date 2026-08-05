@@ -323,7 +323,7 @@ seg-006: an error that is NOT insight (typo, fixed in seconds). seg-007: noise t
 **Interfaces:**
 - Produces: `fixtures/triage.json` — `{"<fixture_id>": {"expected": "keep"|"skip", "note": str}}`. E2 Task 4 parametrizes over it verbatim.
 
-- [ ] **Step 1: Append the failing tests**
+- [x] **Step 1: Append the failing tests**
 
 ```python
 import json
@@ -344,12 +344,12 @@ def test_triage_expectation_map_covers_the_whole_corpus():
     assert raw["seg-002"]["expected"] == "keep"
 ```
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
 Run: `uv run pytest packages/distiller/tests/test_fixture_corpus.py -v -k "adversarial or expectation"`
 Expected: FAIL with `FileNotFoundError`.
 
-- [ ] **Step 3: Write the fixtures and the map**
+- [x] **Step 3: Write the fixtures and the map**
 
 `seg-006.json` (`as-fixture-006`): four events —
 1. `user/text`: "run the unit tests" (12:00:00Z)
@@ -380,12 +380,12 @@ Then `assistant/text`: "Three call sites log errors: the API routes, the worker 
 
 The two ACCEPTED FALSE POSITIVE entries are the honest part: recall-tuned triage deliberately keeps them, synthesis's trivia filter is the layer that catches what they produce. If a later, smarter triage can flip them to `skip`, this file is where that improvement becomes measurable.
 
-- [ ] **Step 4: Run the whole corpus suite**
+- [x] **Step 4: Run the whole corpus suite**
 
 Run: `uv run pytest packages/distiller/tests/test_fixture_corpus.py -v`
 Expected: ALL PASS — including `test_corpus_is_complete`, now that all 8 ids exist.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add fixtures/segments/seg-006.json fixtures/segments/seg-007.json fixtures/findings/seg-006.findings.json fixtures/findings/seg-007.findings.json fixtures/triage.json packages/distiller/tests/test_fixture_corpus.py
