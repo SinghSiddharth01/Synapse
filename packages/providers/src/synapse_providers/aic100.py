@@ -90,13 +90,24 @@ def _satisfies_schema(data: Any, schema: dict[str, Any]) -> bool:
     plausibly matches response_schema rather than merely being *some*
     parseable JSON. 'It parsed' proves nothing was satisfied -- the same
     false-confidence trap this module exists to catch one level up (a 200
-    proves nothing was enforced)."""
+    proves nothing was enforced).
+
+    Deliberately requires only ONE of the schema's declared `required` keys
+    to be present, not all of them. synapse_service.synthesis reads every
+    key of SYNTH_SCHEMA with verdicts.get(key, default) specifically so an
+    8B dropping one key (e.g. omitting "conflicts" on a round with nothing
+    to report) doesn't cost the rest of an otherwise-usable verdict; an
+    all-required gate here would silently discard that whole round before
+    synthesis's own tolerance ever got a chance to run. A response matching
+    NONE of the declared keys is the real false-confidence case this check
+    exists to catch -- some parseable JSON that has nothing to do with the
+    schema it was asked for."""
     if schema.get("type") == "object" and not isinstance(data, dict):
         return False
     if isinstance(data, dict):
-        for key in schema.get("required", []):
-            if key not in data:
-                return False
+        required = schema.get("required", [])
+        if required and not any(key in data for key in required):
+            return False
     return True
 
 

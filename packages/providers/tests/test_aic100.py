@@ -6,7 +6,8 @@ import json
 import httpx
 import pytest
 
-from synapse_providers.aic100 import AIC100Provider, extract_first_json_object
+from synapse_providers.aic100 import (AIC100Provider, _satisfies_schema,
+                                      extract_first_json_object)
 
 SCHEMA = {"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"]}
 
@@ -120,6 +121,35 @@ def test_json_extraction_finds_the_first_object_around_narration_and_code(text, 
     unbalanced brace INSIDE a string value (the case the aliasing to
     openai_compat's _parse_json_tolerantly was originally meant to fix)."""
     assert extract_first_json_object(text) == expected
+
+
+MULTI_KEY_SCHEMA = {
+    "type": "object",
+    "properties": {"working_memory": {"type": "string"}, "merges": {"type": "array"},
+                   "trivial_ids": {"type": "array"}, "conflicts": {"type": "array"}},
+    "required": ["working_memory", "merges", "trivial_ids", "conflicts"],
+}
+
+
+def test_satisfies_schema_tolerates_a_verdict_missing_one_of_several_required_keys():
+    """synthesis.py reads every one of SYNTH_SCHEMA's keys with
+    verdicts.get(key, default) precisely so an 8B dropping one key doesn't
+    lose the rest of an otherwise-usable verdict. But the TOP-level gate in
+    complete() (schema_valid) is all-or-nothing: if _satisfies_schema
+    required EVERY declared key, a response with working_memory + merges
+    but no 'conflicts' key would be reported schema_valid=False and
+    synthesis.py would discard the whole round -- the exact partial verdict
+    its own .get()-based tolerance exists to use. Require that at least one
+    declared key is present (proving the object is schema-SHAPED) rather
+    than all of them; a response matching none of them is the real
+    false-confidence case ('parsed' but unrelated)."""
+    partial = {"working_memory": "wm", "merges": []}          # trivial_ids, conflicts missing
+    assert _satisfies_schema(partial, MULTI_KEY_SCHEMA) is True
+
+
+def test_satisfies_schema_still_rejects_a_response_matching_none_of_the_keys():
+    unrelated = {"totally": "unrelated"}
+    assert _satisfies_schema(unrelated, MULTI_KEY_SCHEMA) is False
 
 
 async def test_the_retry_is_not_a_byte_identical_resend():
