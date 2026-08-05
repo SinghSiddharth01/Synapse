@@ -114,6 +114,40 @@ async def test_run_stops_the_debug_server_when_the_canary_fails(
     assert server.stopped is True
 
 
+async def test_run_survives_a_debug_port_bind_failure(tmp_path, monkeypatch, capsys) -> None:
+    """A second concurrent `synapse-worker run` on the same machine -- or a
+    first one started while a stale worker still holds the port -- must not
+    abort the core command just because the OPTIONAL dashboard couldn't
+    bind. Verified directly: binding an already-held port raises
+    `OSError: [Errno 48] Address already in use`; --debug-port defaults ON
+    (DEFAULT_DEBUG_PORT), so this failure mode is reachable with zero flags.
+    """
+    transcript = tmp_path / "sess.jsonl"
+    _write_transcript(transcript)
+    monkeypatch.setattr(cli, "check_canary", _async(PASSING_CANARY))
+    _FakeDebugServer.instances.clear()
+    _FakeDebugServer.raise_on_start = OSError(48, "Address already in use")
+    monkeypatch.setattr(cli, "DebugServer", _FakeDebugServer)
+
+    try:
+        exit_code = await cli.cmd_run(
+            _ns(
+                transcript=str(transcript), interval=0.01, ticks=1, from_start=False,
+                debug_port=8790,
+            )
+        )
+    finally:
+        _FakeDebugServer.raise_on_start = None
+
+    assert exit_code == 0                       # the canary + tick still ran
+    [server] = _FakeDebugServer.instances
+    assert server.started is True
+    assert server.stopped is False               # never bound -- nothing to stop
+    captured = capsys.readouterr()
+    assert "Address already in use" in captured.out + captured.err
+    assert "shutdown" in captured.out             # the run completed normally
+
+
 async def test_run_with_from_start_does_not_attach_at_end(tmp_path, monkeypatch, capsys) -> None:
     transcript = tmp_path / "sess.jsonl"
     _write_transcript(transcript)
@@ -982,9 +1016,16 @@ def _ns(**kwargs) -> _Namespace:
 
 class _FakeDebugServer:
     """Stands in for the real DebugServer so cmd_run tests never bind a real
-    socket. Records construction args and start()/stop() calls."""
+    socket. Records construction args and start()/stop() calls.
+
+    `raise_on_start`, when set, makes `.start()` raise instead of returning a
+    port -- a class attribute (not per-instance) since `cmd_run` constructs
+    the server itself; tests that use it must reset it to None afterward so
+    it doesn't leak into later tests in this file.
+    """
 
     instances: list["_FakeDebugServer"] = []
+    raise_on_start: Exception | None = None
 
     def __init__(self, stats, port, *, transcript=None):
         self.stats = stats
@@ -996,6 +1037,8 @@ class _FakeDebugServer:
 
     def start(self) -> int:
         self.started = True
+        if _FakeDebugServer.raise_on_start is not None:
+            raise _FakeDebugServer.raise_on_start
         return self.port
 
     def stop(self) -> None:

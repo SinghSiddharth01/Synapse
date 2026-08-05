@@ -208,8 +208,19 @@ async def cmd_run(args: argparse.Namespace) -> int:
     debug_server: DebugServer | None = None
     if debug_port:
         debug_server = DebugServer(stats, debug_port, transcript=str(transcript))
-        bound_port = debug_server.start()
-        print(f"debug            http://127.0.0.1:{bound_port}/debug\n")
+        # The dashboard is optional instrumentation; the transcript work is
+        # not. Binding can fail with a plain OSError -- e.g. two `run`s on
+        # the same machine racing for the default 8790, or a stale worker
+        # still holding it (the multi-agent case `resolve_binding_for_agent`
+        # exists for is real) -- and that must not abort the core command.
+        try:
+            bound_port = debug_server.start()
+        except OSError as exc:
+            print(f"debug            disabled -- failed to bind port {debug_port}: {exc}\n",
+                  file=sys.stderr)
+            debug_server = None
+        else:
+            print(f"debug            http://127.0.0.1:{bound_port}/debug\n")
     else:
         print("debug            disabled (--debug-port 0)\n")
 
