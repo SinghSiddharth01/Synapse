@@ -191,9 +191,13 @@ class SessionContext(BaseModel):
     lives behind the service's storage interface and is what retrieval ranks
     over — its shape is a deliberate first pass and expected to evolve.
 
-    `memory_version` increments once per merge. It is the whole staleness
-    calculation for the awareness layer: the watermark endpoint compares it
-    against each member's last-seen value.
+    ⟨CORRECTION, corrected 2026-08-05⟩ Not "once per merge": `memory_version`
+    increments once per VERDICT ROUND APPLIED. `Synthesizer.merge` calls
+    `bump_version` at the end of every structurally-valid verdict, including
+    a no-op one with `"merges": []` (synthesis.py; `test_full_flow_push_
+    watermark_query` pins a no-op verdict still bumping the version). It is
+    the whole staleness calculation for the awareness layer: the watermark
+    endpoint compares it against each member's last-seen value.
     """
 
     shared_id: str

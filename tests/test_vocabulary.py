@@ -167,3 +167,36 @@ def test_no_document_still_glosses_memory_version_as_merges_completed():
     assert offenders == [], (
         "these still gloss memory_version as 'merges completed'; it counts verdict "
         f"rounds applied (synthesis.py:273 bumps unconditionally): {offenders}")
+
+
+# The test above globs `docs/**/*.md` for one literal string. Neither catches
+# the canonical contract: SessionContext lives in packages/contracts, not
+# docs/, and its docstring said "increments once per merge" -- true-sounding,
+# still wrong, and a different string than "merges completed". A reader who
+# opens the type that OWNS the field is exactly the reader this guard exists
+# to protect, so it gets its own narrow, targeted check rather than a stretch
+# of the glob above into `packages/` (which would need its own exemption
+# logic for every docstring elsewhere that legitimately says "merge").
+_SCHEMAS = (ROOT / "packages" / "contracts" / "src" / "synapse_contracts" / "schemas.py")
+
+
+def test_the_canonical_sessioncontext_docstring_does_not_gloss_it_either():
+    """`SessionContext.memory_version` (schemas.py) is the field's one
+    canonical definition -- every track reads this docstring, not a doc under
+    `docs/`. Same conflation as the test above, different file, different
+    wording ('increments once per merge' vs. 'merges completed'), so it needs
+    its own check: fixing the docs/ prose does not fix this one, and this one
+    is what a reader actually hits when they go look up what the field on the
+    Pydantic model means."""
+    text = _SCHEMAS.read_text(encoding="utf-8")
+    entry = text.split("class SessionContext", 1)[1].split('"""', 2)[1]
+    # Line-scoped and CORRECTION-aware, same rule as the docs/ guard above:
+    # the corrected docstring itself legitimately says "not once per merge"
+    # while explaining the fix, and a bare substring check would flag that
+    # line too.
+    offenders = [line for line in entry.splitlines()
+                 if "once per merge" in line and "CORRECTION" not in line]
+    assert offenders == [], (
+        "SessionContext's own docstring still glosses memory_version as incrementing "
+        f"once per merge (uncorrected): {offenders}; it counts verdict rounds applied, "
+        "merges or not (synthesis.py bumps unconditionally on every structurally-valid verdict)")

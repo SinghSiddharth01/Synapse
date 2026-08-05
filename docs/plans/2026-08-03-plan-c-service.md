@@ -82,9 +82,9 @@ Incremental merge: `(SessionContext, new Finding[]) -> SessionContext`. The prom
 >
 > Two things follow. First, **this is no longer a nice-to-have prompt line** — write a test for it, not just an instruction. Second, it runs on `Llama-3.1-8B`, whose quality at this job is unvalidated, and the 70B that might do it better has never returned a completion. Do not assume the downstream half of `adr/0003` is free.
 
-Bump `memory_version` once per merge.
+⟨CORRECTION, corrected 2026-08-05⟩ Bump `memory_version` once per verdict round applied, not once per merge — `synthesis.merge` calls `bump_version` at the end of every structurally-valid verdict, `"merges": []` included (see `adr/0004`'s Amendment for the full correction and why it matters for `/findings`'s `synthesized` field).
 
-**First failing tests:** two Contributors' findings merge; **`seg-005`'s near-duplicates produce one Synthesized Finding carrying both Attributions, with both originals tombstoned and neither retrievable**; a contradictory pair yields a `Conflict` referencing ids; a trivial finding is marked, not deleted; `memory_version` increments exactly once per merge; incremental merge cost stays bounded as findings accumulate.
+**First failing tests:** two Contributors' findings merge; **`seg-005`'s near-duplicates produce one Synthesized Finding carrying both Attributions, with both originals tombstoned and neither retrievable**; a contradictory pair yields a `Conflict` referencing ids; a trivial finding is marked, not deleted; ⟨CORRECTION, corrected 2026-08-05⟩ `memory_version` increments exactly once per verdict round applied, merges or not; incremental merge cost stays bounded as findings accumulate.
 
 **The prompt is explicitly first-pass** — Claude-drafted, tuned by Plan B's eval loop, not a contract.
 
