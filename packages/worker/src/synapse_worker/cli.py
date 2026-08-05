@@ -30,8 +30,14 @@ import logging
 import sys
 from pathlib import Path
 
-from synapse_contracts import LocalBinding
-from synapse_distiller import Distiller, check_canary, load_config, load_pack_by_name
+from synapse_contracts import LocalBinding, Segment, read_binding
+from synapse_distiller import (
+    Distiller,
+    PromptDropError,
+    check_canary,
+    load_config,
+    load_pack_by_name,
+)
 from synapse_providers import NPUProvider
 
 from synapse_worker.discovery import (
@@ -42,8 +48,34 @@ from synapse_worker.discovery import (
 )
 from synapse_worker.loop import WorkerLoop
 from synapse_worker.producer import FileSink, HttpSink, Producer
+from synapse_worker.triage_log import TriageLog
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_AGENT = "claude-code"  # the only Source adapter that exists (Plan A.3)
+
+
+def build_distiller(config, binding: LocalBinding) -> Distiller:
+    """One construction path for a config-driven Distiller.
+
+    Shared by `cmd_run` (via `_build`) and `cmd_replay --skipped` (Task 3) so
+    there is exactly one place that turns a `SynapseConfig` into a live
+    NPU-backed `Distiller` — the binding is the only thing that varies.
+    """
+    provider = NPUProvider(
+        base_url=config.provider.base_url,
+        model=config.model,
+        max_tokens=config.provider.max_tokens,
+        temperature=config.provider.temperature,
+        timeout=config.provider.timeout_s,
+    )
+    return Distiller(
+        provider,
+        binding,
+        load_pack_by_name(config.prompt_pack_name),
+        config.distil_kinds,
+        config.render_style,
+    )
 
 
 def _build(args: argparse.Namespace):
@@ -77,20 +109,7 @@ def _build(args: argparse.Namespace):
             contributor=args.contributor,
             agent=DEFAULT_AGENT,
         )
-    provider = NPUProvider(
-        base_url=config.provider.base_url,
-        model=config.model,
-        max_tokens=config.provider.max_tokens,
-        temperature=config.provider.temperature,
-        timeout=config.provider.timeout_s,
-    )
-    distiller = Distiller(
-        provider,
-        binding,
-        load_pack_by_name(config.prompt_pack_name),
-        config.distil_kinds,
-        config.render_style,
-    )
+    distiller = build_distiller(config, binding)
     loop = WorkerLoop(
         transcript=transcript,
         distiller=distiller,
@@ -218,7 +237,11 @@ async def cmd_status(args: argparse.Namespace) -> int:
 
 
 async def cmd_replay(args: argparse.Namespace) -> int:
-    """Drain anything the sink rejected earlier. Idempotent by Finding.id."""
+    """Drain anything the sink rejected earlier. Idempotent by Finding.id.
+
+    `--skipped` re-distils every segment triage skipped and archives the skip
+    log — a wrong triage skip is recoverable, not permanent loss.
+    """
     config = load_config()
     state_dir = Path(config.worker.state_dir)
     sink = (
@@ -227,6 +250,116 @@ async def cmd_replay(args: argparse.Namespace) -> int:
         else FileSink(Path(config.worker.sink_file))
     )
     producer = Producer(state_dir / "wal", sink)
+
+    if args.skipped:
+        log = TriageLog(state_dir)
+        skipped = log.load_skipped()
+        if not skipped:
+            print("No triage-skipped segments to replay.")
+            return 0
+
+        # Unlike `run`/`_build`, there is no un-joined fallback here: a
+        # triage-skipped segment's own Attribution.agent_session already
+        # round-trips through the skip log (see the grouping below), and the
+        # only missing piece is contributor/shared_id. `run`'s --contributor/
+        # --shared-id defaults exist because a first run before any `join`
+        # is a normal flow; replaying OLD skips with today's CLI defaults
+        # is not the same thing -- it would silently attribute (and route)
+        # recovered findings to whatever "aditya"/"local-dev" happen to
+        # default to right now, which may not be who or what was active
+        # when the segment was actually skipped. Refuse rather than invent.
+        joined = read_binding(binding_path_for_agent(state_dir, DEFAULT_AGENT))
+        if joined is None:
+            print(
+                "No joined Shared Session -- refusing to replay skipped segments, "
+                "since Attribution (contributor/shared_id) would have to be "
+                "invented rather than read from a real binding.\n"
+                "Run `synapse-worker join <shared_id>` first, then retry "
+                "`synapse-worker replay --skipped`.",
+                file=sys.stderr,
+            )
+            return 1
+        contributor, shared_id, agent = joined.contributor, joined.shared_id, joined.agent
+
+        # Group by the segment's OWN agent_session_id — it round-trips through
+        # the skip log exactly (TriageLog serializes the whole Segment), so
+        # replay must not overwrite it with a sentinel: Attribution.agent_session
+        # is what awareness suppression keys on, and a finding stamped with a
+        # value that matches no real Agent Session can never be suppressed for
+        # the agent that produced it. One Distiller per group, since Attribution
+        # is stamped from the binding at construction time.
+        groups: dict[str, list[tuple[Segment, str]]] = {}
+        for segment, reason in skipped:
+            groups.setdefault(segment.agent_session_id, []).append((segment, reason))
+
+        distillers = {
+            agent_session_id: build_distiller(
+                config,
+                LocalBinding(
+                    agent_session_id=agent_session_id,
+                    shared_id=shared_id,
+                    contributor=contributor,
+                    agent=agent,
+                ),
+            )
+            for agent_session_id in groups
+        }
+
+        # The prompt-drop guard, once, before any segment is distilled — the
+        # same refusal `cmd_run` applies and for the same reason: a model that
+        # has stopped reading its prompt would otherwise write invented
+        # findings straight into the write-ahead log. Every group shares one
+        # NPU endpoint, so one check covers the whole batch.
+        canary = await check_canary(next(iter(distillers.values())).provider)
+        if not canary:
+            print(f"CANARY FAILED: {canary.detail}", file=sys.stderr)
+            print("Refusing to distil — findings from this model would be invented.",
+                  file=sys.stderr)
+            return 1
+
+        replayed = 0
+        failed: list[tuple[Segment, str]] = []
+        for agent_session_id, group in groups.items():
+            distiller = distillers[agent_session_id]
+            for segment, reason in group:
+                try:
+                    findings, stats = await distiller.distil(segment)
+                except PromptDropError as exc:
+                    logger.error(
+                        "Prompt-drop guard tripped replaying %s: %s", segment.id, exc
+                    )
+                    failed.append((segment, reason))
+                    continue
+                except Exception:  # noqa: BLE001 - one bad segment must not sink the batch
+                    logger.exception("Replay distillation failed for %s", segment.id)
+                    failed.append((segment, reason))
+                    continue
+                if not stats.skipped_empty and findings:
+                    # Write-ahead, same as tick(): on disk before any send.
+                    producer.record(findings)
+                    replayed += len(findings)
+
+        sent, pending = await producer.flush()
+        archived = log.archive()
+        if failed:
+            # Idempotent retry: only what failed goes back to the (now fresh,
+            # post-archive) skip log, so re-running `replay --skipped` does not
+            # re-distil — and re-count — segments that already succeeded.
+            for segment, reason in failed:
+                log.record_skip(segment, reason)
+
+        succeeded = len(skipped) - len(failed)
+        message = (
+            f"Replayed {succeeded} skipped segments -> {replayed} findings "
+            f"({sent} sent, {pending} queued)."
+        )
+        if failed:
+            message += f" {len(failed)} segment(s) failed and were re-queued."
+        if archived is not None:
+            message += f" Log archived to {archived.name}."
+        print(message)
+        return 0 if not failed else 1
+
     sent, still_pending = await producer.flush()
     print(f"sent {sent}, still pending {still_pending}")
     return 0 if still_pending == 0 else 1
@@ -261,6 +394,11 @@ def build_parser() -> argparse.ArgumentParser:
     status.set_defaults(func=cmd_status)
 
     replay = sub.add_parser("replay", help="retry undelivered findings")
+    replay.add_argument(
+        "--skipped", action="store_true",
+        help="re-distil segments triage skipped, then archive the skip log "
+             "(requires a joined Shared Session — see `synapse-worker join`)",
+    )
     replay.set_defaults(func=cmd_replay)
 
     return parser

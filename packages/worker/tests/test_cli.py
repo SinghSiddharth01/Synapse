@@ -281,6 +281,456 @@ async def test_replay_with_nothing_pending(capsys) -> None:
     assert "sent 0, still pending 0" in capsys.readouterr().out
 
 
+def _fake_distiller_builder(monkeypatch, *, scripts_factory=None):
+    """Monkeypatch `cli.build_distiller` to return a FakeProvider-backed
+    Distiller per call, recording every `binding` it was constructed with so
+    tests can assert on it directly — the thing the original test never did,
+    which is what let the "replay" sentinel and wrong-contributor bugs hide
+    behind a green suite.
+    """
+    from synapse_distiller import Distiller, load_pack_by_name
+    from synapse_providers import FakeProvider
+
+    seen_bindings = []
+    if scripts_factory is None:
+        def scripts_factory():
+            return [{"findings": [{"type": "learning", "text": "redistilled"}]}]
+
+    def fake_build_distiller(config, binding):
+        seen_bindings.append(binding)
+        return Distiller(
+            FakeProvider(scripts=scripts_factory()),
+            binding,
+            load_pack_by_name("v2-hardened"),
+            ["text"],
+            "labelled",
+        )
+
+    monkeypatch.setattr(cli, "build_distiller", fake_build_distiller)
+    return seen_bindings
+
+
+async def test_replay_skipped_redistils_and_archives(tmp_path, monkeypatch, capsys) -> None:
+    """A triage-skipped segment can be forced through the pipeline later, with
+    contributor/shared_id read from the CURRENTLY joined binding -- never
+    fabricated (see test_replay_skipped_refuses_without_a_joined_binding for
+    the no-binding case, adjudicated 2026-08-04).
+
+    Deviation from the plan's literal test body: this file has no `invoke_cli`
+    helper and no existing FakeProvider-backed CLI test, so the arrange block
+    follows this file's actual pattern instead — call `cli.cmd_replay(_ns(...))`
+    directly (same as every other test in this section) and monkeypatch
+    `cli.build_distiller` (the construction path extracted below) to return a
+    FakeProvider-backed Distiller rather than reaching a real NPU.
+    """
+    from synapse_contracts import AgentEvent, Segment, SessionBinding, write_binding
+    from synapse_worker.triage_log import TriageLog
+
+    state_dir = tmp_path / ".synapse"  # config default, relative to the isolated cwd
+    ts = datetime(2026, 8, 4, tzinfo=timezone.utc)
+    seg = Segment(id="s-skipped", agent_session_id="as-real-42",
+                  events=[AgentEvent(role="assistant", kind="text",
+                                     content="ruff run, all clean", ts=ts,
+                                     agent_session_id="as-real-42")],
+                  started_at=ts, ended_at=ts)
+    TriageLog(state_dir).record_skip(seg, "lint-clean")
+    write_binding(
+        cli.binding_path_for_agent(state_dir, cli.DEFAULT_AGENT),
+        SessionBinding(
+            agent_session_id="as-real-42", shared_id="local-dev",
+            contributor="aditya", agent=cli.DEFAULT_AGENT,
+            transcript_path=str(tmp_path / "sess.jsonl"), pinned_at=ts,
+        ),
+    )
+
+    monkeypatch.setattr(cli, "check_canary", _async(PASSING_CANARY))
+    seen_bindings = _fake_distiller_builder(monkeypatch)
+
+    exit_code = await cli.cmd_replay(_ns(skipped=True))
+
+    assert exit_code == 0
+    # Regression: the binding cmd_replay actually built is now observed. It
+    # must carry the segment's OWN agent_session_id (round-tripped through the
+    # skip log), not a "replay" sentinel that matches no real Agent Session.
+    assert len(seen_bindings) == 1
+    assert seen_bindings[0].agent_session_id == "as-real-42"
+    assert seen_bindings[0].contributor == "aditya"     # read from the joined binding
+    assert seen_bindings[0].shared_id == "local-dev"    # read from the joined binding
+    assert TriageLog(state_dir).load_skipped() == []          # archived
+    archives = list(state_dir.glob("triage-skips.replayed-*.jsonl"))
+    assert len(archives) == 1
+    sink_file = state_dir / "upstream.jsonl"                  # findings flowed
+    assert sink_file.exists() and sink_file.read_text().strip()
+    assert "Replayed 1 skipped segments -> 1 findings" in capsys.readouterr().out
+
+
+async def test_replay_skipped_refuses_without_a_joined_binding(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """Adjudicated 2026-08-04: replay --skipped must never fabricate
+    Attribution from CLI defaults. The segment's own agent_session_id
+    round-trips through the skip log, but contributor/shared_id do not -- the
+    only place to get real values for those is the CURRENTLY joined binding.
+    Without one, refuse outright rather than guess, and touch nothing."""
+    from synapse_contracts import AgentEvent, Segment
+    from synapse_worker.triage_log import TriageLog
+
+    state_dir = tmp_path / ".synapse"
+    ts = datetime(2026, 8, 4, tzinfo=timezone.utc)
+    seg = Segment(id="s-skipped", agent_session_id="as-real-42",
+                  events=[AgentEvent(role="assistant", kind="text", content="x",
+                                     ts=ts, agent_session_id="as-real-42")],
+                  started_at=ts, ended_at=ts)
+    TriageLog(state_dir).record_skip(seg, "lint-clean")
+
+    def _must_not_be_called(config, binding):
+        raise AssertionError("build_distiller must not run without a joined binding")
+
+    monkeypatch.setattr(cli, "build_distiller", _must_not_be_called)
+
+    exit_code = await cli.cmd_replay(_ns(skipped=True))
+
+    err = capsys.readouterr().err
+    assert exit_code == 1
+    assert "No joined Shared Session" in err
+    assert "synapse-worker join" in err
+    remaining = TriageLog(state_dir).load_skipped()
+    assert [(s.id, r) for s, r in remaining] == [("s-skipped", "lint-clean")]  # untouched
+    assert not list(state_dir.glob("triage-skips.replayed-*.jsonl"))          # not archived
+
+
+async def test_replay_skipped_prefers_joined_binding_over_cli_defaults(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """`_build` prefers a joined SessionBinding over --contributor/--shared-id
+    for `run`; `replay --skipped` must make the same choice (there is no
+    --contributor/--shared-id fallback for --skipped at all -- see
+    test_replay_skipped_refuses_without_a_joined_binding -- so this pins that
+    the VALUES that make it onto the rebuilt binding are the joined ones, not
+    some other stale or default value)."""
+    from synapse_contracts import AgentEvent, Segment, SessionBinding, write_binding
+    from synapse_worker.triage_log import TriageLog
+
+    state_dir = tmp_path / ".synapse"
+    ts = datetime(2026, 8, 4, tzinfo=timezone.utc)
+    seg = Segment(id="s-skipped", agent_session_id="as-real-42",
+                  events=[AgentEvent(role="assistant", kind="text", content="clean",
+                                     ts=ts, agent_session_id="as-real-42")],
+                  started_at=ts, ended_at=ts)
+    TriageLog(state_dir).record_skip(seg, "lint-clean")
+
+    write_binding(
+        cli.binding_path_for_agent(state_dir, cli.DEFAULT_AGENT),
+        SessionBinding(
+            agent_session_id="as-real-42", shared_id="team-standup",
+            contributor="akhil", agent=cli.DEFAULT_AGENT,
+            transcript_path=str(tmp_path / "sess.jsonl"), pinned_at=ts,
+        ),
+    )
+
+    monkeypatch.setattr(cli, "check_canary", _async(PASSING_CANARY))
+    seen_bindings = _fake_distiller_builder(monkeypatch)
+
+    exit_code = await cli.cmd_replay(_ns(skipped=True))
+
+    assert exit_code == 0
+    assert seen_bindings[0].contributor == "akhil"        # joined
+    assert seen_bindings[0].shared_id == "team-standup"    # joined
+
+
+async def test_replay_skipped_refuses_when_canary_fails(tmp_path, monkeypatch, capsys) -> None:
+    """The prompt-drop refusal `cmd_run` applies before any distillation must
+    also gate `replay --skipped` — otherwise a model that stopped reading its
+    prompt writes invented findings straight into the write-ahead log."""
+    from synapse_contracts import AgentEvent, Segment, SessionBinding, write_binding
+    from synapse_worker.triage_log import TriageLog
+
+    state_dir = tmp_path / ".synapse"
+    ts = datetime(2026, 8, 4, tzinfo=timezone.utc)
+    seg = Segment(id="s-skipped", agent_session_id="as-t",
+                  events=[AgentEvent(role="assistant", kind="text", content="x",
+                                     ts=ts, agent_session_id="as-t")],
+                  started_at=ts, ended_at=ts)
+    TriageLog(state_dir).record_skip(seg, "lint-clean")
+    write_binding(
+        cli.binding_path_for_agent(state_dir, cli.DEFAULT_AGENT),
+        SessionBinding(
+            agent_session_id="as-t", shared_id="local-dev",
+            contributor="aditya", agent=cli.DEFAULT_AGENT,
+            transcript_path=str(tmp_path / "sess.jsonl"), pinned_at=ts,
+        ),
+    )
+
+    monkeypatch.setattr(cli, "check_canary", _async(FAILING_CANARY))
+
+    class _MustNotBeCalled:
+        provider = object()
+
+        async def distil(self, segment):
+            raise AssertionError("distil() must not run when the canary fails")
+
+    monkeypatch.setattr(cli, "build_distiller", lambda config, binding: _MustNotBeCalled())
+
+    exit_code = await cli.cmd_replay(_ns(skipped=True))
+
+    assert exit_code == 1
+    assert "CANARY FAILED" in capsys.readouterr().err
+    remaining = TriageLog(state_dir).load_skipped()
+    assert [(s.id, r) for s, r in remaining] == [("s-skipped", "lint-clean")]  # untouched
+    assert not list(state_dir.glob("triage-skips.replayed-*.jsonl"))          # not archived
+
+
+async def test_replay_skipped_requeues_only_the_failed_segment(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """One bad segment must not sink the whole batch, and a retry must be
+    idempotent: only the segment that actually failed goes back to the skip
+    log, so re-running `replay --skipped` doesn't re-distil (and re-count)
+    segments that already succeeded."""
+    from synapse_contracts import AgentEvent, Attribution, Finding, FindingType, Segment
+    from synapse_worker.triage_log import TriageLog
+
+    from synapse_contracts import SessionBinding, write_binding
+
+    state_dir = tmp_path / ".synapse"
+    ts = datetime(2026, 8, 4, tzinfo=timezone.utc)
+    log = TriageLog(state_dir)
+    good = Segment(id="s-good", agent_session_id="as-t",
+                    events=[AgentEvent(role="assistant", kind="text", content="ok",
+                                       ts=ts, agent_session_id="as-t")],
+                    started_at=ts, ended_at=ts)
+    bad = Segment(id="s-bad", agent_session_id="as-t",
+                  events=[AgentEvent(role="assistant", kind="text", content="boom",
+                                     ts=ts, agent_session_id="as-t")],
+                  started_at=ts, ended_at=ts)
+    log.record_skip(good, "lint-clean")
+    log.record_skip(bad, "readonly-run")
+    write_binding(
+        cli.binding_path_for_agent(state_dir, cli.DEFAULT_AGENT),
+        SessionBinding(
+            agent_session_id="as-t", shared_id="local-dev",
+            contributor="aditya", agent=cli.DEFAULT_AGENT,
+            transcript_path=str(tmp_path / "sess.jsonl"), pinned_at=ts,
+        ),
+    )
+
+    monkeypatch.setattr(cli, "check_canary", _async(PASSING_CANARY))
+
+    class _FlakyDistiller:
+        provider = object()
+
+        async def distil(self, segment):
+            if segment.id == "s-bad":
+                raise RuntimeError("model timed out")
+            from types import SimpleNamespace
+            finding = Finding(
+                id="f-good", type=FindingType.LEARNING, text="ok",
+                attributions=[Attribution(contributor="a", agent_session="as-t",
+                                          agent="claude-code")],
+                ts=ts,
+            )
+            return [finding], SimpleNamespace(skipped_empty=False)
+
+    monkeypatch.setattr(cli, "build_distiller", lambda config, binding: _FlakyDistiller())
+
+    exit_code = await cli.cmd_replay(_ns(skipped=True))
+
+    assert exit_code == 1
+    remaining = TriageLog(state_dir).load_skipped()
+    assert [(s.id, r) for s, r in remaining] == [("s-bad", "readonly-run")]
+    out = capsys.readouterr().out
+    assert "Replayed 1 skipped segments -> 1 findings" in out
+    assert "1 segment(s) failed and were re-queued" in out
+    sink_file = state_dir / "upstream.jsonl"
+    assert sink_file.exists() and sink_file.read_text().strip()  # the good one still shipped
+
+
+async def test_replay_skipped_records_each_finding_before_moving_on(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """Invariant 4 (durability before send): a finding must be written to the
+    write-ahead log the moment its segment is distilled, before the NEXT
+    segment is even touched, before `flush()`, and well before `archive()`
+    destroys the recovery journal. Two mutations pin here: buffering findings
+    in a list and calling `producer.record()` once right before `flush()`
+    (no write-ahead at all), and moving `archive()` before the distillation
+    loop (destroying the journal before anything is durable). Both leave the
+    end-state files on disk identical on this happy path -- only the ORDER of
+    calls exposes them, so this test pins order directly rather than only
+    final content."""
+    from synapse_contracts import (
+        AgentEvent,
+        Attribution,
+        Finding,
+        FindingType,
+        Segment,
+        SessionBinding,
+        write_binding,
+    )
+    from synapse_worker.producer import Producer
+    from synapse_worker.triage_log import TriageLog
+
+    state_dir = tmp_path / ".synapse"
+    ts = datetime(2026, 8, 4, tzinfo=timezone.utc)
+    log = TriageLog(state_dir)
+    seg_a = Segment(id="s-a", agent_session_id="as-t",
+                     events=[AgentEvent(role="assistant", kind="text", content="a",
+                                        ts=ts, agent_session_id="as-t")],
+                     started_at=ts, ended_at=ts)
+    seg_b = Segment(id="s-b", agent_session_id="as-t",
+                     events=[AgentEvent(role="assistant", kind="text", content="b",
+                                        ts=ts, agent_session_id="as-t")],
+                     started_at=ts, ended_at=ts)
+    log.record_skip(seg_a, "lint-clean")
+    log.record_skip(seg_b, "lint-clean")
+    write_binding(
+        cli.binding_path_for_agent(state_dir, cli.DEFAULT_AGENT),
+        SessionBinding(
+            agent_session_id="as-t", shared_id="local-dev",
+            contributor="aditya", agent=cli.DEFAULT_AGENT,
+            transcript_path=str(tmp_path / "sess.jsonl"), pinned_at=ts,
+        ),
+    )
+
+    monkeypatch.setattr(cli, "check_canary", _async(PASSING_CANARY))
+
+    calls: list[str] = []
+
+    class _OrderedDistiller:
+        provider = object()
+
+        async def distil(self, segment):
+            calls.append(f"distil:{segment.id}")
+            finding = Finding(
+                id=f"f-{segment.id}", type=FindingType.LEARNING, text="x",
+                attributions=[Attribution(contributor="a", agent_session="as-t",
+                                          agent="claude-code")],
+                ts=ts,
+            )
+            from types import SimpleNamespace
+            return [finding], SimpleNamespace(skipped_empty=False)
+
+    monkeypatch.setattr(cli, "build_distiller", lambda config, binding: _OrderedDistiller())
+
+    original_record = Producer.record
+
+    def spy_record(self, findings):
+        for f in findings:
+            calls.append(f"record:{f.id}")
+        return original_record(self, findings)
+
+    original_flush = Producer.flush
+
+    async def spy_flush(self):
+        calls.append("flush")
+        return await original_flush(self)
+
+    original_archive = TriageLog.archive
+
+    def spy_archive(self):
+        calls.append("archive")
+        return original_archive(self)
+
+    monkeypatch.setattr(Producer, "record", spy_record)
+    monkeypatch.setattr(Producer, "flush", spy_flush)
+    monkeypatch.setattr(TriageLog, "archive", spy_archive)
+
+    exit_code = await cli.cmd_replay(_ns(skipped=True))
+
+    assert exit_code == 0
+    assert calls == [
+        "distil:s-a", "record:f-s-a",
+        "distil:s-b", "record:f-s-b",
+        "flush", "archive",
+    ]
+
+
+async def test_replay_skipped_requeues_a_prompt_drop_segment(
+    tmp_path, monkeypatch, capsys, caplog
+) -> None:
+    """`cmd_replay`'s PromptDropError branch is distinct from its generic
+    Exception branch (different log message: "Prompt-drop guard tripped
+    replaying ..." vs "Replay distillation failed for ...", mirroring the
+    same distinction `WorkerLoop.tick()` makes for the live path in
+    test_dropped_prompt_does_not_poison_the_log). One dropped-prompt segment
+    among two must not sink the batch -- it requeues like any other failure
+    -- but the specific log line pins that the dedicated branch, not the
+    fallback `except Exception`, is what actually ran."""
+    from synapse_contracts import (
+        AgentEvent,
+        Attribution,
+        Finding,
+        FindingType,
+        Segment,
+        SessionBinding,
+        write_binding,
+    )
+    from synapse_distiller import PromptDropError
+    from synapse_worker.triage_log import TriageLog
+
+    state_dir = tmp_path / ".synapse"
+    ts = datetime(2026, 8, 4, tzinfo=timezone.utc)
+    log = TriageLog(state_dir)
+    good = Segment(id="s-good", agent_session_id="as-t",
+                    events=[AgentEvent(role="assistant", kind="text", content="ok",
+                                       ts=ts, agent_session_id="as-t")],
+                    started_at=ts, ended_at=ts)
+    dropped = Segment(id="s-dropped", agent_session_id="as-t",
+                       events=[AgentEvent(role="assistant", kind="text", content="x",
+                                          ts=ts, agent_session_id="as-t")],
+                       started_at=ts, ended_at=ts)
+    log.record_skip(good, "lint-clean")
+    log.record_skip(dropped, "readonly-run")
+    write_binding(
+        cli.binding_path_for_agent(state_dir, cli.DEFAULT_AGENT),
+        SessionBinding(
+            agent_session_id="as-t", shared_id="local-dev",
+            contributor="aditya", agent=cli.DEFAULT_AGENT,
+            transcript_path=str(tmp_path / "sess.jsonl"), pinned_at=ts,
+        ),
+    )
+
+    monkeypatch.setattr(cli, "check_canary", _async(PASSING_CANARY))
+
+    class _PromptDroppingDistiller:
+        provider = object()
+
+        async def distil(self, segment):
+            if segment.id == "s-dropped":
+                raise PromptDropError("input_tokens=1, prompt was dropped")
+            from types import SimpleNamespace
+            finding = Finding(
+                id="f-good", type=FindingType.LEARNING, text="ok",
+                attributions=[Attribution(contributor="a", agent_session="as-t",
+                                          agent="claude-code")],
+                ts=ts,
+            )
+            return [finding], SimpleNamespace(skipped_empty=False)
+
+    monkeypatch.setattr(cli, "build_distiller", lambda config, binding: _PromptDroppingDistiller())
+
+    with caplog.at_level("ERROR", logger="synapse_worker.cli"):
+        exit_code = await cli.cmd_replay(_ns(skipped=True))
+
+    assert exit_code == 1
+    assert any(
+        "Prompt-drop guard tripped replaying" in r.message for r in caplog.records
+    )
+    remaining = TriageLog(state_dir).load_skipped()
+    assert [(s.id, r) for s, r in remaining] == [("s-dropped", "readonly-run")]
+    out = capsys.readouterr().out
+    assert "1 segment(s) failed and were re-queued" in out
+    sink_file = state_dir / "upstream.jsonl"
+    assert sink_file.exists() and sink_file.read_text().strip()  # the good one still shipped
+
+
+async def test_replay_skipped_with_nothing_pending(tmp_path, capsys) -> None:
+    exit_code = await cli.cmd_replay(_ns(skipped=True))
+
+    assert exit_code == 0
+    assert "No triage-skipped segments to replay." in capsys.readouterr().out
+
+
 async def test_replay_delivers_queued_findings(tmp_path, capsys) -> None:
     """cmd_replay builds its own Producer from config's default paths
     (.synapse/wal, .synapse/upstream.jsonl, both relative to cwd) -- seed the
@@ -385,6 +835,7 @@ class _Namespace:
         self.interval = None
         self.ticks = 1
         self.from_start = False
+        self.skipped = False
         for key, value in kwargs.items():
             setattr(self, key, value)
 
