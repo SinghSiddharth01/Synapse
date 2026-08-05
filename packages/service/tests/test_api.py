@@ -68,10 +68,18 @@ async def test_replayed_push_is_a_noop_and_skips_the_model():
 
 
 async def test_watermark_applies_the_same_suppression_rule_as_query():
-    """Invariant 3 governs the whole awareness layer, not just /query. An
-    asker whose own Agent Session produced every attribution on a Finding
-    must not see it counted in by_type either -- otherwise watermark
-    advertises 'new team knowledge' that /query then refuses to show."""
+    """Round-2 adjudication on watermark suppression: by_type (a CONTENT
+    field) runs through the same all-attributions suppression rule as
+    /query (invariant 3) -- an asker whose own Agent Session produced
+    every attribution on a Finding must not see it counted there. version
+    and new_since (CHANGE fields) stay global and unfiltered -- they
+    measure how much the memory moved, not whether that movement is
+    visible to this particular asker. So new_since legitimately stays 1
+    for as-me even though by_type == {}: the memory DID change (a merge
+    round ran), it's just that none of what changed is new information
+    to as-me specifically. That is the intended split, not a bug: a
+    caller that wants "how much is new FOR ME" reads by_type/conflicts;
+    new_since answers "did anything happen at all"."""
     provider = FakeProvider(scripts=[MERGE_NOOP])
     async with _client(provider) as client:
         sid = (await client.post("/v1/sessions", json={"purpose": "p", "created_by": "s"})
@@ -83,15 +91,42 @@ async def test_watermark_applies_the_same_suppression_rule_as_query():
         r = await client.get(f"/v1/sessions/{sid}/watermark", params={"agent_session": "as-me"})
         body = r.json()
         assert body["by_type"] == {}                      # all three are the asker's own
-        # by_type and new_since must agree: a briefing that renders both
-        # (E4's composer does exactly this) must never say "0 findings ...
-        # 1 new since you last looked" -- if nothing is visible, nothing is new.
-        assert body["new_since"] == 0
+        assert body["new_since"] == 1                      # but the memory DID move (global)
 
         r = await client.get(f"/v1/sessions/{sid}/watermark", params={"agent_session": "as-other"})
         body = r.json()
         assert body["by_type"] == {"learning": 3}          # a teammate sees all three
         assert body["new_since"] == 1
+
+
+async def test_watermark_conflicts_count_only_conflicts_touching_a_visible_finding():
+    """conflicts is the other CONTENT field of the round-2 split: a
+    Conflict entirely between two of the asker's own (suppressed)
+    Findings is not new information to them -- it's already in that
+    Agent Session's context window. A Conflict where at least one side is
+    a teammate's IS new information, even though the OTHER side won't be
+    returned by /query either."""
+    provider = FakeProvider(scripts=[{
+        "working_memory": "wm", "merges": [], "trivial_ids": [],
+        "conflicts": [
+            {"a": "f-1", "b": "f-2", "description": "both mine, not news to me"},
+            {"a": "f-1", "b": "f-3", "description": "mine vs a teammate's"},
+        ],
+    }])
+    async with _client(provider) as client:
+        sid = (await client.post("/v1/sessions", json={"purpose": "p", "created_by": "s"})
+               ).json()["shared_id"]
+        findings = [_finding_json("f-1", agent_session="as-me"),
+                   _finding_json("f-2", agent_session="as-me"),
+                   _finding_json("f-3", agent_session="as-teammate")]
+        r = await client.post(f"/v1/sessions/{sid}/findings", json={"findings": findings})
+        assert r.json()["accepted"] == 3
+
+        r = await client.get(f"/v1/sessions/{sid}/watermark", params={"agent_session": "as-me"})
+        assert r.json()["conflicts"] == 1                 # only the mine-vs-teammate one
+
+        r = await client.get(f"/v1/sessions/{sid}/watermark", params={"agent_session": "as-unrelated"})
+        assert r.json()["conflicts"] == 2                 # both sides visible to a third party
 
 
 async def test_unknown_session_404_and_bad_payload_422():

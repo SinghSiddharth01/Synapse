@@ -63,30 +63,45 @@ def build_app(provider: ModelProvider) -> Starlette:
             return JSONResponse({"error": f"unknown session {sid}"}, status_code=404)
         agent_session = request.query_params.get("agent_session", "")
         ctx = store.get_context(sid)
-        # Invariant 3 governs the whole awareness layer, not just /query:
-        # suppress a Finding here too, or watermark advertises "new team
-        # knowledge" built entirely from the asker's own findings that
-        # /query then correctly refuses to show.
+
+        # Round-2 adjudication on watermark suppression, split deliberately
+        # in two:
+        #   - `by_type` and `conflicts` are CONTENT fields: they describe
+        #     what this asker would actually see, so they run through the
+        #     same all-attributions suppression rule as /query (invariant
+        #     3) -- a Finding, or a Conflict touching only Findings, that
+        #     are entirely the asker's own is already in that agent's
+        #     context window and is not "new team knowledge".
+        #   - `version` and `new_since` are CHANGE fields: they measure how
+        #     much the Shared Memory has moved since this asker last
+        #     looked, not whether any of that movement is visible to them,
+        #     and stay global (unfiltered by suppression).
+        # This means new_since can be > 0 while by_type == {} and
+        # conflicts == 0 -- e.g. a version bump that was entirely the
+        # asker's own findings merging with each other. That is not a
+        # contradiction to paper over: it is the intended distinction
+        # between "the memory changed" (new_since, cheap, coarse) and
+        # "here is what changed for you" (by_type/conflicts, precise,
+        # content-scoped). E4's briefing composer renders both, and is
+        # expected to phrase them as separate signals, not force them to
+        # agree.
         visible = visible_to(store.retrievable(sid), agent_session)
         by_type = Counter(f.type.value for f in visible)
-        # new_since is a raw memory_version delta, coarser than by_type (a
-        # per-visible-finding count) -- the two only ever go fully out of
-        # sync at the boundary where NOTHING is visible to this asker: a
-        # version bump can be entirely the asker's own findings merging with
-        # each other, in which case by_type == {} but a naive delta would
-        # still be > 0. E4's briefing composer renders both together
-        # ("{new_since} new ... {sum(by_type.values())} findings"), so an
-        # empty visible set must report new_since == 0 too, or the briefing
-        # claims new team knowledge that /query then correctly refuses to
-        # show. When something IS visible, the coarser delta stands.
-        new_since = ctx.memory_version - store.last_seen(sid, agent_session)
-        if not visible:
-            new_since = 0
+
+        # A Conflict counts if at least one side is visible to this asker:
+        # even when the OTHER side is something already in their own
+        # context window, learning that a teammate disagrees with it is
+        # new information. A Conflict entirely between two of the asker's
+        # own (suppressed) Findings is not.
+        visible_ids = {f.id for f in visible}
+        conflicts = sum(1 for c in ctx.conflicts
+                        if c.finding_a in visible_ids or c.finding_b in visible_ids)
+
         return JSONResponse({
             "version": ctx.memory_version,
-            "new_since": new_since,
+            "new_since": ctx.memory_version - store.last_seen(sid, agent_session),
             "by_type": dict(by_type),
-            "conflicts": len(ctx.conflicts),
+            "conflicts": conflicts,
         })
 
     async def query(request: Request) -> JSONResponse:
