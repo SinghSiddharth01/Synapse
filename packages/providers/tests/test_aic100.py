@@ -61,3 +61,58 @@ async def test_unparseable_json_retries_once_then_reports_invalid():
 async def test_capabilities_are_honest():
     provider = AIC100Provider(base_url="https://x", api_key="k")
     assert provider.capabilities.native_structured_output is False
+
+
+async def test_schema_valid_requires_declared_keys_not_just_valid_json():
+    """A 200 with a parseable-but-unrelated JSON object must not be reported
+    schema_valid=True -- that's the exact false-confidence trap the module's
+    own docstring says a 200 proves nothing was enforced about, one level
+    up: 'it parsed' likewise proves nothing was satisfied."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={
+            "choices": [{"text": '{"totally": "unrelated"}'}],
+            "usage": {"prompt_tokens": 4, "completion_tokens": 4}})
+    result = await _provider(handler).complete(
+        [{"role": "user", "content": "u"}], response_schema=SCHEMA)
+    assert result.schema_valid is False
+    assert result.data is None
+
+
+async def test_json_extraction_survives_an_unbalanced_brace_inside_a_string():
+    """extract_first_json_object used to brace-count with no string
+    awareness, so valid JSON whose string values contain an unbalanced
+    brace (routine for working_memory, free prose an 8B writes about code)
+    failed to parse and cost a full retry for nothing."""
+    schema = {"type": "object",
+              "properties": {"working_memory": {"type": "string"}, "merges": {"type": "array"}},
+              "required": ["working_memory", "merges"]}
+    text = ('{"working_memory": "the guard closes with } before the return", '
+            '"merges": []}')
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={
+            "choices": [{"text": text}],
+            "usage": {"prompt_tokens": 4, "completion_tokens": 4}})
+    result = await _provider(handler).complete(
+        [{"role": "user", "content": "u"}], response_schema=schema)
+    assert result.schema_valid is True
+    assert result.data == {"working_memory": "the guard closes with } before the return",
+                           "merges": []}
+
+
+async def test_the_retry_is_not_a_byte_identical_resend():
+    """Against a deterministic decode, an unconditional identical retry at
+    temperature 0.0 is a guaranteed-identical second failure that doubles
+    consumption of the shared credit pool for nothing. The retry must
+    change something."""
+    bodies = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json={"choices": [{"text": "no json here at all"}],
+                                         "usage": {"prompt_tokens": 4, "completion_tokens": 4}})
+    result = await _provider(handler).complete(
+        [{"role": "user", "content": "u"}], response_schema=SCHEMA)
+    assert len(bodies) == 2
+    assert bodies[0] != bodies[1]
+    assert result.schema_valid is False and result.data is None
