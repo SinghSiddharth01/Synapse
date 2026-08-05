@@ -81,10 +81,17 @@ async def test_watermark_applies_the_same_suppression_rule_as_query():
         assert r.json()["accepted"] == 3
 
         r = await client.get(f"/v1/sessions/{sid}/watermark", params={"agent_session": "as-me"})
-        assert r.json()["by_type"] == {}                  # all three are the asker's own
+        body = r.json()
+        assert body["by_type"] == {}                      # all three are the asker's own
+        # by_type and new_since must agree: a briefing that renders both
+        # (E4's composer does exactly this) must never say "0 findings ...
+        # 1 new since you last looked" -- if nothing is visible, nothing is new.
+        assert body["new_since"] == 0
 
         r = await client.get(f"/v1/sessions/{sid}/watermark", params={"agent_session": "as-other"})
-        assert r.json()["by_type"] == {"learning": 3}      # a teammate sees all three
+        body = r.json()
+        assert body["by_type"] == {"learning": 3}          # a teammate sees all three
+        assert body["new_since"] == 1
 
 
 async def test_unknown_session_404_and_bad_payload_422():

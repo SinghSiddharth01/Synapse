@@ -69,9 +69,22 @@ def build_app(provider: ModelProvider) -> Starlette:
         # /query then correctly refuses to show.
         visible = visible_to(store.retrievable(sid), agent_session)
         by_type = Counter(f.type.value for f in visible)
+        # new_since is a raw memory_version delta, coarser than by_type (a
+        # per-visible-finding count) -- the two only ever go fully out of
+        # sync at the boundary where NOTHING is visible to this asker: a
+        # version bump can be entirely the asker's own findings merging with
+        # each other, in which case by_type == {} but a naive delta would
+        # still be > 0. E4's briefing composer renders both together
+        # ("{new_since} new ... {sum(by_type.values())} findings"), so an
+        # empty visible set must report new_since == 0 too, or the briefing
+        # claims new team knowledge that /query then correctly refuses to
+        # show. When something IS visible, the coarser delta stands.
+        new_since = ctx.memory_version - store.last_seen(sid, agent_session)
+        if not visible:
+            new_since = 0
         return JSONResponse({
             "version": ctx.memory_version,
-            "new_since": ctx.memory_version - store.last_seen(sid, agent_session),
+            "new_since": new_since,
             "by_type": dict(by_type),
             "conflicts": len(ctx.conflicts),
         })
