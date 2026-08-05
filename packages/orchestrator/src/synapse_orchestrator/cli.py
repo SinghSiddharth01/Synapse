@@ -21,13 +21,64 @@ import logging
 import sys
 from pathlib import Path
 
+import httpx
 import uvicorn
 
+from synapse_contracts import LocalBinding
 from synapse_contracts.binding import read_binding
 from synapse_orchestrator.app import build_app
 from synapse_orchestrator.briefing import build_briefing
 from synapse_orchestrator.relay import Relay
 from synapse_orchestrator.server import create_mcp, register_tools
+
+
+def _resolve_binding(state_dir: Path) -> LocalBinding | None:
+    """The orchestrator's current binding, read fresh from disk.
+
+    One file per Agent PRODUCT (`bindings/claude-code.json`, `bindings/codex.json`
+    — Plan D.2), never a single hardcoded path: `synapse_worker.discovery` writes
+    one binding per product a user joins, and a Codex-only join must not be
+    invisible to an orchestrator that only ever looked for `claude-code.json`.
+    When more than one product is bound, the most recently joined one wins —
+    this process serves one Shared Session context at a time.
+
+    Called fresh (not cached) by every caller that needs "the binding right
+    now": a `synapse-worker join` run after this process started must take
+    effect without a restart, at least on the paths that re-resolve it
+    (the producer endpoint — see app.py).
+    """
+    bindings_dir = state_dir / "bindings"
+    if not bindings_dir.is_dir():
+        return None
+    found = [b for b in (read_binding(p) for p in sorted(bindings_dir.glob("*.json")))
+             if b is not None]
+    if not found:
+        return None
+    return max(found, key=lambda b: b.pinned_at).to_local_binding()
+
+
+def build_npu_distiller(binding: LocalBinding):
+    """Same config, same pack, same model as synapse_worker.cli's run
+    command — the "one distiller" property: contribute()'s round trip
+    uses the identical NPU model and prompt pack as the passive path."""
+    from synapse_distiller import Distiller, load_config, load_pack_by_name
+    from synapse_providers import NPUProvider
+
+    config = load_config()
+    provider = NPUProvider(
+        base_url=config.provider.base_url,
+        model=config.model,
+        max_tokens=config.provider.max_tokens,
+        temperature=config.provider.temperature,
+        timeout=config.provider.timeout_s,
+    )
+    return Distiller(
+        provider,
+        binding,
+        load_pack_by_name(config.prompt_pack_name),
+        config.distil_kinds,
+        config.render_style,
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -42,24 +93,50 @@ def build_parser() -> argparse.ArgumentParser:
     resync = sub.add_parser(
         "resync", help="re-push the Relay's entire retained log to the service"
     )
-    resync.set_defaults(func=cmd_resync)
+    # Mirrors the worker's argparse pattern (synapse_worker.cli: each
+    # subcommand declares its own options) — but unlike the worker, this
+    # program also has a no-subcommand default action (serve) that shares
+    # these same two flags, so `--state-dir`/`--service-url` must work BOTH
+    # before and after `resync`. default=SUPPRESS is what makes both orders
+    # work: when the flag is omitted after `resync`, argparse's subparser
+    # leaves the namespace attribute alone (already set — from the flag or
+    # from the top-level default) rather than stomping it with a second
+    # default. Without SUPPRESS, `--state-dir X resync` silently reverts to
+    # the top-level default the moment a subcommand is present.
+    resync.add_argument("--state-dir", default=argparse.SUPPRESS)
+    resync.add_argument("--service-url", default=argparse.SUPPRESS)
 
     return parser
 
 
-async def cmd_resync(args: argparse.Namespace) -> int:
+async def cmd_resync(args: argparse.Namespace, *,
+                     transport: httpx.AsyncBaseTransport | None = None) -> int:
     state_dir = Path(args.state_dir)
-    binding = read_binding(state_dir / "bindings" / "claude-code.json")
-    shared_id = binding.shared_id if binding else "unbound"
-    relay = Relay(state_dir / "relay", args.service_url, shared_id)
-    pushed = await relay.resync()
-    print(f"resync: re-pushed {pushed} finding(s) for session {shared_id!r}")
+    binding = _resolve_binding(state_dir)
+    shared_id = binding.shared_id if binding is not None else None
+    relay = Relay(state_dir / "relay", args.service_url, shared_id, transport=transport)
+    pushed, total = await relay.resync()
+    label = shared_id or "unbound"
+    # (pushed, total) tells "nothing to push" (0, 0) apart from "push failed"
+    # (0, N>0) — collapsing both into one number reported a failed resync
+    # (service down, or no Shared Session bound) as indistinguishable success.
+    if total and pushed < total:
+        print(f"resync: FAILED — 0 of {total} finding(s) re-pushed for session {label!r}; "
+              "is the service reachable, and is a Shared Session joined "
+              "(`synapse-worker join <shared_id>`)?")
+        return 1
+    print(f"resync: re-pushed {pushed} finding(s) for session {label!r}")
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *,
+         transport: httpx.AsyncBaseTransport | None = None) -> int:
     # argv=None reads sys.argv, matching the old parser.parse_args() call
     # exactly — real invocation is unchanged. Tests pass an explicit list.
+    # `transport` is likewise test-only: it never comes from argv, and is
+    # threaded into every httpx call this CLI makes (Relay, build_briefing,
+    # register_tools) so tests never open a real socket to the default
+    # --service-url — see test_cli.py.
     args = build_parser().parse_args(argv)
 
     logging.basicConfig(
@@ -69,46 +146,33 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     if getattr(args, "command", None) == "resync":
-        return asyncio.run(args.func(args))
+        return asyncio.run(cmd_resync(args, transport=transport))
 
     state_dir = Path(args.state_dir)
-    binding = read_binding(state_dir / "bindings" / "claude-code.json")
-    shared_id = binding.shared_id if binding else "unbound"
-    relay = Relay(state_dir / "relay", args.service_url, shared_id)
 
-    def build_npu_distiller():
-        # Same config, same pack, same model as synapse_worker.cli's run
-        # command — the "one distiller" property: contribute()'s round trip
-        # uses the identical NPU model and prompt pack as the passive path.
-        from synapse_distiller import Distiller, load_config, load_pack_by_name
-        from synapse_providers import NPUProvider
+    def resolve_binding() -> LocalBinding | None:
+        return _resolve_binding(state_dir)
 
-        config = load_config()
-        provider = NPUProvider(
-            base_url=config.provider.base_url,
-            model=config.model,
-            max_tokens=config.provider.max_tokens,
-            temperature=config.provider.temperature,
-            timeout=config.provider.timeout_s,
-        )
-        return Distiller(
-            provider,
-            binding.to_local_binding(),
-            load_pack_by_name(config.prompt_pack_name),
-            config.distil_kinds,
-            config.render_style,
-        )
+    binding = resolve_binding()
+    shared_id = binding.shared_id if binding is not None else None
+    # Constructed with `shared_id` possibly None rather than the string
+    # "unbound" — Relay refuses to egress when unbound instead of inventing a
+    # session id to post real Findings to (see relay.py). The producer
+    # endpoint additionally re-resolves the binding on every request via
+    # `resolve_binding` below, so a `join` run after this process started is
+    # picked up without a restart on that path.
+    relay = Relay(state_dir / "relay", args.service_url, shared_id, transport=transport)
 
-    briefing = asyncio.run(build_briefing(
-        binding.to_local_binding() if binding else None, args.service_url))
+    briefing = asyncio.run(build_briefing(binding, args.service_url, transport=transport))
     server = create_mcp(briefing)
     if binding is not None:
-        register_tools(server, binding=binding.to_local_binding(),
-                       service_url=args.service_url, relay=relay,
-                       distiller_factory=build_npu_distiller)
-    app = build_app(relay, server)
+        register_tools(server, binding=binding, service_url=args.service_url, relay=relay,
+                       distiller_factory=lambda: build_npu_distiller(binding),
+                       transport=transport)
+    app = build_app(relay, server, resolve_binding=resolve_binding)
     print(f"synapse-orchestrator on http://{args.host}:{args.port} "
-          f"(mcp at /mcp, producer at /producer/findings, session: {shared_id})")
+          f"(mcp at /mcp, producer at /producer/findings, "
+          f"session: {shared_id or 'unbound'})")
     uvicorn.run(app, host=args.host, port=args.port)
     return 0
 
