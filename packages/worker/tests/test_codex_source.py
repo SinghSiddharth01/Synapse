@@ -383,3 +383,325 @@ def test_empty_content_produces_no_events() -> None:
     )
 
     assert events == []
+
+
+# --- Codex's own machine-injected "user"-role context, module docstring's
+# "Codex's own machine-injected context" section. These mirror what a real
+# rollout's first response_item message actually contains -- see
+# fixtures/raw_lines/codex/README.md.
+
+
+def test_environment_context_bundle_is_skipped_not_treated_as_a_prompt() -> None:
+    """The demo-path case: a fresh session's first response_item message is
+    Codex's own <environment_context> bundle, role="user" -- indistinguishable
+    on the wire from something the developer typed. It must never become an
+    AgentEvent."""
+    source = CodexSource()
+    source.parse_line(session_meta())
+    events = source.parse_line(
+        response_item(
+            {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "<environment_context>\n<cwd>/repo</cwd>\n</environment_context>"}
+                ],
+            }
+        )
+    )
+
+    assert events == []
+    assert source.skipped_injected_context == 1
+    # Not double-counted against the unrelated skip paths.
+    assert source.skipped_unknown_response_item == 0
+    assert source.skipped_bookkeeping == 0
+
+
+def test_agents_md_instructions_bundle_is_skipped() -> None:
+    """UserInstructions -- AGENTS.md content, injected the same way, marked
+    "# AGENTS.md instructions" ... "</INSTRUCTIONS>"."""
+    source = CodexSource()
+    source.parse_line(session_meta())
+    events = source.parse_line(
+        response_item(
+            {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "# AGENTS.md instructions for /repo\n\n<INSTRUCTIONS>\nUse pytest, not unittest.\n</INSTRUCTIONS>",
+                    }
+                ],
+            }
+        )
+    )
+
+    assert events == []
+    assert source.skipped_injected_context == 1
+
+
+def test_marked_fragment_matching_is_case_insensitive() -> None:
+    """`matches_marked_text` compares markers case-insensitively -- Codex
+    itself compares this way (`eq_ignore_ascii_case`), so this adapter must
+    too or a fragment differing only in tag case would leak through as a
+    fake user prompt."""
+    source = CodexSource()
+    source.parse_line(session_meta())
+
+    events = source.parse_line(
+        response_item(
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "<ENVIRONMENT_CONTEXT>\n<cwd>/repo</cwd>\n</Environment_Context>"}],
+            }
+        )
+    )
+
+    assert events == []
+    assert source.skipped_injected_context == 1
+
+
+def test_marked_fragment_matching_requires_the_closing_marker_too() -> None:
+    """Text that opens the tag but never closes it (a torn/streamed write, or
+    prose that merely starts the same way) must not match -- both the start
+    AND end marker are required, not just a prefix check."""
+    source = CodexSource()
+    source.parse_line(session_meta())
+
+    events = source.parse_line(
+        response_item(
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "<environment_context>\n<cwd>/repo</cwd>\nunterminated"}],
+            }
+        )
+    )
+
+    assert [e.content for e in events] == ["<environment_context>\n<cwd>/repo</cwd>\nunterminated"]
+    assert source.skipped_injected_context == 0
+
+
+def test_real_prompt_that_merely_mentions_a_marker_word_is_not_filtered() -> None:
+    """A developer genuinely asking about `environment_context` in prose must
+    survive -- the filter matches on the whole trimmed message starting AND
+    ending with the exact marker pair, not a substring `in` check anywhere in
+    the text. A mutant that widened the check to `marker in text` would wrongly
+    drop this."""
+    source = CodexSource()
+    source.parse_line(session_meta())
+    events = source.parse_line(
+        response_item(
+            {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "please fix the bug in build_environment_context, it crashes"}
+                ],
+            }
+        )
+    )
+
+    assert [(e.role, e.kind, e.content) for e in events] == [
+        ("user", "text", "please fix the bug in build_environment_context, it crashes")
+    ]
+    assert source.skipped_injected_context == 0
+
+
+def test_real_prompt_containing_both_marker_substrings_mid_sentence_is_not_filtered() -> None:
+    """Both the open and close marker text can appear SOMEWHERE in a real
+    prompt (e.g. a developer quoting/discussing the tags) without the message
+    starting and ending with them as a wrapping pair. This must survive -- a
+    mutant that checked `start_marker in text and end_marker in text` instead
+    of position-anchored prefix/suffix matching would wrongly treat this as
+    injected and drop it, and a substring-anywhere check cannot be told apart
+    from the correct implementation by any test whose text contains at most
+    one of the two markers."""
+    source = CodexSource()
+    source.parse_line(session_meta())
+    text = (
+        "I noticed both <environment_context> and </environment_context> "
+        "show up verbatim in the rollout file — is that expected?"
+    )
+    events = source.parse_line(
+        response_item({"type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]})
+    )
+
+    assert [e.content for e in events] == [text]
+    assert source.skipped_injected_context == 0
+
+
+def test_injected_context_filter_only_applies_to_user_role() -> None:
+    """The filter is scoped to role="user" -- an assistant message that
+    happens to echo one of these tags back (e.g. quoting environment context
+    in its own reply) must not be silently dropped; only Codex's own
+    machine-injected *user*-role turns are in scope."""
+    source = CodexSource()
+    source.parse_line(session_meta())
+    events = source.parse_line(
+        response_item(
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {"type": "output_text", "text": "<environment_context>\n<cwd>/repo</cwd>\n</environment_context>"}
+                ],
+            }
+        )
+    )
+
+    assert [(e.role, e.kind) for e in events] == [("assistant", "text")]
+    assert source.skipped_injected_context == 0
+
+
+def test_one_matching_content_item_drops_the_entire_message_not_just_that_item() -> None:
+    """Mirrors Codex's own parse_user_message: a single matching fragment
+    disqualifies the WHOLE message. A message with a real line of text
+    alongside an injected fragment must still be dropped entirely, not
+    partially kept -- a mutant that filtered per-item instead of per-message
+    would wrongly emit the real-looking line."""
+    source = CodexSource()
+    source.parse_line(session_meta())
+    events = source.parse_line(
+        response_item(
+            {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "some real-looking text"},
+                    {"type": "input_text", "text": "<turn_aborted>\nThe user interrupted the previous turn on purpose.\n</turn_aborted>"},
+                ],
+            }
+        )
+    )
+
+    assert events == []
+    assert source.skipped_injected_context == 1
+
+
+def test_additional_context_fragment_is_skipped() -> None:
+    """AdditionalContextUserFragment -- <external_KEY>...</external_KEY>,
+    hook- or extension-supplied out-of-band context; the close tag must echo
+    the same key or it does not match (checked separately below)."""
+    source = CodexSource()
+    source.parse_line(session_meta())
+    events = source.parse_line(
+        response_item(
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "<external_ticket>JIRA-123: fix the retry loop</external_ticket>"}],
+            }
+        )
+    )
+
+    assert events == []
+    assert source.skipped_injected_context == 1
+
+
+def test_additional_context_fragment_requires_matching_key_on_both_tags() -> None:
+    """A mismatched close-tag key is not a valid AdditionalContextUserFragment
+    -- must not match, or any text vaguely shaped like <external_x>...</...>
+    would be swept up regardless of whether the keys agree."""
+    source = CodexSource()
+    source.parse_line(session_meta())
+    events = source.parse_line(
+        response_item(
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "<external_ticket>JIRA-123</external_other>"}],
+            }
+        )
+    )
+
+    assert [e.content for e in events] == ["<external_ticket>JIRA-123</external_other>"]
+    assert source.skipped_injected_context == 0
+
+
+def test_internal_model_context_fragment_is_skipped() -> None:
+    """InternalModelContextFragment -- hidden extension-owned model steering,
+    <codex_internal_context source="...">...</codex_internal_context>."""
+    source = CodexSource()
+    source.parse_line(session_meta())
+    events = source.parse_line(
+        response_item(
+            {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": '<codex_internal_context source="planner">next step: refactor</codex_internal_context>',
+                    }
+                ],
+            }
+        )
+    )
+
+    assert events == []
+    assert source.skipped_injected_context == 1
+
+
+def test_legacy_goal_context_fragment_is_skipped() -> None:
+    source = CodexSource()
+    source.parse_line(session_meta())
+    events = source.parse_line(
+        response_item(
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "<goal_context>ship the retry helper</goal_context>"}],
+            }
+        )
+    )
+
+    assert events == []
+    assert source.skipped_injected_context == 1
+
+
+def test_legacy_apply_patch_warning_is_skipped() -> None:
+    source = CodexSource()
+    source.parse_line(session_meta())
+    events = source.parse_line(
+        response_item(
+            {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "Warning: apply_patch was requested via exec_command. Use the apply_patch tool instead of exec_command.",
+                    }
+                ],
+            }
+        )
+    )
+
+    assert events == []
+    assert source.skipped_injected_context == 1
+
+
+def test_hook_prompt_fragment_is_skipped() -> None:
+    """A hook's injected prompt fragment
+    (`<hook_prompt hook_run_id="...">...</hook_prompt>`), the Codex-side
+    analogue of the additionalContext this repo's own Claude Code awareness
+    pack (Chain C) injects via a UserPromptSubmit hook."""
+    source = CodexSource()
+    source.parse_line(session_meta())
+    events = source.parse_line(
+        response_item(
+            {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": '<hook_prompt hook_run_id="hook-run-1">Retry with tests.</hook_prompt>'}
+                ],
+            }
+        )
+    )
+
+    assert events == []
+    assert source.skipped_injected_context == 1

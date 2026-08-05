@@ -180,6 +180,71 @@ turn; this adapter parses only `response_item` and skips `event_msg` as
 bookkeeping, on the same reasoning Claude Code's adapter already skips its
 own UI-only record types.
 
+### `message` role `"user"` is NOT proof the developer typed it
+
+⟨AMENDMENT, fix round⟩ The first pass of this adapter accepted every
+`message` whose `payload.role` was in `_KNOWN_ROLES`, including `"user"`, as
+a real developer turn. That is wrong, and it is not a corner case: Codex
+injects its own world-state/environment/AGENTS.md/skill/subagent/plugin/hook
+bundles as plain `ResponseItem::Message { role: "user", ... }` — same wire
+shape as something the developer typed, no marker of any kind distinguishes
+them — via `build_contextual_user_message`/`merge_contextual_fragments`
+([`context_manager/updates.rs:15-45`](https://github.com/openai/codex/blob/fa5d5ae047d1891a2f816c22d9ed926a0728ba47/codex-rs/core/src/context_manager/updates.rs#L15-L45)),
+assembled in
+[`build_initial_context_with_world_state`](https://github.com/openai/codex/blob/fa5d5ae047d1891a2f816c22d9ed926a0728ba47/codex-rs/core/src/session/mod.rs#L3395)
+and
+[`build_turn_context_contribution_items`](https://github.com/openai/codex/blob/fa5d5ae047d1891a2f816c22d9ed926a0728ba47/codex-rs/core/src/session/mod.rs#L3341),
+and persisted the same way any other turn is, via `record_conversation_items`
+-> `persist_rollout_response_items`
+([session/mod.rs:2968-2990](https://github.com/openai/codex/blob/fa5d5ae047d1891a2f816c22d9ed926a0728ba47/codex-rs/core/src/session/mod.rs#L2968-L2990)).
+**A fresh session's first `response_item` message is this bundle, not
+anything the developer wrote.** `ClaudeCodeSource` has an exact analogue —
+`isMeta: true` — and skips it explicitly (see that adapter's module
+docstring); Codex's wire format has no equivalent flag, so the first version
+of this adapter missed it.
+
+Codex itself has to solve the identical problem for its own TUI history, and
+does so by content-matching rather than a wire flag:
+[`event_mapping.rs`](https://github.com/openai/codex/blob/fa5d5ae047d1891a2f816c22d9ed926a0728ba47/codex-rs/core/src/event_mapping.rs)'s
+`parse_user_message` returns `None` — drops the entire message, not merely
+the offending fragment — whenever
+`is_contextual_user_message_content`/`is_contextual_user_fragment`
+([`context/contextual_user_message.rs`](https://github.com/openai/codex/blob/fa5d5ae047d1891a2f816c22d9ed926a0728ba47/codex-rs/core/src/context/contextual_user_message.rs))
+matches any one of the message's content items against a closed table of
+known fragment shapes, `CONTEXTUAL_USER_FRAGMENT_MATCHERS`. This adapter
+ports that same predicate against the same primary sources (each cited at
+its own constant/helper in `codex.py`) and applies it the same all-or-nothing
+way: `UserInstructions`, `EnvironmentsState` (`<environment_context>` —
+[`world_state/environment.rs`](https://github.com/openai/codex/blob/fa5d5ae047d1891a2f816c22d9ed926a0728ba47/codex-rs/core/src/context/world_state/environment.rs)),
+`SkillInstructions`, `UserShellCommand`, `TurnAborted`,
+`SubagentNotification`, `RecommendedPluginsInstructions` — all seven via the
+trait's shared default `matches_text`
+([`context-fragments/src/fragment.rs`](https://github.com/openai/codex/blob/fa5d5ae047d1891a2f816c22d9ed926a0728ba47/codex-rs/context-fragments/src/fragment.rs));
+`AdditionalContextUserFragment`
+([`context-fragments/src/additional_context.rs`](https://github.com/openai/codex/blob/fa5d5ae047d1891a2f816c22d9ed926a0728ba47/codex-rs/context-fragments/src/additional_context.rs)),
+`InternalModelContextFragment`
+([`context/internal_model_context.rs`](https://github.com/openai/codex/blob/fa5d5ae047d1891a2f816c22d9ed926a0728ba47/codex-rs/core/src/context/internal_model_context.rs)),
+and the three fixed-text `Legacy*Warning` fragments each with their own
+hand-rolled `matches_text`; plus a hook's injected prompt fragment
+(`<hook_prompt hook_run_id="...">...</hook_prompt>`,
+[`protocol/src/items.rs`](https://github.com/openai/codex/blob/fa5d5ae047d1891a2f816c22d9ed926a0728ba47/codex-rs/protocol/src/items.rs)'s
+`parse_hook_prompt_fragment`, approximated as a tag check rather than
+reimplementing its XML round-trip). Confirmed the same way as everything
+else in this file: primary source at the pinned commit, not a guess — see
+`_MARKED_INJECTED_CONTEXT_FRAGMENTS` and the `_matches_*` helpers in
+`codex.py` for the exact port, and `test_codex_source.py` for coverage
+including the negative cases (a real prompt that merely mentions a marker
+word, or contains both marker substrings without wrapping the message in
+them, must still survive).
+
+**Privacy consequence of the gap, now closed:** before this fix, cwd,
+workspace roots, world-state snapshots, and AGENTS.md-derived sections left
+the device as "conversation" the Contributor never wrote, and the first
+Codex segment of a demo would open with Codex's own boilerplate presented as
+the developer's prompt. `CodexSource.skipped_injected_context` counts every
+message dropped this way, the same role a `skipped_*` counter already plays
+for every other exclusion in both adapters.
+
 ## Residual risk
 
 This is source-code-and-test-literal confirmed, not transcript-confirmed —
@@ -196,6 +261,7 @@ live transcript") the same way.
 | `basic_turn.jsonl` | `session_meta` + a user `message` + an assistant `message` — the plain-text case, Codex's counterpart to Claude Code's `test_parses_assistant_text` |
 | `tool_call_and_result.jsonl` | `session_meta` + `function_call` + `function_call_output` sharing one `call_id` — the tool-name-resolution case |
 | `malformed.jsonl` | a valid `session_meta` line, one line of garbage JSON, then a valid `response_item` line — proves a torn/bad line doesn't take the rest of the file down with it |
+| `injected_context.jsonl` | `session_meta` + a `role: "user"` `<environment_context>` bundle (must be skipped) immediately followed by the developer's real first prompt (must survive) + an assistant reply — the exact shape of a real session's opening, and the scenario the "`message` role `"user"` is NOT proof the developer typed it" section above exists to fix |
 
 Hand-authored to the shapes above, not captured from a real run (see
 "Residual risk").

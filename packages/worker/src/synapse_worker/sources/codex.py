@@ -81,6 +81,56 @@ to read. This adapter stamps a call as the assistant's turn and its result
 as the user's, mirroring `ClaudeCodeSource`'s resolved convention exactly
 (where `tool_result` really does arrive under `type: "user"`) so the two
 adapters agree on what "assistant acted, the environment answered" means.
+
+**Codex's own machine-injected context shares the wire role "user" with a
+real developer turn, and this adapter must not confuse the two.** Unlike
+Claude Code, where injected context is flagged `isMeta: true`
+(`ClaudeCodeSource` skips those records — see its module docstring), Codex's
+`response_item` `message` items carry no such marker: world-state/
+environment/AGENTS.md/skill/subagent/plugin/hook bundles are built by
+`build_contextual_user_message`/`merge_contextual_fragments`
+(`codex-rs/core/src/context_manager/updates.rs:15-45`) as plain
+`ResponseItem::Message { role: "user", ... }` and persisted via
+`record_conversation_items` -> `persist_rollout_response_items`
+(`codex-rs/core/src/session/mod.rs`, `build_initial_context_with_world_state`
+around line 3395 and `build_turn_context_contribution_items` around line
+3341) exactly like a typed prompt. A fresh session's *first* `response_item`
+message is this bundle, not anything the developer wrote.
+
+Codex itself has to solve the identical problem for its own TUI history and
+does so by content-matching, not a wire flag: `event_mapping.rs`'s
+`parse_user_message` returns `None` — drops the *entire* message, not just
+the matching fragment — whenever
+`is_contextual_user_message_content`/`is_contextual_user_fragment`
+(`codex-rs/core/src/context/contextual_user_message.rs`) matches any one of
+its content items against a closed table of known fragment shapes
+(`CONTEXTUAL_USER_FRAGMENT_MATCHERS`). This adapter mirrors that same
+predicate (`_is_contextual_user_fragment` below) against the same primary
+sources, and applies it the same all-or-nothing way Codex's own
+`parse_user_message` does. The matched shapes, each cited at its own
+constant/helper below: `UserInstructions` ("# AGENTS.md instructions" ...
+"</INSTRUCTIONS>"), `EnvironmentsState` (`<environment_context>` ...
+`</environment_context>`, via `codex-rs/core/src/context/world_state/
+environment.rs`'s `environment_context_markers`), `SkillInstructions`
+(`<skill>`), `UserShellCommand` (`<user_shell_command>`), `TurnAborted`
+(`<turn_aborted>`), `SubagentNotification` (`<subagent_notification>`),
+`RecommendedPluginsInstructions` (`<recommended_plugins>`) — all seven via
+the shared default `matches_text` = trim, then case-insensitive start/end
+marker match (`codex-rs/context-fragments/src/fragment.rs`'s
+`matches_marked_text`); plus four with their own hand-rolled `matches_text`:
+`AdditionalContextUserFragment` (`<external_KEY>...</external_KEY>`,
+`codex-rs/context-fragments/src/additional_context.rs`),
+`InternalModelContextFragment` (`<codex_internal_context source="...">...
+</codex_internal_context>`, or the legacy `<goal_context>` wrapper,
+`codex-rs/core/src/context/internal_model_context.rs`), and the three
+`Legacy*Warning` fragments (fixed prefix/suffix text, kept only so old
+sessions still parse) — plus a hook's injected prompt fragment
+(`<hook_prompt hook_run_id="...">...</hook_prompt>`,
+`codex-rs/protocol/src/items.rs`'s `parse_hook_prompt_fragment`, approximated
+here as a tag check rather than reimplementing its XML round-trip). This is
+the same class of gap `ClaudeCodeSource`'s `isMeta` check closes for Claude
+Code, solved the way Codex's own source solves it for itself, not invented
+here. See `fixtures/raw_lines/codex/README.md` for the full research trail.
 """
 
 from __future__ import annotations
@@ -118,6 +168,40 @@ _KNOWN_ROLES = {"user", "assistant", "system"}
 # ContentItem tags that carry readable text (message.content).
 _TEXT_CONTENT_TYPES = {"input_text", "output_text"}
 
+# Marker pairs for the seven ContextualUserFragment shapes that rely on the
+# shared default `matches_text` (trim, then case-insensitive start/end marker
+# match — `matches_marked_text` in `codex-rs/context-fragments/src/
+# fragment.rs`). Each entry is (fragment name, start marker, end marker); the
+# name is only for readability, never matched against.
+_MARKED_INJECTED_CONTEXT_FRAGMENTS: tuple[tuple[str, str, str], ...] = (
+    ("UserInstructions", "# AGENTS.md instructions", "</INSTRUCTIONS>"),
+    ("EnvironmentsState", "<environment_context>", "</environment_context>"),
+    ("SkillInstructions", "<skill>", "</skill>"),
+    ("UserShellCommand", "<user_shell_command>", "</user_shell_command>"),
+    ("TurnAborted", "<turn_aborted>", "</turn_aborted>"),
+    ("SubagentNotification", "<subagent_notification>", "</subagent_notification>"),
+    ("RecommendedPluginsInstructions", "<recommended_plugins>", "</recommended_plugins>"),
+)
+
+_ADDITIONAL_CONTEXT_PREFIX = "<external_"
+_INTERNAL_CONTEXT_START = "<codex_internal_context"
+_INTERNAL_CONTEXT_END = "</codex_internal_context>"
+_LEGACY_GOAL_CONTEXT_START = "<goal_context>"
+_LEGACY_GOAL_CONTEXT_END = "</goal_context>"
+_SOURCE_ATTR_START = ' source="'
+_SOURCE_ATTR_END = '">'
+
+# Fixed-text legacy warning fragments (`Legacy*Warning` in
+# codex-rs/core/src/context/), kept only so old rollouts still parse; Codex
+# itself no longer produces them. Two are pure prefix checks, one needs a
+# suffix too.
+_LEGACY_WARNING_PREFIXES = (
+    "Warning: The maximum number of unified exec processes you can keep open is",
+    "Warning: Your account was flagged for potentially high-risk cyber activity",
+)
+_LEGACY_APPLY_PATCH_PREFIX = "Warning: apply_patch was requested via "
+_LEGACY_APPLY_PATCH_SUFFIX = "Use the apply_patch tool instead of exec_command."
+
 
 class CodexSource:
     """Stateful across lines for two reasons, both shared with `ClaudeCodeSource`:
@@ -139,6 +223,7 @@ class CodexSource:
         self._git_branch: str | None = None
         self.skipped_bookkeeping = 0
         self.skipped_unknown_response_item = 0
+        self.skipped_injected_context = 0
         self.malformed_lines = 0
 
     def parse_line(self, line: str) -> list[AgentEvent]:
@@ -241,7 +326,17 @@ class CodexSource:
                 # slot for. Logged as an unknown variant, not raised.
                 self.skipped_unknown_response_item += 1
                 return None
-            body = _stringify_content_items(payload.get("content"))
+            content = payload.get("content")
+            if role == "user" and _is_injected_context_message(content):
+                # Codex's own machine-injected context (world-state,
+                # environment, AGENTS.md, skills, ...) arrives under the same
+                # role="user" a real developer turn does — see the module
+                # docstring's "Codex's own machine-injected context" section.
+                # Mirrors Codex's own parse_user_message: the whole message
+                # is dropped, not just the matching fragment.
+                self.skipped_injected_context += 1
+                return None
+            body = _stringify_content_items(content)
         elif item_type == "reasoning":
             body = _stringify_reasoning(payload)
         elif item_type == "function_call":
@@ -324,6 +419,133 @@ def _stringify_content_items(value: object) -> str:
         elif item_type in ("input_image", "input_audio"):
             parts.append(f"[{item_type}]")
     return "\n".join(p for p in parts if p)
+
+
+def _is_injected_context_message(content: object) -> bool:
+    """True when ANY text content item of a `user`-role message is one of
+    Codex's own injected-context fragments (world-state/environment/
+    AGENTS.md/skill/subagent/plugin/hook bundles) rather than something the
+    developer typed. Mirrors Codex's own `is_contextual_user_message_content`
+    (`codex-rs/core/src/event_mapping.rs`) — see the module docstring's
+    "Codex's own machine-injected context" section for the full citation
+    trail — including its all-or-nothing behavior: one matching fragment
+    disqualifies the whole message, the same way `parse_user_message` there
+    returns `None` for it rather than only dropping the matched item."""
+    if not isinstance(content, list):
+        return False
+    for item in content:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") not in _TEXT_CONTENT_TYPES:
+            continue
+        text = item.get("text")
+        if isinstance(text, str) and _is_contextual_user_fragment(text):
+            return True
+    return False
+
+
+def _is_contextual_user_fragment(text: str) -> bool:
+    """Port of Codex's own `is_contextual_user_fragment`
+    (`codex-rs/core/src/context/contextual_user_message.rs`) against a single
+    `ContentItem`'s text. See the module docstring for what each branch
+    mirrors and why."""
+    if not text:
+        return False
+    if _matches_hook_prompt_fragment(text):
+        return True
+    if _matches_additional_context_fragment(text):
+        return True
+    if _matches_internal_model_context_fragment(text):
+        return True
+    if _matches_legacy_warning(text):
+        return True
+    return any(
+        _matches_marked_text(text, start, end)
+        for _name, start, end in _MARKED_INJECTED_CONTEXT_FRAGMENTS
+    )
+
+
+def _matches_marked_text(text: str, start_marker: str, end_marker: str) -> bool:
+    """`matches_marked_text` in `codex-rs/context-fragments/src/fragment.rs`:
+    trim, then case-insensitive start/end marker match on the trimmed text
+    (not merely "contains") — both markers must be present or neither
+    matches."""
+    if not start_marker or not end_marker:
+        return False
+    stripped = text.strip()
+    return (
+        stripped[: len(start_marker)].lower() == start_marker.lower()
+        and stripped[len(stripped) - len(end_marker) :].lower() == end_marker.lower()
+    )
+
+
+def _matches_additional_context_fragment(text: str) -> bool:
+    """`AdditionalContextUserFragment::matches_text`
+    (`codex-rs/context-fragments/src/additional_context.rs`):
+    `<external_KEY>...</external_KEY>` — hook- or extension-supplied
+    out-of-band context, keyed so the close tag must echo the same key."""
+    stripped = text.strip()
+    if not stripped.startswith(_ADDITIONAL_CONTEXT_PREFIX):
+        return False
+    rest = stripped[len(_ADDITIONAL_CONTEXT_PREFIX) :]
+    if ">" not in rest:
+        return False
+    key, _, value_and_close = rest.partition(">")
+    return value_and_close.endswith(f"</external_{key}>")
+
+
+def _matches_internal_model_context_fragment(text: str) -> bool:
+    """`InternalModelContextFragment::matches_text`
+    (`codex-rs/core/src/context/internal_model_context.rs`): the current
+    `<codex_internal_context source="...">...</codex_internal_context>` shape
+    (source restricted to `[a-z][a-z0-9_]*`, matching the Rust source's own
+    validator), or its legacy `<goal_context>...</goal_context>` predecessor."""
+    trimmed = text.strip()
+    if trimmed.startswith(_LEGACY_GOAL_CONTEXT_START) and trimmed.endswith(_LEGACY_GOAL_CONTEXT_END):
+        return True
+    if not trimmed.startswith(_INTERNAL_CONTEXT_START):
+        return False
+    rest = trimmed[len(_INTERNAL_CONTEXT_START) :]
+    if not rest.startswith(_SOURCE_ATTR_START):
+        return False
+    rest = rest[len(_SOURCE_ATTR_START) :]
+    if _SOURCE_ATTR_END not in rest:
+        return False
+    source, _, body_and_close = rest.partition(_SOURCE_ATTR_END)
+    return _is_valid_internal_context_source(source) and body_and_close.endswith(_INTERNAL_CONTEXT_END)
+
+
+def _is_valid_internal_context_source(source: str) -> bool:
+    if not source:
+        return False
+    first, rest = source[0], source[1:]
+    if not ("a" <= first <= "z"):
+        return False
+    return all(("a" <= ch <= "z") or ("0" <= ch <= "9") or ch == "_" for ch in rest)
+
+
+def _matches_legacy_warning(text: str) -> bool:
+    """The three `Legacy*Warning` fragments — fixed text Codex no longer
+    produces but that old rollouts may still carry
+    (`codex-rs/core/src/context/legacy_*_warning.rs`)."""
+    trimmed = text.strip()
+    if trimmed.startswith(_LEGACY_APPLY_PATCH_PREFIX) and trimmed.endswith(_LEGACY_APPLY_PATCH_SUFFIX):
+        return True
+    return any(trimmed.startswith(prefix) for prefix in _LEGACY_WARNING_PREFIXES)
+
+
+def _matches_hook_prompt_fragment(text: str) -> bool:
+    """A hook's injected prompt fragment,
+    `<hook_prompt hook_run_id="...">...</hook_prompt>`
+    (`codex-rs/protocol/src/items.rs`'s `parse_hook_prompt_fragment`, which
+    round-trips through real XML parsing). Approximated here as a tag check
+    rather than reimplementing that XML round-trip — precise enough to catch
+    the shape without pulling in an XML parser for one narrow marker."""
+    trimmed = text.strip()
+    if not trimmed.startswith("<hook_prompt ") or not trimmed.endswith("</hook_prompt>"):
+        return False
+    opening_tag = trimmed.split(">", 1)[0]
+    return 'hook_run_id="' in opening_tag
 
 
 def _stringify_reasoning(payload: dict[str, Any]) -> str:

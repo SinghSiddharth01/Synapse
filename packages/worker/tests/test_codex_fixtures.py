@@ -60,3 +60,18 @@ def test_malformed_fixture_keeps_the_surviving_lines() -> None:
     assert [(e.role, e.kind, e.content) for e in events] == [
         ("user", "text", "still here after the bad line")
     ]
+
+
+def test_injected_context_fixture_skips_the_bundle_and_keeps_the_real_prompt() -> None:
+    """The exact shape of a real Codex session's opening: Codex's own
+    <environment_context> bundle lands first, role="user", indistinguishable
+    on the wire from a real prompt; the developer's actual first message
+    follows right after. Only the injected bundle may be dropped — the demo
+    path depends on the real prompt surviving untouched."""
+    source, events = _parse_fixture("injected_context.jsonl")
+
+    assert [(e.role, e.kind, e.content) for e in events] == [
+        ("user", "text", "Add retry logic to the fetch client"),
+        ("assistant", "text", "On it."),
+    ]
+    assert source.skipped_injected_context == 1
