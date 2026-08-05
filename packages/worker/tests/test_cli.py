@@ -317,6 +317,51 @@ def test_build_with_explicit_agent_flag_skips_straight_to_that_agent(tmp_path, m
     assert isinstance(loop.binding, LocalBinding)
 
 
+def test_build_prefers_a_pinned_binding_over_an_earlier_agents_heuristic(
+    tmp_path, monkeypatch
+) -> None:
+    """MAJOR regression pin: _resolve_agent_and_transcript's own documented
+    precedence -- "a join-pinned binding for ANY agent wins over every
+    agent's heuristic" -- must hold even when the heuristic candidate
+    (claude-code, tried first in AGENT_REGISTRY order) resolves to something
+    real. Without this, a live claude-code heuristic tree would shadow a
+    pinned bindings/codex.json simply because claude-code is tried first."""
+    import synapse_worker.discovery as discovery
+    from synapse_contracts import SessionBinding, write_binding
+    from synapse_worker.discovery import binding_path_for_agent, project_slug
+    from synapse_worker.sources.codex import CodexSource
+
+    # A live (heuristic) Claude Code transcript for THIS cwd -- resolves to
+    # something, just not a pin.
+    claude_root = tmp_path / "claude-projects"
+    monkeypatch.setattr(discovery, "CLAUDE_PROJECTS", claude_root)
+    slug_dir = claude_root / project_slug(tmp_path)
+    slug_dir.mkdir(parents=True)
+    (slug_dir / "sess-live.jsonl").write_text("{}\n", encoding="utf-8")
+
+    # A pinned Codex binding -- must win despite being tried second.
+    codex_transcript = tmp_path / "codex-sess.jsonl"
+    codex_transcript.write_text("", encoding="utf-8")
+    write_binding(
+        binding_path_for_agent(tmp_path / ".synapse", "codex"),
+        SessionBinding(
+            agent_session_id="codex-sess-1",
+            shared_id="team-standup",
+            contributor="akhil",
+            agent="codex",
+            transcript_path=str(codex_transcript),
+            pinned_at=datetime.now(timezone.utc),
+        ),
+    )
+
+    config, loop, transcript, _, source, _ = cli._build(_ns(transcript=None))
+
+    assert source == "pinned"
+    assert isinstance(loop.source, CodexSource)
+    assert loop.binding.agent == "codex"
+    assert transcript == codex_transcript
+
+
 def test_build_with_explicit_transcript_honors_the_agent_flag(tmp_path) -> None:
     """MAJOR regression pin: `--agent codex --transcript <rollout>` used to
     hard-set DEFAULT_AGENT (claude-code) in the --transcript branch and never
