@@ -27,6 +27,30 @@ def test_the_documented_failure_case_is_now_caught():
     assert "default_pool_size=25" in identifier_leaks(finding, seg)  # the new one is not
 
 
+def test_paraphrased_key_value_leak_is_still_caught():
+    """The byte-identical case above is not the realistic one: a compression
+    pack pulls wording toward the source without necessarily preserving a
+    literal `key=value` fragment. The key=value alternative in _IDENTIFIER_RE
+    used to fuse the whole assignment into one token ('default_pool_size=25'),
+    so a paraphrase that drops the '=25' (or that keeps only the value) never
+    matched the segment's fused token and the leak went undetected — exactly
+    the blind spot this detector was commissioned to close."""
+    seg = _segment("set default_pool_size=25 in the pgbouncer config")
+    assert identifier_leaks("Raised default_pool_size to handle load.", seg) == ["default_pool_size"]
+    assert identifier_leaks("Raised the default_pool_size setting.", seg) == ["default_pool_size"]
+
+    seg_upper = _segment("set default_pool_size=25 and MAX_RETRIES=3 in the pgbouncer config")
+    assert identifier_leaks("MAX_RETRIES was bumped from 3.", seg_upper) == ["MAX_RETRIES"]
+
+
+def test_bare_key_in_segment_leaks_when_finding_fuses_it_with_its_value():
+    """Symmetric blind spot: the segment states the key bare, and the finding
+    is the one that writes it as key=value. Both sides must independently
+    surface the bare key for the intersection to catch it."""
+    seg = _segment("the default_pool_size setting controls connection reuse")
+    assert identifier_leaks("Raised default_pool_size=25 to handle load.", seg) == ["default_pool_size"]
+
+
 def test_shapes_snake_camel_dotted_path_and_fileext():
     seg = _segment("in auth_helper we call TokenValidator via api.internal.example "
                    "reading config/settings.py and /etc/synapse/keys")
@@ -100,7 +124,7 @@ def test_score_fixture_wires_leaked_identifiers():
         input_tokens=10,
         output_tokens=10,
     )
-    assert score.leaked_identifiers == ["default_pool_size=25"]
+    assert score.leaked_identifiers == ["default_pool_size", "default_pool_size=25"]
 
 
 def test_identifier_at_end_of_sentence_is_still_caught():

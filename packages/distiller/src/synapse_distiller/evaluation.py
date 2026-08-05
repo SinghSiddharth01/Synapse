@@ -146,8 +146,25 @@ _IDENTIFIER_RE = re.compile(
 
 
 def _identifier_tokens(text: str) -> set[str]:
-    tokens = {m.group(1).rstrip(".") for m in _IDENTIFIER_RE.finditer(text)}
-    tokens.discard("")
+    tokens: set[str] = set()
+    for m in _IDENTIFIER_RE.finditer(text):
+        tok = m.group(1).rstrip(".")
+        if not tok:
+            continue
+        tokens.add(tok)
+        if "=" in tok:
+            # The key=value alternative fuses the whole assignment into one
+            # token, so a paraphrase that keeps only the key (or only the
+            # value) never matches it. Emit the bare key too, and re-run
+            # extraction over the value in case it is itself identifier-shaped
+            # (e.g. a path or dotted name assigned to a key) — the fused form
+            # stays in the set as well, so a byte-identical copy is still
+            # caught.
+            key, _, value = tok.partition("=")
+            if key:
+                tokens.add(key)
+            if value:
+                tokens |= _identifier_tokens(value)
     return tokens
 
 
