@@ -9,6 +9,7 @@ dependencies = [
     "synapse-distiller",
     "synapse-worker",
     "synapse-orchestrator",
+    "synapse-service",
 ]
 
 [tool.uv.workspace]
@@ -20,6 +21,7 @@ synapse-providers = { workspace = true }
 synapse-distiller = { workspace = true }
 synapse-worker = { workspace = true }
 synapse-orchestrator = { workspace = true }
+synapse-service = { workspace = true }
 
 [dependency-groups]
 dev = [
