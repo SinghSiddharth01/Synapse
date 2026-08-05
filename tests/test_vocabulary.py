@@ -143,10 +143,21 @@ def test_no_document_still_glosses_memory_version_as_merges_completed():
 
     Same shape as test_the_projection_question_is_no_longer_described_as_open,
     which is the one mechanism in this repo that has actually caught this class
-    of drift. A line MAY carry the phrase if it also carries a correction
-    marker -- that is how a correction records what it corrected."""
+    of drift -- including its exemption. A line MAY carry the phrase if it also
+    carries a correction marker (that is how a correction records what it
+    corrected), OR if it lives in one of the documents that NAME and QUOTE the
+    wrong gloss on purpose while explaining the correction: the exec plan
+    itself (this test was transcribed from it verbatim) and Plan E's own
+    brainstorming/spec docs. Without that exemption this test goes red the
+    moment the exec plan doc (which discusses the old gloss at length while
+    fixing it) sits in the same `docs/` tree it globs -- true the moment this
+    branch reaches `main`, which already carries it."""
     offenders = []
     for path in sorted((ROOT / "docs").rglob("*.md")):
+        exempt = (path.name.startswith("0004-") or "plan-e-brain" in path.name
+                  or "brain-integration" in path.name or "e5-brain" in path.name)
+        if exempt:
+            continue
         for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
             if "merges completed" not in line:
                 continue
