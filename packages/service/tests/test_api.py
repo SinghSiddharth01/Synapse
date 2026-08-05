@@ -508,6 +508,58 @@ async def test_a_finding_only_the_asker_produced_never_reaches_the_candidate_set
     assert "f-mine" not in [f["id"] for f in r.json()["findings"]]
 
 
+async def test_the_askers_own_findings_do_not_starve_teammate_recall_at_the_route():
+    """Invariant 3 at the `exclude=` SEAM (api.py's `store.candidates(...,
+    exclude=suppressed)`), not at `query_findings`'s downstream `visible_to`
+    call -- the sibling test above cannot tell these two apart, and that is
+    the gap this one closes.
+
+    query_findings ALSO applies visible_to to whatever candidates it is
+    handed, so with only 1 of the asker's own findings among 19 teammates'
+    (the sibling test's shape), deleting `exclude=` from the route entirely
+    is invisible: nothing LEAKS (the one self-finding is still filtered out
+    downstream), so a presence/absence assertion never notices that it spent
+    one of the TOP_K candidate slots getting there. Nothing pins that the
+    slot was wasted.
+
+    Scaled to "one contributor, mostly their own findings" -- the ordinary
+    shape of a backlog flush, and the demo's own corpus construction -- the
+    wasted slots stop being invisible: 60 of the asker's own findings compete
+    for the same TOP_K=14 candidate window as 20 teammates', all lexically
+    identical so nothing else decides who wins the slots. With the seam
+    intact, every one of the asker's own findings is excluded BEFORE
+    selection, so all 14 slots go to teammates. Delete the seam and the
+    asker's own findings compete for (and mostly win) those slots, then get
+    filtered out downstream anyway -- so the prompt silently arrives with far
+    fewer teammate findings than TOP_K, and nothing else in this suite
+    notices."""
+    from synapse_service.api import TOP_K
+
+    provider = _RecordingProvider(scripts=[MERGE_NOOP, {"ranked": list(range(TOP_K))}])
+    async with _client(provider) as client:
+        sid = (await client.post("/v1/sessions", json={"purpose": "p", "created_by": "s"})
+               ).json()["shared_id"]
+        mine = [_finding_json(f"f-me-{i:02d}", agent_session="as-me",
+                              text=f"mine-marker-{i:02d} the pool exhausts under "
+                                   "sustained allocation pressure")
+                for i in range(60)]
+        theirs = [_finding_json(f"f-them-{i:02d}", agent_session="as-them",
+                                text=f"them-marker-{i:02d} the pool exhausts under "
+                                     "sustained allocation pressure")
+                  for i in range(20)]
+        await client.post(f"/v1/sessions/{sid}/findings", json={"findings": mine + theirs})
+
+        await client.post(f"/v1/sessions/{sid}/query",
+                          json={"query": "pool exhaustion", "agent_session": "as-me"})
+
+    prompt = provider.prompts[-1]
+    # Every candidate slot goes to a teammate: the asker's own 60 never
+    # compete for the window at all, because `exclude=` removes them before
+    # `store.candidates` ever ranks anything.
+    assert prompt.count("them-marker-") == TOP_K
+    assert prompt.count("mine-marker-") == 0
+
+
 async def test_watermark_returns_topics_sorted_by_size_with_no_provider_call():
     provider = _RecordingProvider(scripts=[MERGE_NOOP])
     async with _client(provider) as client:
