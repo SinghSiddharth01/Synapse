@@ -15,9 +15,57 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 import httpx
+from starlette.testclient import TestClient
 
 import synapse_orchestrator.cli as cli
 from synapse_contracts.binding import SessionBinding, write_binding
+
+_PRODUCER_FINDING = {"id": "f-wiring", "type": "learning", "text": "x",
+                     "attributions": [{"contributor": "aditya", "agent_session": "as-1",
+                                       "agent": "claude-code"}],
+                     "ts": "2026-08-04T12:00:00Z", "refs": [], "provenance": "distilled",
+                     "status": "kept", "merged_from": [], "merged_into": None}
+
+
+def test_main_wires_resolve_binding_into_the_app_so_a_post_boot_join_takes_effect(
+    monkeypatch, tmp_path
+) -> None:
+    """Kills the mutant `build_app(relay, server)` (dropping the keyword
+    `resolve_binding=resolve_binding`) — round 2 review's blocker finding:
+    'Reverting cli.main's resolve_binding wiring ... leaves all 229 tests
+    passing.' Without it wired live into the app, the producer endpoint
+    takes the legacy branch (app.py: `if resolve_binding is not None`) —
+    no 503 gate at all, and a `synapse-worker join` run after this process
+    started would never be picked up on the egress path, contradicting both
+    app.py's own docstring and cli.py's `_resolve_binding` docstring. This
+    test drives the REAL `app` object handed to `uvicorn.run`, not a mock of
+    `build_app`, so it exercises the actual composition in `main()`."""
+    captured: dict = {}
+    monkeypatch.setattr(cli.uvicorn, "run", lambda app, **kw: captured.setdefault("app", app))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"accepted": 1, "memory_version": 1})
+
+    # Boot with NO binding at all.
+    cli.main(["--state-dir", str(tmp_path)], transport=httpx.MockTransport(handler))
+    # One TestClient context for both requests: the MCP session manager
+    # underneath `app` can only run its ASGI lifespan once per instance, so
+    # both the before-join and after-join requests must share it — that is
+    # exactly the "no restart" property this test is pinning.
+    with TestClient(captured["app"]) as client:
+        resp = client.post("/producer/findings", json={"findings": [_PRODUCER_FINDING]})
+        assert resp.status_code == 503    # only true if resolve_binding is live-wired
+
+        # A `synapse-worker join` after boot — write the binding file now,
+        # with the SAME `app` object still in hand (no restart).
+        write_binding(
+            tmp_path / "bindings" / "claude-code.json",
+            SessionBinding(agent_session_id="as-1", shared_id="sh-late", contributor="aditya",
+                           agent="claude-code", transcript_path="/tmp/t.jsonl",
+                           pinned_at=datetime(2026, 8, 4, tzinfo=timezone.utc)),
+        )
+        resp = client.post("/producer/findings", json={"findings": [_PRODUCER_FINDING]})
+        assert resp.status_code == 200    # picked up live, without a restart
 
 
 def test_defaults_to_localhost_8787(monkeypatch, tmp_path) -> None:

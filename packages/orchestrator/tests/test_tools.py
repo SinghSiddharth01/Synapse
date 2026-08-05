@@ -22,6 +22,12 @@ TS = datetime(2026, 8, 4, tzinfo=timezone.utc)
 async def test_briefing_reflects_the_watermark_and_fails_open():
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/v1/sessions/sh-1/watermark"
+        # Invariant 3 (CONTEXT.md): the watermark's `new_since` is per-Agent
+        # Session by definition — the service can only enforce that if this
+        # field actually arrives. Round 2 review: dropping this query param
+        # entirely left the whole suite green (a path-only assertion, same
+        # class of gap the sibling `/query` hop already guards against).
+        assert request.url.params["agent_session"] == "as-1"
         return httpx.Response(200, json={"version": 3, "new_since": 2,
                                          "by_type": {"learning": 4, "dead_end": 1},
                                          "conflicts": 1})
@@ -59,7 +65,9 @@ async def test_briefing_fails_open_on_a_malformed_watermark_body(body):
 
 async def test_query_tool_calls_the_service_and_formats_findings(tmp_path):
     captured_body = {}
+    urls_hit = []
     def handler(request: httpx.Request) -> httpx.Response:
+        urls_hit.append(str(request.url))
         if request.url.path.endswith("/query"):
             import json as _json
             captured_body.update(_json.loads(request.content))
@@ -81,6 +89,10 @@ async def test_query_tool_calls_the_service_and_formats_findings(tmp_path):
     # the Contributor. The service can only enforce that if this field actually
     # arrives — a body-shape assertion, not just a path assertion.
     assert captured_body == {"query": "timing?", "agent_session": "as-1"}
+    # Which Shared Session gets queried is the routing decision that matters
+    # most here — pin the exact URL, not just that SOME request happened
+    # (round 2 review: a hardcoded WRONG-SESSION url survived every test).
+    assert urls_hit == ["http://svc/v1/sessions/sh-1/query"]
 
 
 async def test_query_tool_credits_every_contributor_on_a_synthesized_finding(tmp_path):
@@ -130,8 +142,10 @@ async def test_contribute_round_trips_through_the_distiller_and_relay(tmp_path):
     from synapse_distiller import Distiller
 
     sent_to_service = []
+    urls_hit = []
     def handler(request: httpx.Request) -> httpx.Response:
         import json as _json
+        urls_hit.append(str(request.url))
         sent_to_service.append(_json.loads(request.content))
         return httpx.Response(200, json={"accepted": 1, "memory_version": 1})
 
@@ -148,3 +162,7 @@ async def test_contribute_round_trips_through_the_distiller_and_relay(tmp_path):
     [finding] = pushed["findings"]
     assert finding["provenance"] == Provenance.CONTRIBUTED.value
     assert finding["attributions"][0]["contributor"] == "aditya"
+    # Which Shared Session contribute()'s finding is pushed to is the whole
+    # point of it landing in team memory at all — pin the exact URL (round 2
+    # review: a hardcoded WRONG-SESSION url survived every test).
+    assert urls_hit == ["http://svc/v1/sessions/sh-1/findings"]
