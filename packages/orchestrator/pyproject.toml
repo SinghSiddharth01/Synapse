@@ -10,7 +10,12 @@ dependencies = [
     # (needs a Rust toolchain we don't have). 1.9.4 is confirmed dependency-clean
     # for a local, unauthenticated stdio server -- which is all this is.
     "mcp==1.9.4",
+    "synapse-contracts",
+    "httpx>=0.27",
 ]
+
+[tool.uv.sources]
+synapse-contracts = { workspace = true }
 
 [project.scripts]
 synapse-orchestrator = "synapse_orchestrator.cli:main"

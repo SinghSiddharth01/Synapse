@@ -145,7 +145,7 @@ git commit -m "feat(orchestrator): instructions factory + live sentinel probe (a
   `pending_count() -> int`.
   Task 3's endpoint and Task 4's contribute call `record` + `flush`; the CLI exposes `resync`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 # packages/orchestrator/tests/test_relay.py
@@ -224,12 +224,12 @@ async def test_flush_with_nothing_pending_is_free(tmp_path):
     assert await relay.flush() == (0, 0)
 ```
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
 Run: `uv run pytest packages/orchestrator/tests/test_relay.py -v`
 Expected: FAIL with `ModuleNotFoundError`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```python
 # packages/orchestrator/src/synapse_orchestrator/relay.py
@@ -334,7 +334,7 @@ class Relay:
 
 Add to `packages/orchestrator/pyproject.toml` dependencies: `"synapse-contracts"`, `"httpx>=0.27"` (with the matching `[tool.uv.sources]` workspace entry), then `uv sync`.
 
-- [ ] **Step 4: Run, then commit**
+- [x] **Step 4: Run, then commit**
 
 Run: `uv run pytest packages/orchestrator/tests/test_relay.py -v` → PASS.
 
