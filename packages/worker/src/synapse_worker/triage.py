@@ -19,8 +19,11 @@ from synapse_contracts import Segment
 
 # A clean lint/format report contains the word "errors" — match the clean shape
 # BEFORE the error words, or seg-004 style runs read as failures.
+# `\b0 errors\b`, not `0 errors`: without the left boundary this also matches
+# "Found 10 errors", "130 errors" etc. — any count ending in 0 — which both
+# vetoes the real error-signal keep and satisfies this skip-signature.
 LINT_CLEAN_RE = re.compile(
-    r"(?i)(\(\d+ fixed, 0 remaining\)|all checks passed|0 errors|nothing to fix)"
+    r"(?i)(\(\d+ fixed, 0 remaining\)|all checks passed|\b0 errors\b|nothing to fix)"
 )
 ERROR_RE = re.compile(
     r"(?i)(\btraceback\b|\bexception\b|\berror(s)?\b|\bfailed\b|\bfatal\b"
@@ -42,6 +45,22 @@ class TriageDecision:
     reason: str
 
 
+def _has_uncleared_error(content: str) -> bool:
+    """True if some LINE of `content` reads as an error not cleared on that
+    same line.
+
+    Per-line, not per-content: one Bash call routinely interleaves a clean
+    lint pass with a failing test run (or a clean-count phrase like "0 errors"
+    on one line and a real failure on another), and a clean-report phrase
+    anywhere in the content must not veto a real error sitting on a different
+    line of the same tool_result.
+    """
+    return any(
+        ERROR_RE.search(line) and not LINT_CLEAN_RE.search(line)
+        for line in content.splitlines()
+    )
+
+
 def triage(segment: Segment) -> TriageDecision:
     prose = " ".join(e.content for e in segment.events
                      if e.kind == "text" and e.role == "assistant")
@@ -57,13 +76,21 @@ def triage(segment: Segment) -> TriageDecision:
         return TriageDecision(True, "decision-language")
 
     tool_results = [e for e in segment.events if e.kind == "tool_result"]
-    real_errors = [e for e in tool_results
-                   if ERROR_RE.search(e.content) and not LINT_CLEAN_RE.search(e.content)]
+    real_errors = [e for e in tool_results if _has_uncleared_error(e.content)]
     if real_errors:
         return TriageDecision(True, "error-signal")
 
     # ── skip-signatures — only reachable with zero keep-signals above ───────
-    if any(LINT_CLEAN_RE.search(e.content) for e in tool_results):
+    # `all`, not `any`, over a non-empty tool_results: one clean lint result
+    # sitting next to a real Edit's tool_result (or any other non-lint output)
+    # must not veto the whole segment — the segment has to be NOTHING BUT a
+    # clean report for this to fire. The prose-length gate mirrors the
+    # readonly-run rule below so a lint-clean phrase embedded in unrelated
+    # content (a CI log that happens to contain "all checks passed") doesn't
+    # silently swallow substantial analysis sitting next to it.
+    if (tool_results
+            and all(LINT_CLEAN_RE.search(e.content) for e in tool_results)
+            and len(prose) < SUBSTANTIAL_PROSE_CHARS):
         return TriageDecision(False, "lint-clean")
     tool_uses = [e for e in segment.events if e.kind == "tool_use"]
     if (tool_uses

@@ -78,3 +78,70 @@ def test_readonly_with_substantial_prose_is_kept():
     ]
     d = triage(_seg(events))
     assert d.keep  # substantial analysis after reading is insight, not noise
+
+
+def test_error_count_ending_in_zero_is_not_read_as_a_clean_report():
+    # Regression: LINT_CLEAN_RE's old "0 errors" alternative had no left word
+    # boundary, so it matched inside "10 errors", "130 errors", etc. and both
+    # vetoed the error-signal keep AND satisfied the lint-clean skip.
+    d = triage(_seg([
+        _ev(role="user", kind="tool_result", tool_name="Bash",
+            content="src/loop.py:44: error: Incompatible types\n"
+                    "Found 10 errors in 3 files (checked 40 source files)"),
+        _ev(content="Ten type errors; I'll fix the offset type first."),
+    ]))
+    assert d.keep and d.reason == "error-signal"
+
+
+def test_clean_lint_line_does_not_veto_a_real_error_on_another_line():
+    # One Bash call that lints then tests is the most common shape of tool
+    # invocation in real transcripts -- a clean lint phrase on one line of the
+    # SAME tool_result must not suppress a real failure on another line.
+    d = triage(_seg([
+        _ev(role="user", kind="tool_result", tool_name="Bash",
+            content="ruff: All checks passed!\n\n"
+                    "FAILED tests/test_loop.py::test_offset - AssertionError: 3 != 4"),
+    ]))
+    assert d.keep and d.reason == "error-signal"
+
+
+def test_clean_error_count_does_not_veto_a_real_error_on_another_line():
+    d = triage(_seg([
+        _ev(role="user", kind="tool_result", tool_name="Bash",
+            content="webpack: 0 errors, 12 warnings\n"
+                    "npm ERR! build script failed, exit code 1"),
+    ]))
+    assert d.keep and d.reason == "error-signal"
+
+
+def test_one_clean_lint_result_does_not_veto_a_real_edit_in_the_same_segment():
+    # A clean `ruff check .` sitting next to a real Edit's tool_result must not
+    # skip the whole segment -- "lint-clean" requires the segment be NOTHING
+    # BUT a clean report, not merely contain one somewhere.
+    long_prose = "Working through why the crash only happens under heavy load. " * 12
+    events = [
+        _ev(kind="tool_use", tool_name="Bash", content="ruff check ."),
+        _ev(role="user", kind="tool_result", tool_name="Bash", content="All checks passed!"),
+        _ev(kind="tool_use", tool_name="Edit", content="loop.py"),
+        _ev(role="user", kind="tool_result", tool_name="Edit",
+            content="The file /repo/src/loop.py has been edited."),
+        _ev(content=long_prose),
+    ]
+    d = triage(_seg(events))
+    assert d.keep
+
+
+def test_lint_clean_phrase_in_unrelated_log_does_not_swallow_substantial_analysis():
+    # The phrase "all checks passed" appearing in a generic CI log (not an
+    # actual lint tool_result) must not silently skip real analysis sitting
+    # right next to it -- same prose-length carve-out the readonly-run rule
+    # already gets.
+    long_prose = "The OOM points at the batch size, not the model itself. " * 10
+    events = [
+        _ev(kind="tool_use", tool_name="Read", content="ci.log"),
+        _ev(role="user", kind="tool_result", tool_name="Read",
+            content="build step 3: all checks passed\nstep 4: OOM killed"),
+        _ev(content=long_prose),
+    ]
+    d = triage(_seg(events))
+    assert d.keep
