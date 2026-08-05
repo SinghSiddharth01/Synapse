@@ -1,0 +1,3 @@
+{"timestamp": "2026-08-05T09:14:00Z", "ordinal": 0, "type": "session_meta", "payload": {"id": "codex-sess-3", "session_id": "codex-sess-3", "timestamp": "2026-08-05T09:14:00Z", "cwd": "/repo", "originator": "codex_cli_rs", "cli_version": "0.146.1", "source": "cli"}}
+{this is not valid json — a torn write caught mid-append
+{"timestamp": "2026-08-05T09:14:05Z", "ordinal": 2, "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "still here after the bad line"}]}}

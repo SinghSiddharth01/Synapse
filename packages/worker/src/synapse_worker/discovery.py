@@ -11,21 +11,52 @@ Claude Code's layout, confirmed 2026-08-04:
 `<slug>` is the working directory with drive colons and path separators replaced
 by dashes, e.g. C:\\QC_multiverse_hackathon\\Synapse becomes
 C--QC-multiverse-hackathon-Synapse.
+
+Codex's layout, confirmed 2026-08-05 (see fixtures/raw_lines/codex/README.md
+for the full trail against github.com/openai/codex primary source):
+
+    ~/.codex/sessions/<YYYY>/<MM>/<DD>/rollout-<timestamp>-<uuid>.jsonl
+
+`AGENT_REGISTRY` is Task A.1's "static registry: agent name → transcript
+root(s) → transcript dialect → Source class" — `find_live_transcript`,
+`resolve_transcript`, and `join_session` all dispatch through it, so a third
+adapter needs a registry entry and a `find_*_transcripts` function, not a
+rewrite of any of them.
+
+`join_session` loops over `AGENT_REGISTRY`, binding every currently-live
+Agent Session it finds, one per Agent product — Plan D.2's "one laptop holds
+several bindings ... Claude Code and Codex can sit in different Shared
+Sessions." An earlier pass here left this loop out, reasoning that the
+existing `join` tests monkeypatch `find_live_transcript` as a whole-function
+substitute and looping would mean probing the real `~/.codex/sessions` by
+default under test. That reasoning did not hold up: those tests already
+override `find_live_transcript` in full (not per-agent), so looping never
+touches disk under test either — it only needed the same substitute
+function to accept the `agent` keyword the real signature already has
+(`agent: str = "claude-code"`, keyword-only, so every un-widened lambda in
+this codebase already breaks on it the same way).
 """
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
 from synapse_contracts import LocalBinding, SessionBinding, read_binding, write_binding
 
+from synapse_worker.sources.claude_code import ClaudeCodeSource
+from synapse_worker.sources.codex import SESSION_META_TYPE, CodexSource
+
 logger = logging.getLogger(__name__)
 
 CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
+CODEX_SESSIONS = Path.home() / ".codex" / "sessions"
 
 # A transcript untouched for longer than this is a finished conversation, not a
 # live one. Generous, because a developer reading code can easily leave an agent
@@ -86,11 +117,165 @@ def find_claude_code_transcripts(
     return sorted(found, key=lambda t: t.modified_at, reverse=True)
 
 
-def find_live_transcript(
+# rollout-YYYY-MM-DDThh-mm-ss-<uuid>.jsonl -- mirrors openai/codex's own
+# parse_timestamp_uuid_from_filename (codex-rs/rollout/src/list.rs): the
+# session/thread id is embedded in the filename by construction, so it is
+# read from there rather than by opening the file.
+_CODEX_ROLLOUT_FILENAME = re.compile(
+    r"^rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-"
+    r"(?P<uuid>[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
+    r"\.jsonl$"
+)
+
+
+def _codex_session_id_from_filename(path: Path) -> str | None:
+    match = _CODEX_ROLLOUT_FILENAME.match(path.name)
+    return match.group("uuid") if match else None
+
+
+def _codex_transcript_cwd(path: Path) -> str | None:
+    """The working directory a Codex rollout was recorded under, read from its
+    own `session_meta` line — the only place that lives, since (unlike Claude
+    Code's `<slug>` directory) Codex's day-tree does not partition by project.
+    `session_meta` is written once, near the top of the file (see module
+    docstring), so this scans forward from the top until it finds one rather
+    than assuming line 0. Returns `None` when no readable `session_meta` line
+    exists — a torn write, a line caught mid-append, or a file this adapter's
+    own parser would also skip — and the caller treats `None` as "does not
+    match", never as "matches everything": a transcript we cannot positively
+    identify must not be attributed to a directory we merely hope it belongs
+    to.
+    """
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(record, dict) or record.get("type") != SESSION_META_TYPE:
+                    continue
+                payload = record.get("payload")
+                if not isinstance(payload, dict):
+                    return None
+                cwd = payload.get("cwd")
+                return str(cwd) if cwd is not None else None
+    except OSError:
+        return None
+    return None
+
+
+def _codex_transcript_matches_cwd(path: Path, cwd: Path) -> bool:
+    recorded = _codex_transcript_cwd(path)
+    if recorded is None:
+        return False
+    try:
+        return Path(recorded).resolve() == Path(cwd).resolve()
+    except (OSError, RuntimeError):
+        # A recorded cwd that cannot be resolved on this machine (e.g. a path
+        # from a different OS or a since-deleted mount) still deserves a
+        # literal comparison rather than being discarded outright.
+        return str(recorded) == str(cwd)
+
+
+def find_codex_transcripts(
     cwd: Path | None = None, projects_root: Path | None = None
+) -> list[DiscoveredTranscript]:
+    """Transcripts for the Codex agent, most recently written first.
+
+    Confirmed against github.com/openai/codex (codex-rs/rollout), 2026-08-05
+    — see fixtures/raw_lines/codex/README.md. Layout:
+
+        ~/.codex/sessions/<YYYY>/<MM>/<DD>/rollout-<timestamp>-<uuid>.jsonl
+
+    Unlike Claude Code, whose `<slug>` directory encodes the working
+    directory for free, Codex's day-tree does not partition by project at
+    all — every project's rollouts land in the same `YYYY/MM/DD` folder,
+    distinguished only by the `cwd` field inside each file's `session_meta`
+    line. So when `cwd` is given, this opens each candidate to read that
+    line (`_codex_transcript_cwd`) and excludes anything that does not
+    resolve to the same directory — including anything whose `session_meta`
+    cannot be read at all. `cwd=None` (the low-level, unscoped query some
+    callers deliberately want) returns every candidate, unfiltered, exactly
+    as before.
+    """
+    root = Path(projects_root) if projects_root else CODEX_SESSIONS
+    if not root.is_dir():
+        return []
+
+    candidates = list(root.glob("*/*/*/rollout-*.jsonl"))
+    found: list[DiscoveredTranscript] = []
+    for path in candidates:
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        if cwd is not None and not _codex_transcript_matches_cwd(path, cwd):
+            continue
+        found.append(
+            DiscoveredTranscript(
+                path=path,
+                agent="codex",
+                session_id=_codex_session_id_from_filename(path) or path.stem,
+                modified_at=stat.st_mtime,
+                size=stat.st_size,
+            )
+        )
+    return sorted(found, key=lambda t: t.modified_at, reverse=True)
+
+
+@dataclass(frozen=True)
+class AgentRegistration:
+    """One entry in the static agent registry — Task A.1.
+
+    The worker is never *configured* for an agent; it is *detected* by
+    walking `roots` for whichever dialect is registered. `finder` lists that
+    agent's transcripts, most-recently-written first, with the exact
+    `(cwd, projects_root) -> list[DiscoveredTranscript]` signature regardless
+    of which agent it is — `find_live_transcript`/`resolve_transcript`
+    dispatch through this table instead of hard-coding one agent's layout.
+    """
+
+    roots: tuple[Path, ...]
+    finder: Callable[[Path | None, Path | None], list[DiscoveredTranscript]]
+    source_class: type
+    dialect: str
+
+
+AGENT_REGISTRY: dict[str, AgentRegistration] = {
+    "claude-code": AgentRegistration(
+        roots=(CLAUDE_PROJECTS,),
+        finder=find_claude_code_transcripts,
+        source_class=ClaudeCodeSource,
+        dialect="claude-code-jsonl",
+    ),
+    "codex": AgentRegistration(
+        roots=(CODEX_SESSIONS,),
+        finder=find_codex_transcripts,
+        source_class=CodexSource,
+        dialect="codex-rollout-jsonl",
+    ),
+}
+
+
+def find_live_transcript(
+    cwd: Path | None = None,
+    projects_root: Path | None = None,
+    *,
+    agent: str = "claude-code",
 ) -> DiscoveredTranscript | None:
-    """The one transcript currently being written, if any."""
-    for transcript in find_claude_code_transcripts(cwd, projects_root):
+    """The one transcript currently being written, if any, for `agent`.
+
+    Dispatches through `AGENT_REGISTRY`. `agent` is keyword-only and defaults
+    to "claude-code" so every pre-registry call site — `join_session`, and
+    this function's own old two-positional-argument shape — keeps working
+    unchanged.
+    """
+    finder = AGENT_REGISTRY[agent].finder
+    for transcript in finder(cwd, projects_root):
         if transcript.age_seconds <= LIVE_WINDOW_SECONDS:
             return transcript
     return None
@@ -123,11 +308,16 @@ def join_session(
     """`synapse join <shared_id>` — Plan A.7 / Plan D.2.
 
     Binds every currently-detected LIVE Agent Session to `shared_id`, one
-    binding per Agent product. Only the `claude-code` adapter exists today
-    (Plan A.3's Codex adapter is unbuilt), so this returns at most one binding
-    in practice — but the shape is ready for a second adapter without a
-    reshape, matching Plan D.2's first failing test: "joining with two agents
-    detected produces two bindings."
+    binding per Agent product — looped over `AGENT_REGISTRY`, so a third
+    registered agent needs no reshape here. Matches Plan D.2's first failing
+    test: "joining with two agents detected produces two bindings."
+
+    `projects_root`, when given, is passed to every registered agent's finder
+    the same way — it exists for tests that isolate a single product's
+    fixture tree (in which case every *other* agent's finder simply finds
+    nothing there, since each dialect's directory layout differs) and for
+    real callers there is no such override, so each finder falls back to its
+    own default root (`CLAUDE_PROJECTS`/`CODEX_SESSIONS`) independently.
 
     Detection is unchanged: this does not let a human pick a specific
     transcript file. Plan D.3 is explicit that there is no `attach(shared_id)`
@@ -142,8 +332,10 @@ def join_session(
     """
     bound: list[SessionBinding] = []
 
-    transcript = find_live_transcript(cwd, projects_root)
-    if transcript is not None:
+    for agent in AGENT_REGISTRY:
+        transcript = find_live_transcript(cwd, projects_root, agent=agent)
+        if transcript is None:
+            continue
         binding = SessionBinding(
             agent_session_id=transcript.session_id,
             shared_id=shared_id,
@@ -196,6 +388,11 @@ def resolve_transcript(
     session that has since been deleted or moved must not silently keep
     steering the worker at a path that is no longer there. In that case this
     falls through to the heuristic exactly as if `join` had never been run.
+
+    `agent` governs BOTH halves, not just the binding lookup: the heuristic
+    fallback dispatches through `AGENT_REGISTRY` too, so
+    `resolve_transcript(..., agent="codex")` actually looks for a live Codex
+    transcript rather than silently reusing Claude Code's finder.
     """
     pinned: SessionBinding | None = read_binding(binding_path_for_agent(state_dir, agent))
 
@@ -214,7 +411,7 @@ def resolve_transcript(
             transcript_path,
         )
 
-    heuristic = find_live_transcript(cwd, projects_root)
+    heuristic = find_live_transcript(cwd, projects_root, agent=agent)
     if heuristic is None:
         return None
     return ResolvedTranscript(

@@ -41,7 +41,12 @@ def _write_transcript(path, text: str = "") -> None:
 # ---------------------------------------------------------------------------
 
 async def test_join_with_no_live_transcript_fails(monkeypatch, capsys) -> None:
-    monkeypatch.setattr("synapse_worker.discovery.find_live_transcript", lambda cwd, root=None: None)
+    # join_session loops over every registered agent, so the substitute must
+    # accept (and, for this test, ignore) the `agent` keyword regardless of
+    # which agent is being probed.
+    monkeypatch.setattr(
+        "synapse_worker.discovery.find_live_transcript", lambda cwd, root=None, *, agent=None: None
+    )
 
     exit_code = await cli.cmd_join(_ns(shared_id="team-standup", contributor="aditya"))
 
@@ -56,8 +61,12 @@ async def test_join_binds_the_live_transcript(tmp_path, monkeypatch, capsys) -> 
     transcript.write_text("{}\n", encoding="utf-8")
     monkeypatch.setattr(
         "synapse_worker.discovery.find_live_transcript",
-        lambda cwd, root=None: DiscoveredTranscript(
-            path=transcript, agent="claude-code", session_id="as-1", modified_at=0.0, size=1
+        lambda cwd, root=None, *, agent=None: (
+            DiscoveredTranscript(
+                path=transcript, agent="claude-code", session_id="as-1", modified_at=0.0, size=1
+            )
+            if agent == "claude-code"
+            else None
         ),
     )
 
@@ -183,7 +192,10 @@ async def test_run_reports_heuristic_selection(tmp_path, monkeypatch, capsys) ->
     monkeypatch.setattr(cli, "check_canary", _async(PASSING_CANARY))
     monkeypatch.setattr(
         cli, "resolve_transcript",
-        lambda cwd, state_dir: ResolvedTranscript(
+        # _build tries every registered agent (claude-code, then codex) in
+        # search of a pinned binding before settling for a heuristic -- the
+        # substitute must accept `agent` regardless of which is being probed.
+        lambda cwd, state_dir, *, agent=None: ResolvedTranscript(
             path=transcript, agent_session_id="as-1", source="heuristic"
         ),
     )
@@ -206,7 +218,7 @@ async def test_run_reports_pinned_selection_and_uses_its_binding(tmp_path, monke
     )
     monkeypatch.setattr(
         cli, "resolve_transcript",
-        lambda cwd, state_dir: ResolvedTranscript(
+        lambda cwd, state_dir, *, agent=None: ResolvedTranscript(
             path=transcript, agent_session_id="as-joined", source="pinned", local_binding=joined
         ),
     )
@@ -216,6 +228,236 @@ async def test_run_reports_pinned_selection_and_uses_its_binding(tmp_path, monke
     out = capsys.readouterr().out
     assert exit_code == 0
     assert "selection        pinned" in out
+
+
+# ---------------------------------------------------------------------------
+# run — multi-agent dispatch (the demo-path goal: `run` must actually reach
+# CodexSource, not just resolve a Codex transcript path and then silently
+# hand it to ClaudeCodeSource)
+# ---------------------------------------------------------------------------
+
+def test_build_selects_codex_source_for_a_pinned_codex_binding(tmp_path) -> None:
+    """A pinned bindings/codex.json must make `_build` construct a WorkerLoop
+    that actually parses with CodexSource -- the concrete regression this
+    covers: WorkerLoop used to hard-code ClaudeCodeSource and `_build` used
+    to always resolve with agent="claude-code", so even a hand-authored
+    codex binding was silently fed to the wrong adapter."""
+    from synapse_contracts import SessionBinding, write_binding
+    from synapse_worker.discovery import binding_path_for_agent
+    from synapse_worker.sources.codex import CodexSource
+
+    codex_transcript = tmp_path / "codex-sess.jsonl"
+    codex_transcript.write_text("", encoding="utf-8")
+    write_binding(
+        binding_path_for_agent(tmp_path / ".synapse", "codex"),
+        SessionBinding(
+            agent_session_id="codex-sess-1",
+            shared_id="team-standup",
+            contributor="akhil",
+            agent="codex",
+            transcript_path=str(codex_transcript),
+            pinned_at=datetime.now(timezone.utc),
+        ),
+    )
+
+    config, loop, transcript, _, source, _ = cli._build(_ns(transcript=None))
+
+    assert source == "pinned"
+    assert isinstance(loop.source, CodexSource)
+    assert loop.binding.agent == "codex"
+    assert transcript == codex_transcript
+
+
+def test_build_with_explicit_agent_flag_skips_straight_to_that_agent(tmp_path, monkeypatch) -> None:
+    """--agent codex must be honored even with nothing pinned anywhere, via
+    the heuristic path -- and must not be shadowed by a claude-code pin that
+    happens to exist too. CODEX_SESSIONS is monkeypatched to an isolated
+    fixture root, the same way test_status_lists_detected_transcripts_with_
+    liveness isolates CLAUDE_PROJECTS -- no real machine state is touched."""
+    import synapse_worker.discovery as discovery
+    from synapse_contracts import LocalBinding, SessionBinding, write_binding
+    from synapse_worker.discovery import binding_path_for_agent
+    from synapse_worker.sources.codex import CodexSource
+
+    write_binding(
+        binding_path_for_agent(tmp_path / ".synapse", "claude-code"),
+        SessionBinding(
+            agent_session_id="cc-sess",
+            shared_id="other-session",
+            contributor="akhil",
+            agent="claude-code",
+            transcript_path=str(tmp_path / "cc.jsonl"),
+            pinned_at=datetime.now(timezone.utc),
+        ),
+    )
+    (tmp_path / "cc.jsonl").write_text("", encoding="utf-8")
+
+    codex_root = tmp_path / "codex-sessions"
+    monkeypatch.setattr(discovery, "CODEX_SESSIONS", codex_root)
+    day_dir = codex_root / "2026" / "08" / "05"
+    day_dir.mkdir(parents=True, exist_ok=True)
+    # find_codex_transcripts now reads each candidate's own session_meta.cwd
+    # to decide whether it belongs to Path.cwd() (== tmp_path here, via the
+    # _isolated_cwd autouse fixture) -- an empty file would no longer match.
+    session_meta_line = json.dumps(
+        {
+            "timestamp": "2026-08-05T10-00-00Z", "ordinal": 0, "type": "session_meta",
+            "payload": {"id": "codex-sess", "session_id": "codex-sess", "cwd": str(tmp_path)},
+        }
+    )
+    (day_dir / "rollout-2026-08-05T10-00-00-1c9b6d8e-27ac-4f1e-9f2c-8a2b1e6d4c11.jsonl").write_text(
+        session_meta_line + "\n", encoding="utf-8"
+    )
+
+    config, loop, transcript, _, source, _ = cli._build(_ns(transcript=None, agent="codex"))
+
+    assert source == "heuristic"
+    assert isinstance(loop.source, CodexSource)
+    assert loop.binding.agent == "codex"
+    assert isinstance(loop.binding, LocalBinding)
+
+
+def test_build_prefers_a_pinned_binding_over_an_earlier_agents_heuristic(
+    tmp_path, monkeypatch
+) -> None:
+    """MAJOR regression pin: _resolve_agent_and_transcript's own documented
+    precedence -- "a join-pinned binding for ANY agent wins over every
+    agent's heuristic" -- must hold even when the heuristic candidate
+    (claude-code, tried first in AGENT_REGISTRY order) resolves to something
+    real. Without this, a live claude-code heuristic tree would shadow a
+    pinned bindings/codex.json simply because claude-code is tried first."""
+    import synapse_worker.discovery as discovery
+    from synapse_contracts import SessionBinding, write_binding
+    from synapse_worker.discovery import binding_path_for_agent, project_slug
+    from synapse_worker.sources.codex import CodexSource
+
+    # A live (heuristic) Claude Code transcript for THIS cwd -- resolves to
+    # something, just not a pin.
+    claude_root = tmp_path / "claude-projects"
+    monkeypatch.setattr(discovery, "CLAUDE_PROJECTS", claude_root)
+    slug_dir = claude_root / project_slug(tmp_path)
+    slug_dir.mkdir(parents=True)
+    (slug_dir / "sess-live.jsonl").write_text("{}\n", encoding="utf-8")
+
+    # A pinned Codex binding -- must win despite being tried second.
+    codex_transcript = tmp_path / "codex-sess.jsonl"
+    codex_transcript.write_text("", encoding="utf-8")
+    write_binding(
+        binding_path_for_agent(tmp_path / ".synapse", "codex"),
+        SessionBinding(
+            agent_session_id="codex-sess-1",
+            shared_id="team-standup",
+            contributor="akhil",
+            agent="codex",
+            transcript_path=str(codex_transcript),
+            pinned_at=datetime.now(timezone.utc),
+        ),
+    )
+
+    config, loop, transcript, _, source, _ = cli._build(_ns(transcript=None))
+
+    assert source == "pinned"
+    assert isinstance(loop.source, CodexSource)
+    assert loop.binding.agent == "codex"
+    assert transcript == codex_transcript
+
+
+def test_build_with_explicit_transcript_honors_the_agent_flag(tmp_path) -> None:
+    """MAJOR regression pin: `--agent codex --transcript <rollout>` used to
+    hard-set DEFAULT_AGENT (claude-code) in the --transcript branch and never
+    look at args.agent at all -- ClaudeCodeSource would then silently skip
+    every line of a Codex rollout as bookkeeping (zero events, no error).
+    Both flags live on the same `run` subparser, so this is a supported
+    combination an operator debugging the demo is likely to type."""
+    from synapse_worker.sources.codex import CodexSource
+
+    codex_transcript = tmp_path / "some-codex-rollout.jsonl"
+    codex_transcript.write_text("", encoding="utf-8")
+
+    config, loop, transcript, _, source, _ = cli._build(
+        _ns(transcript=str(codex_transcript), agent="codex")
+    )
+
+    assert isinstance(loop.source, CodexSource)
+    assert loop.binding.agent == "codex"
+    assert transcript == codex_transcript
+    assert source == "explicit --transcript"
+
+
+def test_build_with_explicit_transcript_and_no_agent_flag_defaults_to_claude_code(
+    tmp_path,
+) -> None:
+    """The un-widened case must keep behaving exactly as before: an explicit
+    --transcript with no --agent at all still has no dialect to infer from,
+    so it stays DEFAULT_AGENT."""
+    from synapse_worker.sources.claude_code import ClaudeCodeSource
+
+    transcript_path = tmp_path / "sess.jsonl"
+    transcript_path.write_text("", encoding="utf-8")
+
+    config, loop, transcript, _, source, _ = cli._build(_ns(transcript=str(transcript_path)))
+
+    assert isinstance(loop.source, ClaudeCodeSource)
+    assert loop.binding.agent == "claude-code"
+
+
+async def test_run_reports_other_agents_bindings_it_is_not_following(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """MAJOR regression pin: `join` can bind two agents (claude-code and
+    codex) in one call, but `run` follows exactly one Source per process.
+    Nothing previously told the operator the second binding sits there
+    unfollowed after a `join` that printed both as bound."""
+    from synapse_contracts import SessionBinding, write_binding
+    from synapse_worker.discovery import binding_path_for_agent
+
+    monkeypatch.setattr(cli, "check_canary", _async(PASSING_CANARY))
+
+    claude_transcript = tmp_path / "cc.jsonl"
+    _write_transcript(claude_transcript)
+    codex_transcript = tmp_path / "codex.jsonl"
+    _write_transcript(codex_transcript)
+
+    write_binding(
+        binding_path_for_agent(tmp_path / ".synapse", "claude-code"),
+        SessionBinding(
+            agent_session_id="cc-sess", shared_id="team-standup", contributor="akhil",
+            agent="claude-code", transcript_path=str(claude_transcript),
+            pinned_at=datetime.now(timezone.utc),
+        ),
+    )
+    write_binding(
+        binding_path_for_agent(tmp_path / ".synapse", "codex"),
+        SessionBinding(
+            agent_session_id="codex-sess", shared_id="team-standup", contributor="akhil",
+            agent="codex", transcript_path=str(codex_transcript),
+            pinned_at=datetime.now(timezone.utc),
+        ),
+    )
+
+    exit_code = await cli.cmd_run(_ns(transcript=None, interval=0.01, ticks=1, from_start=False))
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "selection        pinned" in out
+    assert "also bound: codex" in out
+
+
+async def test_run_says_nothing_when_no_other_agent_is_bound(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """The common single-agent case must not print a spurious note."""
+    transcript = tmp_path / "sess.jsonl"
+    _write_transcript(transcript)
+    monkeypatch.setattr(cli, "check_canary", _async(PASSING_CANARY))
+
+    exit_code = await cli.cmd_run(
+        _ns(transcript=str(transcript), interval=0.01, ticks=1, from_start=False)
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "also bound" not in out
 
 
 async def test_run_swallows_keyboard_interrupt_and_still_shuts_down(
@@ -243,7 +485,7 @@ async def test_run_swallows_keyboard_interrupt_and_still_shuts_down(
 
 
 async def test_run_with_no_transcript_anywhere_exits_cleanly(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(cli, "resolve_transcript", lambda cwd, state_dir: None)
+    monkeypatch.setattr(cli, "resolve_transcript", lambda cwd, state_dir, *, agent=None: None)
 
     with pytest.raises(SystemExit) as excinfo:
         await cli.cmd_run(_ns(transcript=None, interval=0.01, ticks=1, from_start=False))
@@ -364,7 +606,22 @@ async def test_run_wraps_the_distiller_provider_when_debug_enabled(
 # status
 # ---------------------------------------------------------------------------
 
-async def test_status_with_nothing_joined_and_no_transcripts(capsys) -> None:
+def _isolate_agent_roots(monkeypatch, tmp_path) -> None:
+    """`cmd_status` now walks BOTH registered agents' finders directly (not
+    only through a mockable `resolve_transcript`), so every status test needs
+    an isolated CLAUDE_PROJECTS/CODEX_SESSIONS the same way the join/discovery
+    tests already do -- otherwise it depends on whether the machine running
+    the suite happens to have a real `~/.codex/sessions` (join_session's own
+    module docstring documents exactly this hazard for the analogous loop)."""
+    import synapse_worker.discovery as discovery
+
+    monkeypatch.setattr(discovery, "CLAUDE_PROJECTS", tmp_path / "no-claude-projects")
+    monkeypatch.setattr(discovery, "CODEX_SESSIONS", tmp_path / "no-codex-sessions")
+
+
+async def test_status_with_nothing_joined_and_no_transcripts(tmp_path, monkeypatch, capsys) -> None:
+    _isolate_agent_roots(monkeypatch, tmp_path)
+
     exit_code = await cli.cmd_status(_ns())
 
     out = capsys.readouterr().out
@@ -376,6 +633,7 @@ async def test_status_with_nothing_joined_and_no_transcripts(capsys) -> None:
 async def test_status_reports_a_joined_session(tmp_path, monkeypatch, capsys) -> None:
     from synapse_contracts import LocalBinding
 
+    _isolate_agent_roots(monkeypatch, tmp_path)
     transcript = tmp_path / "sess.jsonl"
     _write_transcript(transcript)
     joined = LocalBinding(
@@ -384,8 +642,16 @@ async def test_status_reports_a_joined_session(tmp_path, monkeypatch, capsys) ->
     )
     monkeypatch.setattr(
         cli, "resolve_transcript",
-        lambda cwd, state_dir: ResolvedTranscript(
-            path=transcript, agent_session_id="as-joined", source="pinned", local_binding=joined
+        # cmd_status now tries every registered agent -- only claude-code
+        # resolves to the pinned binding here, so codex must fall through to
+        # None the same way it would for a real, un-joined product.
+        lambda cwd, state_dir, *, agent=None: (
+            ResolvedTranscript(
+                path=transcript, agent_session_id="as-joined", source="pinned",
+                local_binding=joined,
+            )
+            if agent == "claude-code"
+            else None
         ),
     )
 
@@ -397,11 +663,47 @@ async def test_status_reports_a_joined_session(tmp_path, monkeypatch, capsys) ->
     assert "as-joined" in out
 
 
+async def test_status_reports_a_codex_only_joined_session(tmp_path, monkeypatch, capsys) -> None:
+    """MAJOR regression pin: a Codex-only join (Claude Code never joined or
+    live) must not make `status` print 'joined session none' -- that directly
+    contradicts what `join` itself just reported."""
+    from synapse_contracts import LocalBinding
+
+    _isolate_agent_roots(monkeypatch, tmp_path)
+    transcript = tmp_path / "codex-sess.jsonl"
+    _write_transcript(transcript)
+    joined = LocalBinding(
+        agent_session_id="codex-joined", shared_id="team-standup",
+        contributor="akhil", agent="codex",
+    )
+    monkeypatch.setattr(
+        cli, "resolve_transcript",
+        lambda cwd, state_dir, *, agent=None: (
+            ResolvedTranscript(
+                path=transcript, agent_session_id="codex-joined", source="pinned",
+                local_binding=joined,
+            )
+            if agent == "codex"
+            else None
+        ),
+    )
+
+    exit_code = await cli.cmd_status(_ns())
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "joined session   none" not in out
+    assert "[codex]" in out
+    assert "team-standup" in out
+    assert "codex-joined" in out
+
+
 async def test_status_lists_detected_transcripts_with_liveness(
     tmp_path, monkeypatch, capsys
 ) -> None:
     import synapse_worker.discovery as discovery
 
+    _isolate_agent_roots(monkeypatch, tmp_path)
     fake_projects = tmp_path / "claude-projects"
     slug_dir = fake_projects / discovery.project_slug(tmp_path)
     slug_dir.mkdir(parents=True)
@@ -414,12 +716,14 @@ async def test_status_lists_detected_transcripts_with_liveness(
     assert exit_code == 0
     assert "sess-live.jsonl" in out
     assert "[LIVE]" in out
+    assert "[claude-code]" in out
 
 
-async def test_status_reports_unsent_findings(tmp_path, capsys) -> None:
+async def test_status_reports_unsent_findings(tmp_path, monkeypatch, capsys) -> None:
     from synapse_contracts import Attribution, Finding, FindingType
     from synapse_worker.producer import FileSink, Producer
 
+    _isolate_agent_roots(monkeypatch, tmp_path)
     producer = Producer(tmp_path / ".synapse" / "wal", FileSink(tmp_path / "upstream.jsonl"))
     producer.record([
         Finding(

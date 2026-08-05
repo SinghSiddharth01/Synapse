@@ -37,10 +37,10 @@ from synapse_distiller.guards import PromptDropError
 
 from synapse_worker.compaction import compact
 from synapse_worker.discovery import binding_path_for_agent
+from synapse_worker.discovery import AGENT_REGISTRY
 from synapse_worker.follower import TranscriptFollower
 from synapse_worker.producer import Producer
 from synapse_worker.segmenter import Segmenter
-from synapse_worker.sources.claude_code import ClaudeCodeSource
 from synapse_worker.stats import StatsBuffer
 from synapse_worker.triage import triage
 from synapse_worker.triage_log import TriageLog
@@ -99,6 +99,7 @@ class WorkerLoop:
         state_dir: Path,
         budget_tokens: int,
         *,
+        agent: str = "claude-code",
         idle_flush_seconds: float = 120.0,
         triage_enabled: bool = True,
         stats: StatsBuffer | None = None,
@@ -135,9 +136,16 @@ class WorkerLoop:
         self.state_dir = Path(state_dir)
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.stats = stats
+        self.agent = agent
 
         self.follower = TranscriptFollower(self.state_dir / "follow-state.json")
-        self.source = ClaudeCodeSource()
+        # Dispatched through AGENT_REGISTRY rather than hard-coded, so a
+        # transcript resolved (or explicitly requested) for a registered
+        # agent other than Claude Code is actually parsed by ITS adapter —
+        # without this, a bindings/codex.json produced by `join` would still
+        # be fed to ClaudeCodeSource, which yields zero events on Codex's
+        # rollout lines (its own `type` values are never "user"/"assistant").
+        self.source = AGENT_REGISTRY[agent].source_class()
         self.segmenter = Segmenter(
             budget_tokens=budget_tokens,
             agent_session_id=binding.agent_session_id,
@@ -176,7 +184,20 @@ class WorkerLoop:
 
         Without this, attaching to a conversation in progress would re-distil its
         entire history — hours of NPU time on a multi-megabyte transcript.
+
+        `_prime_source_from_header` runs first for a reason that has nothing to
+        do with NPU cost: some Source adapters carry state across lines that is
+        only ever written once, near the top of the file — `CodexSource`'s
+        `session_meta` is the concrete case, unlike Claude Code, which repeats
+        `cwd`/`gitBranch` on every record. Jumping straight to EOF, as this
+        method's own name says to do, would mean that state is never seen, and
+        every event for the rest of the run would silently carry
+        `agent_session_id=""`, `cwd=None`, `git_branch=None`. Priming first
+        means the Source ends the jump in the same state it would have reached
+        by reading from line 1 — without turning any of that history into
+        AgentEvents, since only parse_line's side effects are wanted here.
         """
+        self._prime_source_from_header()
         self.follower.start_at_end(self.transcript)
         self.follower.save()
 
@@ -251,6 +272,20 @@ class WorkerLoop:
                 chars_saved=saved,
             )
         return compacted
+    def _prime_source_from_header(self) -> None:
+        """Feed every line already in the transcript through `self.source`,
+        discarding the events. Cheap: this is JSON parsing, not distillation —
+        the expensive step this whole module exists to avoid re-paying for.
+        """
+        try:
+            with self.transcript.open("r", encoding="utf-8", errors="replace") as handle:
+                for line in handle:
+                    self.source.parse_line(line)
+        except OSError:
+            # No transcript yet, or it disappeared between resolution and
+            # attach — attach_at_end's own start_at_end call handles that the
+            # same way; nothing to prime from.
+            return
 
     async def tick(self) -> TickResult:
         result = TickResult()
