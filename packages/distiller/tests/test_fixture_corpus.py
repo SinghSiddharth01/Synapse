@@ -1,5 +1,6 @@
 """Shape tests for every committed fixture. Prose quality is co-review's job."""
 import json
+import re
 
 import pytest
 
@@ -78,6 +79,41 @@ def test_seg006_seg007_have_faithful_compression_goldens():
             f"an empty golden would encode a durability judgment the "
             f"distiller was explicitly relieved of"
         )
+
+
+_TRACEBACK_ERROR_RE = re.compile(r"\b[A-Za-z]+Error\b\s*:|Traceback \(most recent call last\)")
+_RESOLVED_SUMMARY_LINE_RE = re.compile(r"\bfound \d+ errors?\s*\(\d+ fixed,\s*0 remaining\)", re.I)
+
+
+def test_seg004_and_seg006_are_distinguishable_by_traceback_vs_summary_line():
+    """seg-004 (triage.json: skip) and seg-006 (triage.json: keep) are both
+    'an error signal that resolved fully within the segment' — a naive
+    resolved-vs-unresolved triage rule would skip both, breaking seg-006's
+    keep. The two ARE distinguishable by a generalizable, non-fixture-specific
+    feature: seg-004's tool_result is a linter's own aggregate summary line
+    with nothing outstanding; seg-006's is an actual exception traceback. A
+    triage rule keyed on "traceback present" (unconditional keep, recall-
+    tuned) overriding "resolved-count summary line" (skip) satisfies both
+    rows of fixtures/triage.json. This test pins that the two fixtures still
+    carry that distinguishing shape, so the expectation map stays
+    satisfiable for E2's triage rule — see fixtures/triage.json's notes."""
+    seg004_tool_text = " ".join(
+        e.content for e in load_segment("seg-004").events if e.kind == "tool_result"
+    )
+    seg006_tool_text = " ".join(
+        e.content for e in load_segment("seg-006").events if e.kind == "tool_result"
+    )
+    assert _RESOLVED_SUMMARY_LINE_RE.search(seg004_tool_text), (
+        "seg-004 must contain a resolved lint-summary line — that is its skip signal"
+    )
+    assert not _TRACEBACK_ERROR_RE.search(seg004_tool_text), (
+        "seg-004 must contain no exception traceback, or a traceback-keyed "
+        "keep rule would collide with its skip expectation"
+    )
+    assert _TRACEBACK_ERROR_RE.search(seg006_tool_text), (
+        "seg-006 must contain an exception traceback — the signal that "
+        "overrides recall-tuned skip and keeps it distinct from seg-004"
+    )
 
 
 def test_triage_expectation_map_covers_the_whole_corpus():
