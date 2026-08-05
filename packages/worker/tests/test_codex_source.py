@@ -175,11 +175,53 @@ def test_function_call_output_content_items_are_flattened() -> None:
 
 def test_bookkeeping_line_types_are_skipped() -> None:
     """event_msg duplicates response_item's content for Codex's own TUI
-    history; parsing it too would double every turn."""
+    history; parsing it too would double every turn. `compacted` is NOT
+    bookkeeping -- see test_compacted_line_yields_an_assistant_text_event --
+    so it is deliberately excluded from this list."""
     source = CodexSource()
-    for line_type in ("event_msg", "turn_context", "world_state", "compacted", "inter_agent_communication"):
+    for line_type in ("event_msg", "turn_context", "world_state", "inter_agent_communication"):
         assert source.parse_line(rollout_line(line_type, {"type": "user_message", "message": "x"})) == []
-    assert source.skipped_bookkeeping == 5
+    assert source.skipped_bookkeeping == 4
+
+
+def test_compacted_line_yields_an_assistant_text_event() -> None:
+    """RolloutItem::Compacted carries the compaction summary the agent wrote
+    -- the only place that text is persisted on disk (CompactedItem's own
+    `From<CompactedItem> for ResponseItem` is in-memory history
+    reconstruction, never a second persisted line). Plan A.3: 'Compaction
+    summaries the agent writes are ingested as events -- they are
+    high-density signal, not noise.'"""
+    source = CodexSource()
+    source.parse_line(session_meta(session_id="sess-9", cwd="/work", branch="perf"))
+
+    events = source.parse_line(
+        rollout_line(
+            "compacted",
+            {
+                "message": "Summary: refactored the fetch client to retry on 5xx.",
+                "window_number": 2,
+                "window_id": "0199a1b2-0000-7000-8000-000000000001",
+            },
+        )
+    )
+
+    (event,) = events
+    assert event.role == "assistant"
+    assert event.kind == "text"
+    assert event.content == "Summary: refactored the fetch client to retry on 5xx."
+    assert event.agent_session_id == "sess-9"
+    assert event.cwd == "/work"
+    assert event.git_branch == "perf"
+    assert source.skipped_bookkeeping == 0
+
+
+def test_compacted_line_with_empty_message_produces_no_event() -> None:
+    source = CodexSource()
+    source.parse_line(session_meta())
+
+    events = source.parse_line(rollout_line("compacted", {"message": "   "}))
+
+    assert events == []
 
 
 def test_unknown_response_item_type_is_skipped_not_raised() -> None:

@@ -20,7 +20,7 @@ Each line is one adjacently-tagged `RolloutLine`:
      "type": <tag>, "payload": {...}}
 
 `type` is one of: session_meta, response_item, event_msg, turn_context,
-world_state, compacted, inter_agent_communication(_metadata). Only two are
+world_state, compacted, inter_agent_communication(_metadata). Three are
 handled here:
 
 * `session_meta` — once, near the top of the file. `payload.cwd` and
@@ -39,6 +39,23 @@ handled here:
   `custom_tool_call`, `web_search_call`, `image_generation_call`, ...) is
   logged and skipped, same policy `ClaudeCodeSource` applies to an unknown
   content-block type.
+* `compacted` — a `RolloutItem::Compacted(CompactedItem)` line, NOT a
+  `response_item` payload type (`protocol.rs`'s `RolloutItem` enum has it as
+  a sibling tag to `response_item`, not a variant inside it). `payload.
+  message` is the compaction summary the agent itself wrote, replacing
+  everything compacted away. Plan A.3 is
+  explicit that this is ingested, not dropped: "Compaction summaries the
+  agent writes are ingested as events — they are high-density signal, not
+  noise." Codex's own `impl From<CompactedItem> for ResponseItem`
+  (`protocol.rs`) treats the summary as assistant output — `role: "assistant"`,
+  wrapped in `ContentItem::OutputText` — for exactly this reason (it is what
+  gets spliced back into the model's own history in place of what was
+  compacted); this adapter mirrors that and stamps it `kind="text"`,
+  `role="assistant"`. That `From` impl is in-memory history reconstruction
+  only, never itself persisted as a second `response_item` line — the
+  `compacted` line is the *only* place this text exists on disk, which is
+  why skipping it (the adapter's original behavior) was a real data loss,
+  not a bookkeeping skip.
 
 `event_msg` is deliberately NOT parsed even though it is real content
 (`UserMessageEvent`/`AgentMessageEvent`): Codex persists it alongside
@@ -71,6 +88,7 @@ AGENT_NAME = "codex"
 
 SESSION_META_TYPE = "session_meta"
 RESPONSE_ITEM_TYPE = "response_item"
+COMPACTED_TYPE = "compacted"
 
 # response_item payload "type" values mapped onto AgentEvent.kind — the four
 # that have a home in the contract. Everything else is logged and skipped.
@@ -141,6 +159,13 @@ class CodexSource:
                 self._ingest_session_meta(payload)
             return []
 
+        if line_type == COMPACTED_TYPE:
+            if not isinstance(payload, dict):
+                return []
+            ts = _parse_ts(record.get("timestamp"))
+            event = self._compacted_to_event(payload, ts)
+            return [event] if event is not None else []
+
         if line_type != RESPONSE_ITEM_TYPE:
             self.skipped_bookkeeping += 1
             return []
@@ -164,6 +189,25 @@ class CodexSource:
             branch = git.get("branch")
             if branch is not None:
                 self._git_branch = str(branch)
+
+    def _compacted_to_event(self, payload: dict[str, Any], ts: datetime) -> AgentEvent | None:
+        """`RolloutItem::Compacted` — the compaction summary the agent wrote,
+        the only place that text is persisted (see module docstring). Plan
+        A.3: high-density signal, ingested like any other event, not
+        bookkeeping."""
+        body = str(payload.get("message") or "")
+        if not body.strip():
+            return None
+        return AgentEvent(
+            role="assistant",  # type: ignore[arg-type]
+            kind="text",  # type: ignore[arg-type]
+            content=body,
+            tool_name=None,
+            ts=ts,
+            agent_session_id=self._session_id,
+            cwd=self._cwd,
+            git_branch=self._git_branch,
+        )
 
     def _response_item_to_event(self, payload: dict[str, Any], ts: datetime) -> AgentEvent | None:
         item_type = payload.get("type")

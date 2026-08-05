@@ -97,12 +97,40 @@ Code's adapter already produces:
 | `function_call` | `tool_use` | `payload.name`, `payload.arguments` (a **JSON-encoded string**, not a parsed object — the Responses API convention, noted directly in the struct's own comment), `payload.call_id` |
 | `function_call_output` | `tool_result` | `payload.call_id`, `payload.output` — encoded as **either a plain string or an array of content items**, confirmed by `FunctionCallOutputPayload`'s hand-written `Serialize`/`Deserialize` ([models.rs:1999-2023](https://github.com/openai/codex/blob/fa5d5ae047d1891a2f816c22d9ed926a0728ba47/codex-rs/protocol/src/models.rs#L1999-L2023)) and its own round-trip tests ([models.rs:3247-3300](https://github.com/openai/codex/blob/fa5d5ae047d1891a2f816c22d9ed926a0728ba47/codex-rs/protocol/src/models.rs#L3247-L3300)) — the exact same "string or block list" shape Claude Code's `tool_result.content` already has |
 
+### `compacted` — NOT a `response_item` payload type
+
+A `RolloutItem::Compacted(CompactedItem)` line
+([protocol.rs:3216](https://github.com/openai/codex/blob/fa5d5ae047d1891a2f816c22d9ed926a0728ba47/codex-rs/protocol/src/protocol.rs#L3216),
+struct at [protocol.rs:3241-3257](https://github.com/openai/codex/blob/fa5d5ae047d1891a2f816c22d9ed926a0728ba47/codex-rs/protocol/src/protocol.rs#L3241-L3257))
+— a sibling tag to `response_item` at the top level, not something nested
+inside it. (Confusingly, there is *also* a same-adjacent-sounding but
+different, still-skipped `response_item` payload type literally named
+`"compaction"` — [models.rs:1021](https://github.com/openai/codex/blob/fa5d5ae047d1891a2f816c22d9ed926a0728ba47/codex-rs/protocol/src/models.rs#L1021)
+— which this adapter does not model; the two are unrelated Rust items that
+happen to share a root word.) `payload.message` is the compaction summary
+text the agent itself wrote, and Codex persists it via
+`persist_rollout_items(&[RolloutItem::Compacted(compacted_item)])`
+([`replace_compacted_history`, session/mod.rs:3237-3268](https://github.com/openai/codex/blob/fa5d5ae047d1891a2f816c22d9ed926a0728ba47/codex-rs/core/src/session/mod.rs#L3237-L3268))
+— that `compacted` line is the *only* place the summary is ever written to
+disk. Codex's own `impl From<CompactedItem> for ResponseItem`
+([protocol.rs:3259-3271](https://github.com/openai/codex/blob/fa5d5ae047d1891a2f816c22d9ed926a0728ba47/codex-rs/protocol/src/protocol.rs#L3259-L3271))
+turns it into an assistant `OutputText` message when splicing it back into
+in-memory model history — that conversion is never itself persisted as a
+second `response_item` line, so replaying only `response_item` lines (as
+this adapter otherwise does — see "Deliberately not modelled: `event_msg`"
+below) would silently lose every compaction summary. Plan A.3 is explicit
+that this must not happen: "Compaction summaries the agent writes are
+ingested as events — they are high-density signal, not noise." This adapter
+maps `compacted` onto `AgentEvent(kind="text", role="assistant")`, mirroring
+Codex's own `From<CompactedItem>` role choice.
+
 Every other `response_item` variant (`local_shell_call`,
 `custom_tool_call(_output)`, `tool_search_call/output`, `web_search_call`,
-`image_generation_call`, `compaction`, ...) is logged and skipped — same
-policy `ClaudeCodeSource` already applies to an unknown content-block type.
-Codex's format is under active, fast-moving development (a community
-session-log viewer, [PixelPaw-Labs/codex-trace](https://github.com/PixelPaw-Labs/codex-trace),
+`image_generation_call`, `compaction`, `context_compaction`, ...) is logged
+and skipped — same policy
+`ClaudeCodeSource` already applies to an unknown content-block type. Codex's
+format is under active, fast-moving development (a community session-log
+viewer, [PixelPaw-Labs/codex-trace](https://github.com/PixelPaw-Labs/codex-trace),
 documents "new (≥0.44), mid, and oldest (2025/08)" session-metadata shapes
 coexisting across installed CLI versions — corroborated first-hand by the
 `SessionMetaLine` back-fill above, which exists specifically to keep reading
