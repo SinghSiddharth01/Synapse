@@ -45,7 +45,7 @@ The "storage seam" main advertises **is not a seam**. Synthesis applies every ve
 
 That is the single mechanical blocker for any swap, and it decides the order of work (§8).
 
-Two more that bear directly on the integration: `memory_version` means **merges completed**, is asserted as such in a dozen places, and collides head-on with `Log.version = len(entries)`, which advances on every `TopicAssigned` and every inert resend. And — independent of the branch entirely — the documented restart-recovery path is *impossible today*: `POST /v1/sessions` mints a server-side random `sh-…`, so after a restart every resync POST 404s forever while the Relay logs "Service unavailable" (`relay.py:192` catches `httpx.HTTPError`, which includes `HTTPStatusError`) and retries forever.
+Two more that bear directly on the integration: `memory_version` means **verdict rounds applied** ⟨CORRECTION, corrected 2026-08-05: this sentence previously said "merges completed"; `synthesis.py:273` bumps unconditionally, merges or not, and `test_full_flow_push_watermark_query` pins it⟩, is asserted as such in a dozen places, and collides head-on with `Log.version = len(entries)`, which advances on every `TopicAssigned` and every inert resend. And — independent of the branch entirely — the documented restart-recovery path is *impossible today*: `POST /v1/sessions` mints a server-side random `sh-…`, so after a restart every resync POST 404s forever while the Relay logs "Service unavailable" (`relay.py:192` catches `httpx.HTTPError`, which includes `HTTPStatusError`) and retries forever.
 
 ### 2.3 ADR 0004's bug — adjudicated
 
@@ -87,7 +87,8 @@ One service process. Main's registry on top; the branch's Shared Memory undernea
  │ ┌────────────▼────────────────────────────┼─────────────────▼────────────┐ │
  │ │  InMemoryStore — the registry            │        KEPT FROM main       │ │
  │ │    sessions · members · SessionContext · last_seen                     │ │
- │ │    memory_version = merges completed   (NOT log length — §4.4)         │ │
+ │ │    memory_version = verdict rounds applied  ⟨CORRECTION, corrected 2026-08-05: not merges completed⟩ │ │
+ │ │      (NOT log length — §4.4)                                            │ │
  │ │    supersede() · mark_trivial() · set_context()          NEW (§4.1)    │ │
  │ │    get/all_findings/retrievable → Option A projection    NEW (§4.3)    │ │
  │ │                                          │                             │ │
@@ -177,7 +178,7 @@ Free consequence worth naming: a projected copy is a *copy*, so any surviving mu
 
 | Counter | Meaning | Who reads it |
 |---|---|---|
-| `SessionContext.memory_version` | **merges completed** — bumped once, at the end of a fully-applied verdict | `/findings`'s `synthesized`, `/synthesize`'s `synthesized`, `/watermark`'s `version` and `new_since`, `last_seen` |
+| `SessionContext.memory_version` | **verdict rounds applied** — bumped once at the end of every structurally-valid verdict, merges or not ⟨CORRECTION, corrected 2026-08-05: this row previously read "merges completed"⟩ | `/findings`'s `synthesized`, `/synthesize`'s `synthesized`, `/watermark`'s `version` and `new_since`, `last_seen` |
 | `Log.version` | entry count | fold-cache invalidation inside `SharedMemory`. **Never leaves the store.** |
 
 `Log.version`'s docstring claims it *is* `memory_version` for the watermark. It is not, and taking that would make `synthesized` True on every push including a pure replay and turn `new_since` into a count of log entries (2+ per finding). Correct the docstring during the merge; keep `bump_version` exactly as main has it.

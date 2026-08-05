@@ -14,9 +14,15 @@ from starlette.routing import Route
 from synapse_contracts import Finding
 from synapse_providers import ModelProvider
 
+from synapse_service.lanes import DEFAULT_TOP_K
 from synapse_service.retrieval import query_findings, visible_to
 from synapse_service.store import InMemoryStore
 from synapse_service.synthesis import Synthesizer
+
+# How many findings reach ONE retrieval prompt, regardless of log size. The
+# route used to pass store.retrievable(sid) -- the entire visible log --
+# growing linearly until an 8B could not read it.
+TOP_K = DEFAULT_TOP_K
 
 
 def _missing(body: dict, *required: str) -> JSONResponse | None:
@@ -45,9 +51,13 @@ def build_app(provider: ModelProvider) -> Starlette:
         body = await request.json()
         if (err := _missing(body, "purpose", "created_by")) is not None:
             return err
+        requested = body.get("shared_id")
+        existed = requested is not None and store.get_session(requested) is not None
         session = store.create_session(purpose=body["purpose"],
-                                       created_by=body["created_by"])
-        return JSONResponse(session.model_dump(mode="json"), status_code=201)
+                                       created_by=body["created_by"],
+                                       shared_id=requested)
+        return JSONResponse(session.model_dump(mode="json"),
+                            status_code=200 if existed else 201)
 
     async def add_member(request: Request) -> JSONResponse:
         sid = request.path_params["sid"]
@@ -75,9 +85,18 @@ def build_app(provider: ModelProvider) -> Starlette:
             # `findings` is passed through (not []) so synthesis knows which
             # ids were just pushed and can force them into its candidate
             # window regardless of CANDIDATE_WINDOW (see synthesis.merge's
-            # docstring) -- store.upsert is idempotent, so merge()'s own
-            # upsert of the same list is a harmless no-op. Replays
-            # (accepted == 0) never reach the model at all.
+            # docstring). Replays (accepted == 0) never reach the model at all.
+            #
+            # ⟨CORRECTED 2026-08-05, Plan E Task E.6⟩ This comment used to say
+            # "store.upsert is idempotent, so merge()'s own upsert of the same
+            # list is a harmless no-op". Idempotent in the VIEW, yes. Not free
+            # in the LOG: `SharedMemory.append` records a resend on purpose, so
+            # merge()'s second upsert writes one more FindingAppended per
+            # finding and one push of N costs 3N entries. Pinned by
+            # test_a_second_upsert_of_the_same_batch_appends_without_reindexing.
+            # A THIRD upsert would cost another N. Removing merge()'s is the
+            # real fix and needs all 19 direct call sites in test_synthesis.py
+            # to upsert first -- post-demo.
             await synthesizer.merge(store, sid, findings)
             # A provider outage, an exhausted retry, or a verdict that
             # fails structural validation all make merge() return with
@@ -153,11 +172,26 @@ def build_app(provider: ModelProvider) -> Starlette:
         conflicts = sum(1 for c in ctx.conflicts
                         if c.finding_a in visible_ids or c.finding_b in visible_ids)
 
+        # `topics`, `purpose` and `members` are CONTENT fields and join
+        # by_type/conflicts under the same suppression rule. `version` and
+        # `new_since` are CHANGE fields and stay global -- they measure how
+        # much the Shared Memory moved, not whether that movement is visible
+        # to this asker. That split is deliberate (E3's round-2 adjudication)
+        # and this task does not touch it.
+        #
+        # `version` is SessionContext.memory_version: VERDICT ROUNDS APPLIED,
+        # not merges completed and not Log.version.
+        topics = store.topic_summaries(sid, only=frozenset(visible_ids))
+
         return JSONResponse({
             "version": ctx.memory_version,
             "new_since": ctx.memory_version - store.last_seen(sid, agent_session),
             "by_type": dict(by_type),
             "conflicts": conflicts,
+            "topics": [{"id": t.topic_id, "size": t.size, "label": t.label}
+                       for t in topics],
+            "purpose": ctx.purpose,
+            "members": list(store.get_session(sid).members),
         })
 
     async def query(request: Request) -> JSONResponse:
@@ -167,17 +201,45 @@ def build_app(provider: ModelProvider) -> Starlette:
         body = await request.json()
         if (err := _missing(body, "query")) is not None:
             return err
+        agent_session = body.get("agent_session", "")
+
+        # Invariant 3 at the lanes seam. `visible_to` stays the ONE definition
+        # of the rule (retrieval.py); here it computes what must be EXCLUDED
+        # from candidate selection, and query_findings still applies it again
+        # before the prompt. Applying an idempotent predicate twice is the
+        # belt; the definition living in one module is the braces.
+        #
+        # Suppression is a pure predicate over a Finding: an O(N) Python loop
+        # with no model and no prompt cost. What must be bounded is the
+        # PROMPT, not the loop.
+        visible = store.retrievable(sid)
+        allowed = visible_to(visible, agent_session)
+
+        if len(allowed) <= TOP_K:
+            # THE BYPASS. Everything the asker may see already fits in one
+            # prompt, so selecting a subset of it can only lose recall -- and
+            # the selectors available here (BM25, symbol overlap, a
+            # HashingEmbedder with no paraphrase signal) are weaker at this
+            # scale than the 8B reading all of it. Byte-identical to what this
+            # route did before lanes existed. Above TOP_K the lanes are the
+            # only way the prompt stays bounded, and they run.
+            candidates = allowed
+        else:
+            suppressed = frozenset(f.id for f in visible) - {f.id for f in allowed}
+            cands = store.candidates(sid, body["query"], top_k=TOP_K, exclude=suppressed)
+            candidates = [c.finding for c in cands.candidates]
+
         ranked = await query_findings(
             provider,
             context=store.get_context(sid),
-            candidates=store.retrievable(sid),          # the Log, never the prose
+            candidates=candidates,
             query=body["query"],
-            asking_agent_session=body.get("agent_session", ""),
+            asking_agent_session=agent_session,
         )
-        store.mark_seen(sid, body.get("agent_session", ""))
+        store.mark_seen(sid, agent_session)
         return JSONResponse({"findings": [f.model_dump(mode="json") for f in ranked]})
 
-    return Starlette(routes=[
+    app = Starlette(routes=[
         Route("/v1/sessions", create_session, methods=["POST"]),
         Route("/v1/sessions/{sid}/members", add_member, methods=["POST"]),
         Route("/v1/sessions/{sid}/findings", push_findings, methods=["POST"]),
@@ -185,3 +247,5 @@ def build_app(provider: ModelProvider) -> Starlette:
         Route("/v1/sessions/{sid}/watermark", watermark, methods=["GET"]),
         Route("/v1/sessions/{sid}/query", query, methods=["POST"]),
     ])
+    app.state.store = store          # test seam: no route reads it
+    return app

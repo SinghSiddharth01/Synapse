@@ -240,7 +240,7 @@ ADR 0004's Follow-up asks for this "at the ingest boundary rather than inside th
 
 | Counter | Meaning | Who reads it |
 |---|---|---|
-| `SessionContext.memory_version` | **merges completed** — bumped once, at the end of a fully-applied verdict | `/findings`'s `synthesized`, `/synthesize`'s `synthesized`, `/watermark`'s `version` and `new_since`, `last_seen` |
+| `SessionContext.memory_version` | **verdict rounds applied** — bumped once at the end of every structurally-valid verdict, merges or not ⟨CORRECTION, corrected 2026-08-05: this row previously read "merges completed"; `synthesis.py:273` bumps unconditionally and `test_full_flow_push_watermark_query` pins it⟩ | `/findings`'s `synthesized`, `/synthesize`'s `synthesized`, `/watermark`'s `version` and `new_since`, `last_seen` |
 | `Log.version` | entry count | fold-cache invalidation inside `SharedMemory`. **Never leaves the store.** |
 
 `Log.version`'s docstring claims it *is* `memory_version` for the watermark. Taking that would make `synthesized` True on every push including a pure replay, and turn `new_since` into a count of log entries (2+ per finding). `bump_version` stays exactly as `main` has it.
@@ -374,7 +374,7 @@ Recovery then reads, honestly:
 
 > A service restart loses the in-memory log. Every orchestrator resyncs its retained durable log into the **same** `shared_id`; findings land (first write of an id wins, by construction now); one `POST /v1/sessions/{sid}/synthesize` re-derives Working Memory, conflicts and merges. **What is recomputed, not restored:** synthesized findings get new ids, Working Memory and Conflicts are re-derived by a fresh 8B call and may differ, and any contributor who does not resync is gone entirely.
 
-**First failing tests:** `POST /v1/sessions` with a known `shared_id` returns 200 and the same session, not a second one; with an unknown `shared_id` creates it with that exact id; without one mints as today (201) · a 404 from `_post` is terminal — the Relay does not re-attempt it on the next `flush()` and logs it at warning · a 503 is still retried · `cmd_resync` into a fresh service converges to a synthesized state, asserted by `memory_version > 0` and the merged pair being absent from `retrievable` · **`test_full_log_replay_into_a_fresh_store_converges_with_the_original_stream` (`test_api.py:268`) still passes unchanged.**
+**First failing tests:** `POST /v1/sessions` with a known `shared_id` returns 200 and the same session, not a second one; with an unknown `shared_id` creates it with that exact id; without one mints as today (201) · ⟨CORRECTION, corrected 2026-08-05⟩ a 404 from `_post` is **retryable** — it means "the service restarted and no longer knows this session", which create-or-return makes recoverable, so the findings stay queued and flush themselves; only 400/422 are terminal. A 404 is logged at warning with its URL · a 503 is still retried · `cmd_resync` into a fresh service converges to a synthesized state, asserted by `memory_version > 0` and the merged pair being absent from `retrievable` · **`test_full_log_replay_into_a_fresh_store_converges_with_the_original_stream` (`test_api.py:268`) still passes unchanged.**
 
 **Exit:** the recovery path in `docs/STATE.md` and `relay.py`'s docstring say what the code actually does, including what is recomputed rather than restored.
 

@@ -18,10 +18,12 @@ class _RecordingProvider(FakeProvider):
     def __init__(self, scripts):
         super().__init__(scripts=scripts)
         self.seen: list[list[str]] = []
+        self.prompts: list[str] = []          # the RAW prompt body
 
     async def complete(self, messages, response_schema=None):
         listing = messages[-1]["content"]
         self.seen.append(re.findall(r"\[([^\]]+)\]", listing))
+        self.prompts.append(listing)
         return await super().complete(messages, response_schema)
 
 
@@ -370,7 +372,18 @@ async def test_the_window_still_bounds_established_candidates_not_in_this_push()
 
     seen = provider.seen[1]
     assert "new-1" in seen
-    assert len(seen) == CANDIDATE_WINDOW + 1              # capped: new-1 + CANDIDATE_WINDOW others
+    # Still BOUNDED: the fixed-cost property this window exists for. The exact
+    # count is now min(CANDIDATE_WINDOW, DEFAULT_TOP_K) + 1 rather than
+    # CANDIDATE_WINDOW + 1, because candidate selection is a lane lookup rather
+    # than a recency slice -- so the property is asserted, not the arithmetic.
+    assert len(seen) <= CANDIDATE_WINDOW + 1
+    assert len(seen) < len(old) + 1        # genuinely capped, not "it all fit"
+    # ...and not vacuously capped by returning nothing: the RECENT lane has a
+    # reserved floor of max(1, top_k // RESERVE_DIVISOR) == 2, so an unrelated
+    # query still brings established candidates back. `assert len(seen) <= N`
+    # alone would pass on an empty `others`, which is the failure this whole
+    # task is about, inverted.
+    assert len(seen) >= 2
 
 
 async def test_unknown_ids_from_the_model_are_ignored_not_fatal():
@@ -392,3 +405,214 @@ async def test_unknown_ids_from_the_model_are_ignored_not_fatal():
     merged = [f for f in store.all_findings(sid) if f.provenance == Provenance.SYNTHESIZED]
     assert len(merged) == 1 and merged[0].merged_from == ["f-005a-01"]
     assert ctx.memory_version == 1                                # merge() still completed
+
+
+async def test_a_merge_verdict_with_ALL_ghost_source_ids_lands_nothing():
+    """The `if not sources: continue` guard's own regression pin -- the
+    sibling above (`..._are_ignored_not_fatal`) covers one-valid-plus-one-
+    ghost, which still has a live source and so never exercises the empty
+    branch. Delete the `continue` (fall through with `sources == []`) and
+    this landed a phantom `Finding(attributions=[], merged_from=[])`:
+    unattributed, untraceable to any Contributor, and -- because
+    `retrieval.visible_to`'s suppression guard is `f.attributions and ...`
+    -- un-suppressible for every asker forever. Exactly the adr/0003
+    invented-finding failure mode, one `continue` away from Shared Memory."""
+    store = InMemoryStore()
+    sid = store.create_session(purpose="p", created_by="s").shared_id
+    script = {"working_memory": "wm",
+              "merges": [{"source_ids": ["f-GHOST-1", "f-GHOST-2"], "text": "invented",
+                         "type": "learning"}],
+              "trivial_ids": [], "conflicts": []}
+    ctx = await Synthesizer(FakeProvider(scripts=[script])).merge(store, sid, _pair())
+
+    merged = [f for f in store.all_findings(sid) if f.provenance == Provenance.SYNTHESIZED]
+    assert merged == []
+    assert ctx.memory_version == 1                                # verdict round still applied
+
+
+async def test_an_old_near_duplicate_outside_the_last_twenty_is_a_merge_candidate():
+    """THE product claim. Impossible on main today: `others` was a pure
+    recency slice, so in a 40-finding session findings 1-20 were permanently
+    unmergeable against anything new and the ADR 0002 merge simply stopped
+    happening as the session grew."""
+    store = InMemoryStore()
+    sid = store.create_session(purpose="p", created_by="s").shared_id
+    noop = {"working_memory": "wm", "merges": [], "trivial_ids": [], "conflicts": []}
+    provider = _RecordingProvider(scripts=[noop, noop])
+    synth = Synthesizer(provider)
+
+    old = Finding(id="f-old", type="learning",
+                  text="the decode failure is a timing window above 40 ms",
+                  attributions=[Attribution(contributor="a", agent_session="as-1",
+                                            agent="claude-code")], ts=TS)
+    filler = [Finding(id=f"f-fill-{i:02d}", type="learning",
+                      text=f"unrelated note about the build script {i}",
+                      attributions=old.attributions, ts=TS)
+              for i in range(30)]
+    await synth.merge(store, sid, [old] + filler)          # round 1: everything lands
+
+    twin = Finding(id="f-twin", type="learning",
+                   text="the decode failure reproduces above 40 ms under load",
+                   attributions=old.attributions, ts=TS)
+    await synth.merge(store, sid, [twin])                   # round 2
+
+    assert "f-old" in provider.seen[1], (
+        "the near-duplicate that arrived 30 findings ago never reached the merge prompt")
+
+
+async def test_the_last_finding_of_a_large_push_still_gets_its_own_partners():
+    """The failure a dict-insertion-order cap reintroduces. Each candidates()
+    call returns up to DEFAULT_TOP_K = 14, so under `list(gathered.values())
+    [:CANDIDATE_WINDOW]` the FIRST TWO pushed findings fill all 20 slots and
+    pushed findings 3..N contribute nothing -- and a WAL backlog flush after
+    the worker was offline routinely pushes more than 20 at once.
+
+    Here the old partner matches only the LAST pushed finding."""
+    store = InMemoryStore()
+    sid = store.create_session(purpose="p", created_by="s").shared_id
+    noop = {"working_memory": "wm", "merges": [], "trivial_ids": [], "conflicts": []}
+    provider = _RecordingProvider(scripts=[noop, noop])
+    synth = Synthesizer(provider)
+    attrs = [Attribution(contributor="a", agent_session="as-1", agent="claude-code")]
+
+    established = Finding(id="f-partner", type="learning",
+                          text="qairt refuses to allocate the context binary above 2 GB",
+                          attributions=attrs, ts=TS)
+    noise = [Finding(id=f"f-noise-{i:02d}", type="learning",
+                     text=f"the build script sets flag {i}", attributions=attrs, ts=TS)
+             for i in range(25)]
+    await synth.merge(store, sid, [established] + noise)
+
+    pushed = [Finding(id=f"f-new-{i:02d}", type="learning",
+                      text=f"the build script sets a different flag {i}",
+                      attributions=attrs, ts=TS) for i in range(4)]
+    pushed.append(Finding(id="f-new-LAST", type="learning",
+                          text="qairt will not allocate a context binary that large",
+                          attributions=attrs, ts=TS))
+    await synth.merge(store, sid, pushed)
+
+    assert "f-partner" in provider.seen[1], (
+        "the last pushed finding's only merge partner never reached the prompt — "
+        "the union was capped by insertion order, not by relevance")
+
+
+async def test_a_multi_subsystem_backlog_flush_shares_the_window_by_rank_not_arrival():
+    """The `others = [f for _, f in sorted(best.values(), key=...)][:CANDIDATE_WINDOW]`
+    line's own comment: dict-insertion-order truncation "lets the first two
+    pushed findings fill all 20 slots, so findings 3..N of a backlog flush
+    contribute no partners at all." The sibling test above pins that a
+    SINGLE late pushed finding still finds its ONE partner -- but a dict with
+    fewer than CANDIDATE_WINDOW unique entries never actually gets truncated
+    at all, insertion order or not, so it cannot tell "capped by rank" apart
+    from "never capped." Reverting the sort to bare dict-insertion order
+    (`[f for _, f in best.values()][:CANDIDATE_WINDOW]`) leaves that test, and
+    the rest of the suite, green.
+
+    This scenario forces real truncation: 5 subsystems x 12 established
+    findings each (60, comfortably over CANDIDATE_WINDOW=20 on its own) and
+    one backlog flush of 5 pushed findings, one per subsystem, each
+    lexically anchored to only its own subsystem's vocabulary -- so each of
+    the 5 candidate() calls returns mostly same-subsystem matches, and the
+    union across all 5 easily exceeds 20 unique ids. Rank-sorted truncation
+    splits the 20-slot window close to evenly across subsystems regardless
+    of which pushed finding was processed first; insertion-order truncation
+    lets whichever subsystems' searches ran FIRST in the `for finding in
+    pushed:` loop fill the window before later ones get a look, starving
+    them down to as little as their own pushed finding and nothing else."""
+    store = InMemoryStore()
+    sid = store.create_session(purpose="p", created_by="s").shared_id
+    noop = {"working_memory": "wm", "merges": [], "trivial_ids": [], "conflicts": []}
+    provider = _RecordingProvider(scripts=[noop, noop])
+    synth = Synthesizer(provider)
+    attrs = [Attribution(contributor="a", agent_session="as-1", agent="claude-code")]
+    subsystems = ["pool", "tokenizer", "gateway", "decoder", "scheduler"]
+
+    established = [
+        Finding(id=f"f-{sub}-est-{i:02d}", type="learning",
+               text=f"the {sub} subsystem trips a fault when allocation attempt {i} "
+                    "exceeds its ceiling",
+               attributions=attrs, ts=TS)
+        for sub in subsystems for i in range(12)
+    ]
+    await synth.merge(store, sid, established)
+
+    pushed = [
+        Finding(id=f"f-{sub}-new", type="learning",
+               text=f"the {sub} subsystem trips a fault under sustained allocation pressure",
+               attributions=attrs, ts=TS)
+        for sub in subsystems
+    ]
+    await synth.merge(store, sid, pushed)
+
+    ids = provider.seen[1]
+    for sub in subsystems:
+        partners = sum(1 for i in ids if i.startswith(f"f-{sub}-est-"))
+        assert partners >= 3, (
+            f"subsystem {sub!r} got only {partners} established partner(s) in the merge "
+            f"prompt out of {len(ids)} total candidates — the 20-slot window was not "
+            "shared by rank across subsystems (candidate ids seen: " + ", ".join(ids) + ")")
+
+
+async def test_a_shared_symbol_is_marked_on_the_candidate_line_the_model_reads():
+    """The flagship mechanism, put in front of the model rather than only in
+    front of the ranker.
+
+    `Candidate.shared_symbols` is the branch's own strongest idea -- its
+    docstring calls a shared rare identifier "a strong, cheap hint that costs a
+    few tokens per line" -- and in this integration it reached NO prompt,
+    because synthesis rebuilds its own listing from `candidate.finding` and
+    throws the provenance away. A review called that a discarded design with no
+    decision recorded. This is the decision: the symbols ride along.
+
+    The marker uses PARENTHESES, not brackets, on purpose. `_RecordingProvider.
+    seen` is `re.findall(r"\\[([^\\]]+)\\]", listing)`, so a bracketed marker
+    would show up as a phantom finding id in every existing `set(provider.seen
+    [n]) == {ids}` assertion. Asserted against `prompts`, which is the raw text."""
+    store = InMemoryStore()
+    sid = store.create_session(purpose="p", created_by="s").shared_id
+    noop = {"working_memory": "wm", "merges": [], "trivial_ids": [], "conflicts": []}
+    provider = _RecordingProvider(scripts=[noop, noop])
+    synth = Synthesizer(provider)
+    attrs = [Attribution(contributor="aditya", agent_session="as-1", agent="claude-code")]
+
+    await synth.merge(store, sid, [Finding(
+        id="f-aditya", type="learning",
+        text="the decode drifts once the DMA writes are 40 ms apart",
+        attributions=attrs, ts=TS)])
+
+    await synth.merge(store, sid, [Finding(
+        id="f-akhil", type="learning",
+        text="anything past 40 ms and the pipeline stalls",
+        attributions=attrs, ts=TS)])
+
+    prompt = provider.prompts[1]
+    assert "f-aditya" in provider.seen[1]              # it was selected at all
+    assert "(shares:" in prompt, (
+        "the shared symbol that surfaced this candidate never reached the model")
+    # symbols.extract normalises "40 ms" -> "40ms" (symbols.py's own docstring:
+    # "so that `40 ms`, `40ms` and `40 MS` are one symbol"), so the marker
+    # carries the normalised form, not the surface text -- adapted from the
+    # plan's literal "40 ms" against symbols.py's real normalisation.
+    assert "40ms" in prompt.split("(shares:", 1)[1].split(")", 1)[0]
+    # ...and the marker did not leak into the id parser.
+    assert all("shares" not in token for token in provider.seen[1])
+
+
+async def test_the_self_heal_path_still_gets_candidates_without_a_push():
+    """POST /v1/sessions/{sid}/synthesize passes new_findings=[]. There is no
+    text to search WITH, so the lanes have no query; the recency slice is the
+    only rule available and must stay on that path."""
+    store = InMemoryStore()
+    sid = store.create_session(purpose="p", created_by="s").shared_id
+    noop = {"working_memory": "wm", "merges": [], "trivial_ids": [], "conflicts": []}
+    provider = _RecordingProvider(scripts=[noop, noop])
+    synth = Synthesizer(provider)
+    landed = [Finding(id=f"f-{i:02d}", type="learning", text=f"finding {i}",
+                      attributions=[Attribution(contributor="a", agent_session="as-1",
+                                                agent="claude-code")], ts=TS)
+              for i in range(3)]
+    await synth.merge(store, sid, landed)
+
+    await synth.merge(store, sid, [])                       # the self-heal call
+
+    assert set(provider.seen[1]) == {f.id for f in landed}

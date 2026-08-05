@@ -20,3 +20,7 @@ __pycache__/
 # write-ahead log. Machine-local and per-session — committing it would push one
 # developer's transcript position onto everyone else's checkout.
 .synapse/
+
+# Recall-harness output. Cross-task baselines (Task 7 → Task 12) live here
+# rather than in /tmp, which does not survive a reboot between Aug 5 and Aug 6.
+.measurements/

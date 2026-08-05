@@ -91,15 +91,50 @@ async def build_briefing(binding: LocalBinding | None, service_url: str, *,
         version = int(w.get("version", 0))
         new_since = int(w.get("new_since", 0))
         conflicts = int(w.get("conflicts", 0))
+
+        # `topics` MISSING is a pre-E5 service: render the rest. `topics`
+        # MALFORMED is a shape nobody should trust, and this is the highest-
+        # trust text surface a connecting agent sees -- fail open.
+        topics_clause = ""
+        raw_topics = w.get("topics")
+        if raw_topics is not None:
+            if not isinstance(raw_topics, list):
+                raise ValueError(f"'topics' was not a list: {raw_topics!r}")
+            labels = []
+            for topic in raw_topics:
+                if not isinstance(topic, dict):
+                    raise ValueError(f"'topics' held a non-object: {topic!r}")
+                label = topic.get("label")
+                if not isinstance(label, str):
+                    raise ValueError(f"topic label was not a string: {label!r}")
+                labels.append(_clean(label))
+            if labels:
+                topics_clause = (" The team is working on: "
+                                 + ", ".join(f"“{label}”" for label in labels) + ".")
+
+        # Composition order is load-bearing (N3, revision 2). The cap below
+        # truncates from the END, so whatever is interpolated LAST pays for
+        # unbounded growth in whatever came before it. `types` is E3's
+        # service-supplied `by_type` map — unbounded, and the whole reason
+        # the cap exists. The tool-usage sentences are the entire point of
+        # this string being the `instructions` surface (Task 1's sentinel
+        # probe reads them). They go FIRST, right after the fixed-size
+        # identity clause, so the cap's victim is always the growable
+        # content (first `topics_clause`, then `types` itself) rather than
+        # an accident of which field happened to be biggest this round. See
+        # test_briefing_is_hard_capped_when_the_watermark_by_type_map_is_huge
+        # for the 300-type fixture that pins this ordering, not just the cap.
         text = (
             f"{SENTINEL} You are in Synapse Shared Session {_clean(binding.shared_id)} as "
-            f"{_clean(binding.contributor)}. Team memory holds {total} findings ({types}), "
-            f"{conflicts} conflict(s), at version v{version} — "
-            f"{new_since} new since you last looked. Call the `query` tool "
+            f"{_clean(binding.contributor)}. Call the `query` tool "
             "before exploring an unfamiliar subsystem, when debugging something a "
             "teammate may also be working on, or before concluding something is a "
             "dead end. Call `contribute` when you learn something non-obvious a "
-            "teammate would benefit from."
+            "teammate would benefit from. "
+            f"Team memory holds {total} findings ({types}), "
+            f"{conflicts} conflict(s), at version v{version} — "
+            f"{new_since} new since you last looked."
+            f"{topics_clause}"
         )
     except Exception as exc:  # FAIL OPEN: nothing escapes this function, ever
         logger.info("Briefing fail-open (%s)", exc.__class__.__name__)

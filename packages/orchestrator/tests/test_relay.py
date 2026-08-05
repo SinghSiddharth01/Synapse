@@ -1,4 +1,5 @@
 import json
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -161,3 +162,99 @@ async def test_rejoin_does_not_retarget_a_still_queued_finding_to_the_new_sessio
     assert await relay.flush() == (1, 0)
     assert urls_hit == ["http://svc/v1/sessions/sh-PRIVATE/findings"]   # NOT sh-OTHERTEAM
     assert bodies[0]["findings"][0]["id"] == "f-private"
+
+
+async def test_a_404_stays_queued_because_the_session_can_be_recreated(tmp_path, caplog):
+    """The likeliest 4xx at a demo is 'service restarted, session unknown'.
+    Create-or-return (Task 11 Step 2) makes that recoverable, and a resync
+    recreates the session -- so a 404 must stay in the retry queue and flush
+    ITSELF the moment the session exists again. Dropping it converts a
+    self-healing case into one that needs a human mid-demo.
+
+    The LOGGING is what changes: a named 404 with its URL, not
+    'Service unavailable'."""
+    calls = []
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        return httpx.Response(404, json={"error": "unknown session sh-gone"})
+
+    relay = Relay(tmp_path, "http://svc", "sh-gone",
+                  transport=httpx.MockTransport(handler))
+    relay.record([_finding("f-1")])
+
+    with caplog.at_level(logging.WARNING):
+        first = await relay.flush()
+    second = await relay.flush()
+
+    assert first == (0, 1) and second == (0, 1)          # still pending, both times
+    assert len(calls) == 2                               # re-attempted, deliberately
+    # ⟨DEVIATION vs. the plan, recorded⟩ `r.message % r.args` assumes
+    # `.message` is the unformatted template; pytest's caplog handler has
+    # already called `getMessage()` by the time records land here, so
+    # `.message` is the FINAL string and re-applying `% r.args` raises
+    # "not all arguments converted". `r.getMessage()` is the correct,
+    # always-safe accessor and is used instead.
+    assert any("404" in r.getMessage() for r in caplog.records)
+    assert not (tmp_path / "dropped.jsonl").exists()
+
+
+async def test_a_422_is_terminal_and_never_re_attempted(tmp_path, caplog):
+    """`except (httpx.HTTPError, OSError)` catches HTTPStatusError too, so a
+    permanently malformed payload was indistinguishable from a transient
+    outage and looped forever logging 'Service unavailable'. A 422 is a
+    request that CANNOT succeed no matter how many times it is sent -- unlike
+    a 404, which stops being true the moment the session is recreated."""
+    calls = []
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        return httpx.Response(422, json={"error": "not a Finding"})
+
+    relay = Relay(tmp_path, "http://svc", "sh-1",
+                  transport=httpx.MockTransport(handler))
+    relay.record([_finding("f-1")])
+
+    with caplog.at_level(logging.WARNING):
+        first = await relay.flush()
+    second = await relay.flush()
+
+    assert len(calls) == 1                               # never re-attempted
+    assert first == (0, 0) and second == (0, 0)
+    assert any("422" in r.getMessage() for r in caplog.records)
+
+
+async def test_a_5xx_is_still_retried(tmp_path):
+    calls = []
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        return httpx.Response(503)
+
+    relay = Relay(tmp_path, "http://svc", "sh-1",
+                  transport=httpx.MockTransport(handler))
+    relay.record([_finding("f-1")])
+
+    assert await relay.flush() == (0, 1)
+    assert await relay.flush() == (0, 1)
+    assert len(calls) == 2
+
+
+async def test_resync_sessions_reports_only_the_sessions_it_actually_pushed_to(tmp_path):
+    """`resync()` returns a bare int, which cannot tell a caller WHICH sessions
+    converged -- so cmd_resync re-synthesized only whatever happened to be
+    bound, and every other session in the backlog got its findings back with no
+    Working Memory, no conflicts and no merges. The partitioning fix in
+    relay.py's round 2 is only half a recovery path without this."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "sh-bad" in str(request.url):
+            return httpx.Response(503)
+        return httpx.Response(200, json={"accepted": 1})
+
+    relay = Relay(tmp_path, "http://svc", "sh-good",
+                  transport=httpx.MockTransport(handler))
+    relay.record([_finding("f-1")])
+    relay.shared_id = "sh-bad"
+    relay.record([_finding("f-2")])
+
+    pushed = await relay.resync_sessions()
+
+    assert pushed == {"sh-good": 1}
+    assert await relay.resync() == 1          # the documented int, unchanged

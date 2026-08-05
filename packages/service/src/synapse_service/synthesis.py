@@ -108,19 +108,6 @@ class _SynthesisVerdicts(BaseModel):
     conflicts: list[_ConflictVerdict] = Field(default_factory=list)
 
 
-def _resolve_forward(store: InMemoryStore, shared_id: str, finding_id: str) -> str:
-    """Follow merged_into pointers to the live (or most-recently-synthesized)
-    id a Conflict should reference, so it never dangles at a tombstone."""
-    seen: set[str] = set()
-    current = finding_id
-    while current not in seen:
-        seen.add(current)
-        finding = store.get(shared_id, current)
-        if finding is None or finding.merged_into is None:
-            return current
-        current = finding.merged_into
-    return current                                       # cycle guard; should not happen
-
 
 class Synthesizer:
     def __init__(self, provider: ModelProvider) -> None:
@@ -146,12 +133,60 @@ class Synthesizer:
         retrievable = store.retrievable(shared_id)
         new_ids = {f.id for f in new_findings}
         pushed = [f for f in retrievable if f.id in new_ids]
-        others = [f for f in retrievable if f.id not in new_ids][-CANDIDATE_WINDOW:]
+
+        if pushed:
+            # One candidate lookup per pushed finding, unioned and deduped.
+            # A pure recency slice made an old near-duplicate permanently
+            # unmergeable -- the ADR 0002 merge stopped happening as the
+            # session grew, silently, with nothing reporting the loss.
+            #
+            # COST, named: this is O(pushed x log) select() sweeps. ~2.5 ms per
+            # sweep at 422 findings, so microseconds-to-milliseconds at demo
+            # scale. The PROMPT is fixed-cost; the compute is not.
+            best: dict[str, tuple[float, Finding]] = {}
+            # Why a candidate was surfaced, kept for the prompt. A shared rare
+            # identifier is close to proof, and telling the model so costs a
+            # few tokens per line (lanes.Candidate.render's own argument, which
+            # otherwise reaches no prompt in this integration).
+            marks: dict[str, frozenset[str]] = {}
+            for finding in pushed:
+                result = store.candidates(shared_id, finding.text,
+                                          exclude=frozenset(new_ids))
+                for candidate in result.candidates:
+                    prior = best.get(candidate.finding.id)
+                    if prior is None or candidate.score > prior[0]:
+                        best[candidate.finding.id] = (candidate.score, candidate.finding)
+                    if candidate.shared_symbols:
+                        marks[candidate.finding.id] = (
+                            marks.get(candidate.finding.id, frozenset())
+                            | candidate.shared_symbols)
+            # Rank the UNION before truncating. Truncating dict-insertion order
+            # instead lets the first two pushed findings fill all 20 slots, so
+            # findings 3..N of a backlog flush contribute no partners at all --
+            # the same starvation the recency slice caused, differently shaped.
+            others = [f for _, f in
+                      sorted(best.values(), key=lambda sf: (-sf[0], sf[1].id))
+                      ][:CANDIDATE_WINDOW]
+        else:
+            # The /synthesize self-heal path passes no new findings, so there
+            # is no text to search WITH. Recency is the only rule available,
+            # and this is exactly what that route did before lanes existed.
+            others = [f for f in retrievable if f.id not in new_ids][-CANDIDATE_WINDOW:]
+            marks = {}
+
         candidates = pushed + others
         if not candidates:
             return ctx
 
-        listing = "\n".join(f"[{f.id}] ({f.type.value}) {f.text}" for f in candidates)
+        def _line(f: Finding) -> str:
+            base = f"[{f.id}] ({f.type.value}) {f.text}"
+            shared = marks.get(f.id)
+            # Parentheses, never brackets: test helpers parse `[...]` out of
+            # this listing as finding ids, and a bracketed marker would read as
+            # a phantom id in every one of them.
+            return base + (f"  (shares: {', '.join(sorted(shared))})" if shared else "")
+
+        listing = "\n".join(_line(f) for f in candidates)
         messages = [
             {"role": "system", "content": SYNTH_SYSTEM},
             {"role": "user", "content":
@@ -223,23 +258,19 @@ class Synthesizer:
                 provenance=Provenance.SYNTHESIZED,
                 merged_from=[s.id for s in sources],
             )
-            store.upsert(shared_id, [synthesized])
-            for s in sources:
-                s.merged_into = synthesized.id                     # tombstone: text stays
+            store.supersede(shared_id, [s.id for s in sources], synthesized)
 
-        for fid in verdicts.trivial_ids:
-            finding = store.get(shared_id, fid)
-            if finding is None:
-                logger.warning("Trivial verdict for unknown id %s; ignored", fid)
-                continue
-            if finding.merged_into is None:
-                finding.status = FindingStatus.TRIVIAL
+        store.mark_trivial(shared_id, list(verdicts.trivial_ids))
 
+        # Accumulate locally. `ctx.conflicts.append(...)` was a mutation
+        # through a reference just as much as an assignment was; it survives a
+        # mutable store and vanishes on a projecting one.
+        pending: list[Conflict] = list(ctx.conflicts)
         for c in verdicts.conflicts:
             if c.a not in known or c.b not in known or c.a == c.b:
                 continue
-            ctx.conflicts.append(Conflict(finding_a=c.a, finding_b=c.b,
-                                          description=c.description))
+            pending.append(Conflict(finding_a=c.a, finding_b=c.b,
+                                    description=c.description))
 
         # Resolve EVERY stored conflict -- old rounds' and this round's new
         # ones alike -- forward through merged_into, then dedup. Resolving
@@ -255,9 +286,9 @@ class Synthesizer:
         # window makes re-reporting the expected case, not a rare one.
         resolved: list[Conflict] = []
         seen_pairs: set[frozenset[str]] = set()
-        for conflict in ctx.conflicts:
-            ra = _resolve_forward(store, shared_id, conflict.finding_a)
-            rb = _resolve_forward(store, shared_id, conflict.finding_b)
+        for conflict in pending:                # was: for conflict in ctx.conflicts
+            ra = store.resolve_forward(shared_id, conflict.finding_a)
+            rb = store.resolve_forward(shared_id, conflict.finding_b)
             if ra == rb:
                 continue                  # both sides converged into the same finding
             key = frozenset((ra, rb))
@@ -266,9 +297,8 @@ class Synthesizer:
             seen_pairs.add(key)
             resolved.append(Conflict(finding_a=ra, finding_b=rb,
                                      description=conflict.description))
-        ctx.conflicts = resolved
 
-        if verdicts.working_memory is not None:
-            ctx.working_memory = verdicts.working_memory
-        store.bump_version(shared_id)                               # 4. exactly once
-        return ctx
+        store.set_context(shared_id, working_memory=verdicts.working_memory,
+                          conflicts=resolved)
+        store.bump_version(shared_id)           # 4. exactly once per VERDICT ROUND
+        return store.get_context(shared_id)
