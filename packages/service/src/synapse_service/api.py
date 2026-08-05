@@ -92,6 +92,27 @@ def build_app(provider: ModelProvider) -> Starlette:
         return JSONResponse({"accepted": accepted, "memory_version": version,
                              "synthesized": synthesized})
 
+    async def synthesize(request: Request) -> JSONResponse:
+        """Self-heal path (E3 residual, Finding #11's sibling gap): a
+        session whose last push failed synthesis (a malformed verdict, a
+        provider outage) has no way to re-run it without a NEW finding to
+        push -- `push_findings` only calls `merge()` when `accepted > 0`.
+        This route runs `merge()` over what is ALREADY stored, offering
+        the same bounded candidate window synthesis always would (no
+        `new_findings`, so nothing is re-landed -- `store.upsert` isn't
+        even reached with a nonempty list). It is also Plan C.3's replay
+        primitive: pushing a machine's entire retained log into a fresh
+        store as one batch, then calling this once, is how a resync
+        converges to the same state as the original incremental stream."""
+        sid = request.path_params["sid"]
+        if _session_or_404(sid) is None:
+            return JSONResponse({"error": f"unknown session {sid}"}, status_code=404)
+        version_before = store.get_context(sid).memory_version
+        await synthesizer.merge(store, sid, [])
+        version = store.get_context(sid).memory_version
+        return JSONResponse({"memory_version": version,
+                             "synthesized": version > version_before})
+
     async def watermark(request: Request) -> JSONResponse:
         sid = request.path_params["sid"]
         if _session_or_404(sid) is None:
@@ -160,6 +181,7 @@ def build_app(provider: ModelProvider) -> Starlette:
         Route("/v1/sessions", create_session, methods=["POST"]),
         Route("/v1/sessions/{sid}/members", add_member, methods=["POST"]),
         Route("/v1/sessions/{sid}/findings", push_findings, methods=["POST"]),
+        Route("/v1/sessions/{sid}/synthesize", synthesize, methods=["POST"]),
         Route("/v1/sessions/{sid}/watermark", watermark, methods=["GET"]),
         Route("/v1/sessions/{sid}/query", query, methods=["POST"]),
     ])

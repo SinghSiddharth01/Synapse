@@ -221,3 +221,107 @@ async def test_push_larger_than_candidate_window_reaches_the_merge_prompt_via_th
         assert r.json()["accepted"] == batch_size
 
     assert set(provider.seen[0]) == {f["id"] for f in findings}   # every pushed id offered, none starved
+
+
+def _normalize(findings: list[dict]) -> set[tuple]:
+    """Content only -- deliberately excludes `id` (synthesis mints a fresh
+    `syn-<uuid4>` per run, so two independent runs never share one) and
+    `ts`. What must match across an incremental stream and a replay is
+    the type/text/lineage, not the accidental identifiers of the run that
+    produced it."""
+    return {(f["type"], f["text"], frozenset(f["merged_from"])) for f in findings}
+
+
+async def test_synthesize_self_heals_a_session_whose_last_push_failed():
+    """POST /v1/sessions/{sid}/synthesize re-runs merge over stored
+    findings with no new push required -- the self-heal path for the E3
+    residual (Finding #11's sibling gap): 'a session whose last push
+    failed synthesis cannot re-run it without new findings.'
+    `FakeProvider(scripts=[None])` reproduces the documented non-dict-data
+    failure mode (test_non_dict_verdicts_do_not_crash_merge in
+    test_synthesis.py): the finding lands, but memory_version stays put
+    and the push honestly reports synthesized: false. A second, working
+    script via /synthesize is what recovers it -- without a NEW finding
+    to push."""
+    provider = FakeProvider(scripts=[None, MERGE_NOOP])
+    async with _client(provider) as client:
+        sid = (await client.post("/v1/sessions", json={"purpose": "p", "created_by": "s"})
+               ).json()["shared_id"]
+
+        r = await client.post(f"/v1/sessions/{sid}/findings",
+                              json={"findings": [_finding_json("f-1")]})
+        assert r.json() == {"accepted": 1, "memory_version": 0, "synthesized": False}
+
+        r = await client.post(f"/v1/sessions/{sid}/synthesize")
+        assert r.json() == {"memory_version": 1, "synthesized": True}
+
+        r = await client.get(f"/v1/sessions/{sid}/watermark", params={"agent_session": "as-x"})
+        assert r.json()["version"] == 1
+
+
+async def test_synthesize_unknown_session_404():
+    async with _client(FakeProvider(scripts=[])) as client:
+        r = await client.post("/v1/sessions/nope/synthesize")
+        assert r.status_code == 404
+
+
+async def test_full_log_replay_into_a_fresh_store_converges_with_the_original_stream():
+    """Plan C.3's own first-failing-test, never built until now
+    (docs/plans/2026-08-03-plan-c-service.md:55 -- 'a full resync of a
+    machine's entire log after a service restart converges to the same
+    state as the original stream'; flagged as a gap by the E3 verifier).
+
+    Two Findings pushed INCREMENTALLY -- one merge() call per push -- are
+    compared against the SAME two Findings replayed into a FRESH store as
+    one batch push, followed by exactly one /synthesize call. Two merge()
+    calls either way, so `memory_version` converges too, not merely
+    content. Synthesized ids are randomly generated per run (uuid4 in
+    synthesis.py) and are therefore EXPECTED to differ between the two
+    runs; `_normalize` strips them so the comparison is over the
+    type/text/lineage synthesis actually decided, which must match."""
+    def _findings() -> list[dict]:
+        return [_finding_json("f-1"), _finding_json("f-2")]
+
+    noop1 = {"working_memory": "interim", "merges": [], "trivial_ids": [], "conflicts": []}
+    merge2 = {"working_memory": "final-wm",
+              "merges": [{"source_ids": ["f-1", "f-2"], "text": "merged: f-1 and f-2",
+                         "type": "learning"}],
+              "trivial_ids": [], "conflicts": []}
+    rank_all = {"ranked": [0]}
+
+    # --- the original stream: two incremental pushes ---
+    async with _client(FakeProvider(scripts=[noop1, merge2, rank_all])) as client:
+        sid = (await client.post("/v1/sessions", json={"purpose": "p", "created_by": "s"})
+               ).json()["shared_id"]
+        f1, f2 = _findings()
+
+        r = await client.post(f"/v1/sessions/{sid}/findings", json={"findings": [f1]})
+        assert r.json()["memory_version"] == 1
+        r = await client.post(f"/v1/sessions/{sid}/findings", json={"findings": [f2]})
+        assert r.json()["memory_version"] == 2
+        original_version = r.json()["memory_version"]
+
+        r = await client.post(f"/v1/sessions/{sid}/query",
+                              json={"query": "anything", "agent_session": "as-other"})
+        original_state = _normalize(r.json()["findings"])
+
+    # --- the replay: the SAME log, pushed as one batch into a FRESH
+    #     store, then one explicit /synthesize call ---
+    async with _client(FakeProvider(scripts=[noop1, merge2, rank_all])) as client:
+        sid = (await client.post("/v1/sessions", json={"purpose": "p", "created_by": "s"})
+               ).json()["shared_id"]
+
+        r = await client.post(f"/v1/sessions/{sid}/findings",
+                              json={"findings": _findings()})
+        assert r.json()["memory_version"] == 1
+
+        r = await client.post(f"/v1/sessions/{sid}/synthesize")
+        assert r.json() == {"memory_version": 2, "synthesized": True}
+        replay_version = r.json()["memory_version"]
+
+        r = await client.post(f"/v1/sessions/{sid}/query",
+                              json={"query": "anything", "agent_session": "as-other"})
+        replay_state = _normalize(r.json()["findings"])
+
+    assert replay_state == original_state and len(replay_state) == 1
+    assert replay_version == original_version
