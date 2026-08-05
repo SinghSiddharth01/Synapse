@@ -168,6 +168,16 @@ class Relay:
         int (see its docstring)."""
         return sum(1 for sid, _ in self._all_entries() if sid is not None)
 
+    def recorded_session_ids(self) -> set[str]:
+        """Every Shared Session the retained log names.
+
+        Findings are partitioned by the session each was RECORDED under (see
+        `record()`), so a backlog routinely spans several -- and `cmd_resync`
+        runs when nothing may be bound at all. Reading the ids from the LOG
+        rather than from a binding is what makes recovery work for a machine
+        that never re-joined."""
+        return {sid for sid in self._group(self._all_entries()) if sid is not None}
+
     @staticmethod
     def _group(entries: list[tuple[str | None, Finding]]) -> dict[str, list[Finding]]:
         """Findings recorded under no session (`shared_id is None`) are

@@ -52,8 +52,23 @@ class InMemoryStore:
         self._last_seen: dict[tuple[str, str], int] = {}
 
     # ── sessions ────────────────────────────────────────────────────────────
-    def create_session(self, purpose: str, created_by: str) -> SynapseSession:
-        shared_id = f"sh-{uuid.uuid4().hex[:8]}"
+    def create_session(self, purpose: str, created_by: str, *,
+                       shared_id: str | None = None) -> SynapseSession:
+        """Create, or return an EXISTING session unchanged.
+
+        Before this, the id was minted server-side only: after a restart the
+        old sh-... 404s and cannot be recreated by construction, so every
+        teammate has to re-join a brand-new session mid-demo. The documented
+        recovery path (every orchestrator resyncs its retained log into the
+        SAME shared_id) was not merely unbuilt -- it was impossible.
+
+        Returning the existing session UNCHANGED is what makes this safe to
+        call unconditionally, which is what `cmd_resync` does: a recovering
+        client does not know whether the service still has the session, and
+        must not overwrite a live one's purpose if it does."""
+        if shared_id is not None and shared_id in self._sessions:
+            return self._sessions[shared_id]
+        shared_id = shared_id or f"sh-{uuid.uuid4().hex[:8]}"
         session = SynapseSession(shared_id=shared_id, purpose=purpose,
                                  members=[], created_by=created_by)
         self._sessions[shared_id] = session

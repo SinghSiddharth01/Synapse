@@ -595,3 +595,98 @@ async def test_a_topic_of_only_the_askers_own_findings_contributes_nothing():
                                  params={"agent_session": "as-me"})).json()
 
     assert body["topics"] == []
+
+
+async def test_create_session_with_a_known_shared_id_returns_the_same_session():
+    """Today the id is minted server-side only, so after a restart the old
+    sh-... 404s and CANNOT BE RECREATED BY CONSTRUCTION -- every teammate has
+    to re-join a brand-new session mid-demo. Create-or-return is the whole fix."""
+    async with _client(FakeProvider(scripts=[])) as client:
+        first = await client.post("/v1/sessions",
+                                  json={"purpose": "p", "created_by": "s"})
+        sid = first.json()["shared_id"]
+
+        again = await client.post("/v1/sessions",
+                                  json={"purpose": "different", "created_by": "x",
+                                        "shared_id": sid})
+
+    assert first.status_code == 201
+    assert again.status_code == 200
+    assert again.json()["shared_id"] == sid
+    assert again.json()["purpose"] == "p"          # existing session, unchanged
+
+
+async def test_create_session_with_an_unknown_shared_id_creates_it_with_that_id():
+    async with _client(FakeProvider(scripts=[])) as client:
+        r = await client.post("/v1/sessions", json={"purpose": "p", "created_by": "s",
+                                                    "shared_id": "sh-restored"})
+        assert r.status_code == 201
+        assert r.json()["shared_id"] == "sh-restored"
+        assert (await client.get("/v1/sessions/sh-restored/watermark",
+                                 params={"agent_session": "as-1"})).status_code == 200
+
+
+async def test_the_documented_recovery_path_works_end_to_end_against_a_fresh_store():
+    """The whole runbook, as one test, against a SECOND app instance standing
+    in for the restarted process: recreate the known id, re-push the retained
+    findings, re-synthesize, query. Revision 0 shipped create-or-return with no
+    caller and no end-to-end pin, which is how a recovery path stays theoretical.
+
+    THREE provider calls, in this order, and the script list must match:
+      1. POST .../findings -> accepted == 2 -> synthesizer.merge over the batch
+      2. POST .../synthesize -> merge(store, sid, []) -- `pushed` is empty so
+         `others` is the recency slice over the two retrievable findings, which
+         is NON-EMPTY, so this reaches the model. This is the call that
+         re-derives Working Memory, and it is the one the runbook is about.
+      3. POST .../query -> query_findings' ranking call.
+
+    Evidence is `working_memory`, not `memory_version` alone: the counter bumps
+    on every verdict round including a no-op, so `> 0` proves a round ran, not
+    that anything was re-derived. What proves re-derivation is the re-derived
+    prose reaching the next prompt, which is what the last assertion reads."""
+    findings = [_finding_json("f-1"), _finding_json("f-2")]
+
+    async with _client(FakeProvider(scripts=[MERGE_NOOP])) as before:
+        sid = (await before.post("/v1/sessions",
+                                 json={"purpose": "p", "created_by": "s"})
+               ).json()["shared_id"]
+        await before.post(f"/v1/sessions/{sid}/findings", json={"findings": findings})
+
+    # --- the service restarts: a brand-new app, empty store ---
+    provider = _RecordingProvider(scripts=[
+        MERGE_NOOP,                                             # 1. the re-push's merge
+        {"working_memory": "the team is chasing a timing window",
+         "merges": [], "trivial_ids": [], "conflicts": []},      # 2. /synthesize
+        {"ranked": [0]},                                        # 3. /query
+    ])
+    async with _client(provider) as after:
+        recreate = await after.post("/v1/sessions",
+                                    json={"purpose": "p", "created_by": "s",
+                                          "shared_id": sid})
+        assert recreate.status_code == 201                      # unknown id: created
+
+        pushed = await after.post(f"/v1/sessions/{sid}/findings",
+                                  json={"findings": findings})
+        assert pushed.json()["accepted"] == 2
+
+        syn = await after.post(f"/v1/sessions/{sid}/synthesize")
+        assert syn.status_code == 200
+        assert syn.json()["synthesized"] is True
+
+        wm = (await after.get(f"/v1/sessions/{sid}/watermark",
+                              params={"agent_session": "as-OTHER"})).json()
+
+        r = await after.post(f"/v1/sessions/{sid}/query",
+                             json={"query": "timing", "agent_session": "as-OTHER"})
+
+    assert r.status_code == 200
+    assert [f["id"] for f in r.json()["findings"]] == ["f-1"]
+
+    # TWO verdict rounds ran on the fresh store: the re-push's own merge, then
+    # /synthesize. `version` is memory_version -- VERDICT ROUNDS APPLIED.
+    assert wm["version"] == 2
+
+    # ...and the Working Memory the second round re-derived reached the next
+    # prompt. This is the assertion that makes the recovery non-theoretical:
+    # without it the test proves only that four routes returned 200.
+    assert "the team is chasing a timing window" in provider.prompts[-1]

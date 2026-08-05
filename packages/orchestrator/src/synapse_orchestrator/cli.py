@@ -31,6 +31,8 @@ from synapse_orchestrator.briefing import build_briefing
 from synapse_orchestrator.relay import Relay
 from synapse_orchestrator.server import create_mcp, register_tools
 
+logger = logging.getLogger(__name__)
+
 
 def _bindings_dir(state_dir: Path) -> Path:
     return state_dir / "bindings"
@@ -155,19 +157,63 @@ async def cmd_resync(args: argparse.Namespace, *,
     shared_id = binding.shared_id if binding is not None else None
     relay = Relay(state_dir / "relay", args.service_url, shared_id, transport=transport)
     total = relay.retained_count()
+    known_sessions = sorted(relay.recorded_session_ids())
+    base = args.service_url.rstrip("/")
+
+    # 1. RECREATE, before the push. After a real restart the sh-... does not
+    #    exist, so the push 404s. `POST /v1/sessions` with a known id is
+    #    create-or-return: it returns a live session UNCHANGED, so this is
+    #    safe to call every time. The purpose is lost on a genuine recreate --
+    #    the retained log does not carry it -- which is why it says so.
+    async with httpx.AsyncClient(transport=transport, timeout=10.0) as client:
+        for sid in known_sessions:
+            try:
+                await client.post(f"{base}/v1/sessions",
+                                  json={"purpose": "(recovered by resync)",
+                                        "created_by": "resync", "shared_id": sid})
+            except (httpx.HTTPError, OSError):
+                pass          # the push below reports the real failure, loudly
+
     pushed = await relay.resync()
+
     label = shared_id or "unbound"
-    # total==0 means nothing was ever recorded — trivially "successful".
-    # pushed < total means something WAS recorded but didn't fully make it
-    # out — collapsing both into one number reported a failed resync
-    # (service down, or the recorded session unreachable) as indistinguishable
-    # from success.
+    # The loud-failure branch stays exactly where main has it and fires BEFORE
+    # any re-synthesis: there is nothing to re-synthesize if the findings did
+    # not land, and `test_resync_fails_loudly_when_the_push_does_not_succeed`
+    # (test_cli.py:343) reaches it through a `down` transport -- the recreate
+    # POST above raises and is swallowed, resync() returns 0, and this fires.
     if total and pushed < total:
         print(f"resync: FAILED — {pushed} of {total} finding(s) re-pushed across the "
               f"retained log (current session: {label!r}); is the service reachable, "
               "and is a Shared Session joined (`synapse-worker join <shared_id>`)?")
         return 1
-    print(f"resync: re-pushed {pushed} finding(s) (current session: {label!r})")
+
+    # 2. SYNTHESIZE. push_findings gates the model on accepted > 0, so a resync
+    #    into a store that already holds these findings never re-synthesizes,
+    #    and the recovery returns findings with no Working Memory, no conflicts
+    #    and no merges. Per session in the BACKLOG, not per binding.
+    #
+    #    COST, named: this is the SECOND model call per session. The push's own
+    #    merge already ran over the whole re-pushed batch; this one runs over at
+    #    most CANDIDATE_WINDOW (20) retrievable findings and REWRITES
+    #    working_memory from those 20. On a large session the re-derived prose
+    #    is therefore a summary of the last twenty, not of everything -- which
+    #    is what "recomputed, not restored" means concretely, and is why the
+    #    docs say so rather than leaving it for the demo to reveal.
+    synthesized: list[str] = []
+    async with httpx.AsyncClient(transport=transport, timeout=10.0) as client:
+        for sid in known_sessions:
+            try:
+                resp = await client.post(f"{base}/v1/sessions/{sid}/synthesize")
+                resp.raise_for_status()
+                if resp.json().get("synthesized"):
+                    synthesized.append(sid)
+            except (httpx.HTTPError, OSError, ValueError) as exc:
+                logger.warning("Resync pushed to %s but re-synthesis failed (%s)",
+                               sid, exc.__class__.__name__)
+
+    print(f"resync: re-pushed {pushed} finding(s) across {len(known_sessions)} session(s) "
+          f"(current session: {label!r}; synthesized: {synthesized})")
     return 0
 
 

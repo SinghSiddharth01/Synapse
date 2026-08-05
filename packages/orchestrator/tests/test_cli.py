@@ -411,11 +411,64 @@ def test_resync_pushes_a_previously_recorded_session_even_when_now_unbound(
                          transport=httpx.MockTransport(up))
 
     assert exit_code == 0
-    assert hit == ["http://127.0.0.1:8899/v1/sessions/sh-old/findings"]  # NOT a fabricated
-                                                                          # "unbound" session
+    assert hit == ["http://127.0.0.1:8899/v1/sessions",
+                   "http://127.0.0.1:8899/v1/sessions/sh-old/findings",
+                   "http://127.0.0.1:8899/v1/sessions/sh-old/synthesize"]
     out = capsys.readouterr().out
     assert "re-pushed 1 finding(s)" in out
     assert "current session: 'unbound'" in out
+
+
+def test_resync_recreates_and_synthesizes_each_session_the_log_names(tmp_path, capsys) -> None:
+    """push_findings gates the model on accepted > 0, so a full resync into a
+    store that already holds those findings never re-synthesizes. And after a
+    real restart the session does not exist at all, so the push 404s before it
+    can even fail usefully. Both halves of the documented recovery path, per
+    session in the BACKLOG -- not per whatever binding happens to exist.
+
+    Iterates `relay.recorded_session_ids()`, not `resync_sessions()`: this test
+    and the loop it pins are in the demo cut, and `resync_sessions()` is the
+    droppable half. Step 3 narrows the synthesize pass from "every recorded
+    session" to "every session that converged"; until then a /synthesize
+    against a session whose push failed returns 200 and changes nothing, which
+    is a wasted call and not a defect."""
+    write_binding(
+        tmp_path / "bindings" / "claude-code.json",
+        SessionBinding(agent_session_id="as-1", shared_id="sh-joined",
+                       contributor="aditya", agent="claude-code",
+                       transcript_path="/tmp/t.jsonl",
+                       pinned_at=datetime(2026, 8, 4, tzinfo=timezone.utc)),
+    )
+    import json as _json
+    from synapse_contracts import Attribution, Finding
+    relay_dir = tmp_path / "relay"
+    relay_dir.mkdir(parents=True)
+    finding = Finding(id="f-1", type="learning", text="insight",
+                      attributions=[Attribution(contributor="aditya", agent_session="as-1",
+                                                agent="claude-code")],
+                      ts=datetime(2026, 8, 4, tzinfo=timezone.utc))
+    (relay_dir / "findings.jsonl").write_text(_json.dumps(
+        {"shared_id": "sh-joined", "finding": _json.loads(finding.model_dump_json())}) + "\n")
+
+    hit = []
+    def up(request: httpx.Request) -> httpx.Response:
+        hit.append(request.url.path)
+        if request.url.path == "/v1/sessions":
+            return httpx.Response(201, json={"shared_id": "sh-joined", "purpose": "",
+                                             "members": [], "created_by": "resync"})
+        if request.url.path.endswith("/synthesize"):
+            return httpx.Response(200, json={"memory_version": 1, "synthesized": True})
+        return httpx.Response(200, json={"accepted": 1, "memory_version": 0,
+                                         "synthesized": False})
+
+    exit_code = cli.main(["--state-dir", str(tmp_path), "resync"],
+                         transport=httpx.MockTransport(up))
+
+    assert exit_code == 0
+    assert hit == ["/v1/sessions",
+                   "/v1/sessions/sh-joined/findings",
+                   "/v1/sessions/sh-joined/synthesize"]
+    assert "synthesized" in capsys.readouterr().out
 
 
 def test_build_npu_distiller_matches_the_workers_config_pack_and_model(monkeypatch) -> None:

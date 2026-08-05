@@ -51,9 +51,13 @@ def build_app(provider: ModelProvider) -> Starlette:
         body = await request.json()
         if (err := _missing(body, "purpose", "created_by")) is not None:
             return err
+        requested = body.get("shared_id")
+        existed = requested is not None and store.get_session(requested) is not None
         session = store.create_session(purpose=body["purpose"],
-                                       created_by=body["created_by"])
-        return JSONResponse(session.model_dump(mode="json"), status_code=201)
+                                       created_by=body["created_by"],
+                                       shared_id=requested)
+        return JSONResponse(session.model_dump(mode="json"),
+                            status_code=200 if existed else 201)
 
     async def add_member(request: Request) -> JSONResponse:
         sid = request.path_params["sid"]
