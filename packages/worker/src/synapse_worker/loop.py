@@ -39,6 +39,8 @@ from synapse_worker.follower import TranscriptFollower
 from synapse_worker.producer import Producer
 from synapse_worker.segmenter import Segmenter
 from synapse_worker.sources.claude_code import ClaudeCodeSource
+from synapse_worker.triage import triage
+from synapse_worker.triage_log import TriageLog
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +56,7 @@ class TickResult:
     pending_events: int = 0
     skipped_no_change: bool = False
     flushed_incomplete: bool = False
+    skipped_triage: int = 0
     errors: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
@@ -65,6 +68,8 @@ class TickResult:
             f"{self.segments} segments",
             f"{self.findings} findings",
         ]
+        if self.skipped_triage:
+            bits.append(f"{self.skipped_triage} triaged out")
         if self.sent:
             bits.append(f"{self.sent} sent")
         if self.pending_send:
@@ -89,6 +94,7 @@ class WorkerLoop:
         budget_tokens: int,
         *,
         idle_flush_seconds: float = 120.0,
+        triage_enabled: bool = True,
     ) -> None:
         self.transcript = Path(transcript)
         self.distiller = distiller
@@ -104,6 +110,8 @@ class WorkerLoop:
             agent_session_id=binding.agent_session_id,
         )
         self.idle_flush_seconds = idle_flush_seconds
+        self.triage_enabled = triage_enabled
+        self.triage_log = TriageLog(self.state_dir)
 
         self._pending_path = self.state_dir / "pending-events.json"
         self._restore_pending()
@@ -168,6 +176,13 @@ class WorkerLoop:
         result.segments = len(segments)
 
         for segment in segments:
+            if self.triage_enabled:
+                decision = triage(segment)
+                if not decision.keep:
+                    self.triage_log.record_skip(segment, decision.reason)
+                    result.skipped_triage += 1
+                    logger.info("Triage skipped %s (%s)", segment.id, decision.reason)
+                    continue
             try:
                 findings, stats = await self.distiller.distil(segment)
             except PromptDropError as exc:
@@ -215,6 +230,13 @@ class WorkerLoop:
         segments = self.segmenter.drain(flush_incomplete=True)
         result.segments = len(segments)
         for segment in segments:
+            if self.triage_enabled:
+                decision = triage(segment)
+                if not decision.keep:
+                    self.triage_log.record_skip(segment, decision.reason)
+                    result.skipped_triage += 1
+                    logger.info("Triage skipped %s (%s)", segment.id, decision.reason)
+                    continue
             try:
                 findings, stats = await self.distiller.distil(segment)
                 if not stats.skipped_empty:
