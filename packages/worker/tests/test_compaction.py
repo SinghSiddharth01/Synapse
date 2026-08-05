@@ -120,6 +120,54 @@ def test_a_readonly_call_with_a_large_result_survives():
     # to the trivial marker, because it's over TRIVIAL_RESULT_MAX_CHARS
 
 
+def test_a_realistic_small_result_still_collapses_below_the_max_chars_threshold():
+    """Fixer-major finding: only the UPPER direction of TRIVIAL_RESULT_MAX_CHARS
+    was pinned (the test right above this one, 200 -> 50000 fails it) --
+    nothing pinned the lower direction, so shrinking the threshold all the
+    way down to 20 chars left the whole suite green. A content string
+    comfortably between 20 and TRIVIAL_RESULT_MAX_CHARS -- realistic for a
+    short but real Read/Grep peek, not a toy one-liner -- must still
+    collapse to the trivial marker."""
+    content = "line one of a short but real result\nline two, still nothing notable"
+    assert 20 < len(content) < TRIVIAL_RESULT_MAX_CHARS
+    segment = _seg([
+        _ev(kind="tool_use", tool_name="Read", content="notes.txt"),
+        _ev(role="user", kind="tool_result", tool_name="Read", content=content),
+    ])
+
+    compacted = compact(segment)
+
+    assert compacted.events[1].content != content
+    assert len(compacted.events[1].content) < len(content)
+
+
+def test_a_small_clean_readonly_result_never_grows_the_segment():
+    """Fixer-major finding: f483448's whole fix
+    (`_TRIVIAL_RESULT_MARKER = ""`) had no test pinning the property its own
+    commit message claims -- that collapsing a small, clean read-only
+    result to the trivial marker never GROWS the segment. The prior 38-char
+    prose marker ("XX (trivial read-only result omitted) XX") is longer
+    than most real trivial results ("DEBUG = True" is 12 chars), so
+    reverting to it (measured through a real WorkerLoop.tick() as "4/4
+    events kept · 26 chars added" on exactly this scenario, per f483448's
+    own commit message) passed the whole suite silently -- nothing asserted
+    the total shrank or even stayed flat. This compacts the canonical
+    small-read-config demo turn through `compact()` directly and asserts
+    the property by construction, not by pinning today's exact marker
+    value: chars out <= chars in."""
+    segment = _seg([
+        _ev(kind="tool_use", tool_name="Read", content="config.py"),
+        _ev(role="user", kind="tool_result", tool_name="Read", content="DEBUG = True"),
+    ])
+    original_chars = sum(len(e.content) for e in segment.events)
+
+    compacted = compact(segment)
+
+    compacted_chars = sum(len(e.content) for e in compacted.events)
+    assert compacted_chars <= original_chars
+    assert "DEBUG" not in compacted.events[1].content
+
+
 def test_thinking_is_trimmed_to_first_n_lines_but_the_kind_survives():
     long_thinking = "\n".join(f"line {i}" for i in range(20))
     segment = _seg([_ev(kind="thinking", content=long_thinking)])
