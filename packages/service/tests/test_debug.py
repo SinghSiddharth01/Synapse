@@ -106,3 +106,46 @@ async def test_debug_rejects_writes() -> None:
     async with _client(FakeProvider(scripts=[])) as client:
         r = await client.post("/debug/stats.json", json={})
         assert r.status_code == 405
+
+
+# ---------------------------------------------------------------------------
+# debug=False -- the off switch (finding: /debug was always mounted on the
+# public API listener with no way to turn it off, and RecordingProvider
+# wrapped the provider unconditionally, retaining a 200-entry ring of
+# prompt/output previews whether or not anyone ever opened /debug).
+# ---------------------------------------------------------------------------
+
+async def test_debug_routes_are_not_mounted_when_debug_is_disabled() -> None:
+    app = build_app(FakeProvider(scripts=[]), debug=False)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                 base_url="http://svc") as client:
+        assert (await client.get("/debug")).status_code == 404
+        assert (await client.get("/debug/stats.json")).status_code == 404
+        # The product API routes are unaffected by the flag.
+        r = await client.post("/v1/sessions", json={"purpose": "p", "created_by": "s"})
+        assert r.status_code == 201
+
+
+async def test_no_call_log_exists_at_all_when_debug_is_disabled() -> None:
+    # Not just unreachable -- absent. A disabled dashboard must not leave a
+    # RecordingProvider silently retaining prompt/output previews (Working
+    # Memory, candidate Finding text, teammates' raw questions) that nothing
+    # can ever read.
+    app = build_app(FakeProvider(scripts=[]), debug=False)
+    assert app.state.call_log is None
+
+
+async def test_provider_runs_unwrapped_when_debug_is_disabled() -> None:
+    # A merge still succeeds through the raw provider (no RecordingProvider
+    # in the way), and the SAME provider instance is what a plain call count
+    # observes -- proving nothing is interposed.
+    provider = FakeProvider(scripts=[MERGE_SCRIPT])
+    app = build_app(provider, debug=False)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                 base_url="http://svc") as client:
+        sid = (await client.post("/v1/sessions",
+                                 json={"purpose": "fec decode", "created_by": "sid"})
+              ).json()["shared_id"]
+        push = await client.post(f"/v1/sessions/{sid}/findings", json={"findings": _pair()})
+        assert push.json()["synthesized"] is True
+    assert app.state.call_log is None
