@@ -88,11 +88,23 @@ def test_skill_description_uses_context_md_vocabulary_not_its_avoid_list():
 def test_skill_body_tells_the_agent_to_say_plainly_when_memory_had_nothing():
     """architecture.html: 'That last instruction matters — an agent that
     silently finds nothing is indistinguishable from one that never
-    looked.'"""
+    looked.'
+
+    Pin the sentence, not two stopwords. `"nothing" in body.lower()` and
+    `"say" in body.lower()` each survive on their own elsewhere in this same
+    body ('There is nothing to attach to...', 'both tools **say** so
+    plainly') even with instruction 3 deleted outright -- verified by
+    mutation before writing this fix. Scoping to the numbered instruction
+    block the way
+    `tests/test_vocabulary.py::test_the_tombstone_ENTRY_says_derived_condition_not_just_the_notes`
+    scopes to one entry is what actually requires the sentence to exist."""
     text = SKILL_MD.read_text(encoding="utf-8")
     body = text.split("---\n", 2)[2]
-    assert "nothing" in body.lower()
-    assert "say" in body.lower() or "state" in body.lower()
+    match = re.search(r"^3\.(.+?)(?=^\d+\.|\Z)", body, re.DOTALL | re.MULTILINE)
+    assert match is not None, "SKILL.md's body must have a numbered instruction 3"
+    instruction_three = match.group(1).lower()
+    assert "returns nothing" in instruction_three
+    assert "plainly" in instruction_three
 
 
 def test_skill_names_the_real_mcp_tools_not_a_rejected_attach_mechanism():
