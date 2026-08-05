@@ -258,6 +258,10 @@ async def test_triage_skips_lint_noise_and_logs_it(tmp_path, worker_loop_factory
 
 
 async def test_triage_disabled_passes_everything_through(tmp_path, worker_loop_factory):
+    """A lint-clean turn (would be skipped with triage on) must actually reach
+    the distiller and produce a finding when triage is off -- the counter
+    reading 0 is necessary but not sufficient, since an implementation that
+    silently drops every segment also leaves skipped_triage at 0."""
     loop = worker_loop_factory(tmp_path, triage_enabled=False)
     write_transcript_lines(loop.transcript, [
         user_text("fix the imports"),
@@ -268,3 +272,29 @@ async def test_triage_disabled_passes_everything_through(tmp_path, worker_loop_f
     ])
     result = await loop.tick()
     assert result.skipped_triage == 0
+    assert result.findings == 1
+    from synapse_worker.triage_log import TriageLog
+    assert TriageLog(loop.state_dir).load_skipped() == []
+
+
+async def test_shutdown_applies_triage_to_the_flushed_final_turn(tmp_path, worker_loop_factory):
+    """The idle-flushed final turn deserves the same filter as tick()'s -- and
+    it is the turn most likely to be a lint-clean wrap-up. Regression for the
+    untested guard in shutdown()'s segment loop."""
+    loop = worker_loop_factory(tmp_path)
+    write_transcript_lines(loop.transcript, [
+        user_text("fix the imports"),
+        assistant_tool_use("Bash", "ruff check --fix ."),
+        tool_result("Bash", "Found 3 errors (3 fixed, 0 remaining)."),
+        assistant_text("Done, ruff fixed everything."),
+        # No closing user line -- this turn is still open when shutdown() runs.
+    ])
+    await loop.tick()
+
+    result = await loop.shutdown()
+
+    assert result.skipped_triage == 1
+    assert result.findings == 0
+    from synapse_worker.triage_log import TriageLog
+    [(seg, reason)] = TriageLog(loop.state_dir).load_skipped()
+    assert reason == "lint-clean"
