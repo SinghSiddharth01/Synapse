@@ -1,17 +1,46 @@
 """Shape tests for every committed fixture. Prose quality is co-review's job."""
 import json
-import os
 import re
 
 import pytest
 
 from synapse_contracts import Finding, Segment
-from synapse_distiller.config import load_config
+from synapse_distiller.capability import NPU_QWEN3_4B_INSTRUCT_2507
 from synapse_distiller.fixtures import available_fixtures, fixtures_root, load_goldens, load_segment
 from synapse_distiller.prompt import render_segment
+from synapse_distiller.promptpack import load_pack_by_name
 
 EXPECTED_IDS = ["seg-001", "seg-002", "seg-003", "seg-004",
                 "seg-005a", "seg-005b", "seg-006", "seg-007"]
+
+# The model, prompt pack, and render settings config/synapse.toml declares
+# TODAY. Constructed explicitly here rather than via load_config(), which
+# deliberately layers SYNAPSE_* environment variables over the committed file
+# so a bake-off can sweep models/packs without editing a tracked file — the
+# wrong tool for a test whose entire point is pinning behaviour under the
+# *committed* config. Calling load_config() even guarded (clearing env vars)
+# still routes through that env-merge machinery; constructing the values
+# directly sidesteps it rather than merely defending against it. If
+# config/synapse.toml's model, prompt_pack, or distil_kinds/render_style
+# changes, these constants must be updated deliberately in the same commit —
+# that forced review is the point, the same reason KNOWN_CONTAMINATED and
+# DEFAULT_ALLOWLIST elsewhere in this corpus are frozen literals rather than
+# something read live off a mutable file.
+_SHIPPED_DISTIL_KINDS: tuple[str, ...] = ("text",)
+_SHIPPED_RENDER_STYLE = "labelled"
+_SHIPPED_PROMPT_PACK = "v4-condense"
+_SHIPPED_MAX_SECONDS_PER_CALL = 30.0
+
+
+def _shipped_segment_budget() -> int:
+    """The token budget config/synapse.toml's shipped model + pack derive,
+    computed the same way SynapseConfig.segment_budget does but without
+    building a SynapseConfig (which would need load_config() or a hand-built
+    stand-in for every unrelated field load_config() also resolves)."""
+    pack = load_pack_by_name(_SHIPPED_PROMPT_PACK)
+    return NPU_QWEN3_4B_INSTRUCT_2507.segment_budget(
+        pack.overhead_tokens, max_seconds_per_call=_SHIPPED_MAX_SECONDS_PER_CALL
+    )
 
 
 def test_corpus_is_complete():
@@ -50,7 +79,7 @@ def test_seg003_error_is_buried_in_an_oversized_tool_result():
     assert "dead_end" in types
 
 
-def test_seg003_buried_error_reaches_the_model_only_via_prose_under_shipped_config(monkeypatch):
+def test_seg003_buried_error_reaches_the_model_only_via_prose_under_shipped_config():
     """The test above pins that seg-003's tool_result *file* is oversized with
     a buried error, but asserted nothing about system behaviour on it. Under
     the shipped config (config/synapse.toml: distil_kinds = ("text",)),
@@ -63,19 +92,19 @@ def test_seg003_buried_error_reaches_the_model_only_via_prose_under_shipped_conf
     is widened and/or A.5 (compaction) lands. This test pins the current,
     honest state so that claim cannot silently go stale in either direction.
 
-    load_config() layers SYNAPSE_* environment variables over the committed
-    TOML (config.py's whole point — a bake-off sweeps models/packs without
-    editing a tracked file), so this test must clear them first. Otherwise
-    it fails spuriously for anyone with, say, SYNAPSE_DISTIL_KINDS exported
-    to sweep a pack — exactly the workflow config/synapse.toml's own header
-    and scripts/run_npu_eval.py's docstring prescribe — and the failure talks
-    about fixture semantics rather than about the runner's shell."""
-    for key in list(os.environ):
-        if key.startswith("SYNAPSE_"):
-            monkeypatch.delenv(key, raising=False)
+    Uses the module-level _SHIPPED_* constants rather than load_config():
+    load_config() deliberately layers SYNAPSE_* environment variables over
+    the committed TOML (config.py's whole point — a bake-off sweeps
+    models/packs without editing a tracked file), so calling it here — even
+    guarded by clearing env vars — would still be routing a "pin the
+    committed config" test through env-merge machinery it has no need of.
+    Constructing the values explicitly sidesteps that rather than merely
+    defending against it, and previously this test failed spuriously for
+    anyone with, say, SYNAPSE_DISTIL_KINDS exported to sweep a pack — exactly
+    the workflow config/synapse.toml's own header and
+    scripts/run_npu_eval.py's docstring prescribe."""
     segment = load_segment("seg-003")
-    config = load_config()
-    rendered = render_segment(segment, config.distil_kinds, config.render_style)
+    rendered = render_segment(segment, _SHIPPED_DISTIL_KINDS, _SHIPPED_RENDER_STYLE)
     assert "ConnectionResetError" not in rendered, (
         "if this now fails, distil_kinds/render config changed such that the "
         "buried tool_result reaches the model — update this test and stop "
@@ -87,9 +116,9 @@ def test_seg003_buried_error_reaches_the_model_only_via_prose_under_shipped_conf
     )
     # Even widening to every kind, this fixture does not reach the derived
     # budget, so no truncation/compaction path exists for it to pin yet.
-    full = render_segment(segment, kinds=None, style=config.render_style)
+    full = render_segment(segment, kinds=None, style=_SHIPPED_RENDER_STYLE)
     estimated_tokens = len(full) / 3.5
-    assert estimated_tokens < config.segment_budget, (
+    assert estimated_tokens < _shipped_segment_budget(), (
         "seg-003 now exceeds the derived budget even including every event "
         "kind; if that's intentional, wire compaction (A.5) rather than "
         "relying on distil_kinds filtering to avoid truncation, and flip "
@@ -119,8 +148,13 @@ def test_seg006_seg007_have_faithful_compression_goldens():
     segment encodes exactly the durability judgment ADR 0003 relieves the
     distiller of (this is the same bug the ADR names for seg-004: 'the
     distiller should judge this worthless' — which is why seg-004 is `skip`,
-    not `keep`, and keeps its empty golden). Both segments contain real
-    content to compress: a genuine NameError and three real call sites."""
+    not `keep`, and keeps its empty golden). seg-007's golden restates only
+    the assistant's own visible prose. seg-006's golden is scoped the same
+    way — see test_seg006_typo_reaches_the_model_only_via_prose_under_
+    shipped_config below: its tool_result carries a real NameError, but that
+    event is excluded under the shipped distil_kinds, so the golden must not
+    assert facts (like a specific failure count) that only the tool_result
+    states."""
     for fixture_id in ("seg-006", "seg-007"):
         goldens = load_goldens(fixture_id)
         assert goldens, (
@@ -128,6 +162,37 @@ def test_seg006_seg007_have_faithful_compression_goldens():
             f"ADR 0003 the distiller must faithfully compress its content — "
             f"an empty golden would encode a durability judgment the "
             f"distiller was explicitly relieved of"
+        )
+
+
+def test_seg006_typo_reaches_the_model_only_via_prose_under_shipped_config():
+    """f-006-01 originally asserted 'an undefined-variable typo' and 'caused
+    one test failure' — both derived only from the tool_result ("NameError:
+    name 'confg' is not defined" / "1 failed, 41 passed"), which
+    distil_kinds = ("text",) excludes from what the model actually sees. A
+    perfectly faithful distiller could not have produced that golden; it
+    would read as a recall miss for a correct model. Mirrors
+    test_seg003_buried_error_reaches_the_model_only_via_prose_under_shipped_
+    config: same shipped-config-under-test discipline, same explicit-
+    construction reason (see the _SHIPPED_* constants above load_config()
+    would still route this through env-merge machinery a "pin the committed
+    config" test has no need of)."""
+    segment = load_segment("seg-006")
+    rendered = render_segment(segment, _SHIPPED_DISTIL_KINDS, _SHIPPED_RENDER_STYLE)
+    assert "NameError" not in rendered, (
+        "if this now fails, distil_kinds widened to include tool_result — "
+        "f-006-01 can then be enriched with the specific failure count, but "
+        "update this test and the golden together rather than leaving one stale"
+    )
+    assert "config" in rendered and "42 tests pass" in rendered, (
+        "the typo-and-recovery story must still be recoverable via the "
+        "assistant's own prose even though the raw tool_result is excluded"
+    )
+    for golden in load_goldens("seg-006"):
+        assert "NameError" not in golden.text and "undefined-variable" not in golden.text, (
+            f"{golden.id} asserts a fact ('NameError'/'undefined-variable') that "
+            f"lives only in the excluded tool_result — trim it to what the "
+            f"visible prose actually supports"
         )
 
 
