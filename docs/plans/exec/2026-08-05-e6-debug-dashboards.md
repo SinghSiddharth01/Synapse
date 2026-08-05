@@ -201,14 +201,14 @@ Export from `__init__.py`.
 **Interfaces:**
 - Produces: `DebugServer(stats: StatsBuffer, port: int)` with `.start() -> int` (returns bound port; port 0 = ephemeral for tests) and `.stop()`. Routes: `GET /debug` → HTML, `GET /debug/stats.json` → `stats.snapshot()`, anything else → 404.
 
-- [ ] **Step 1: Failing tests** — start on port 0, then over real HTTP (`urllib.request`): `/debug/stats.json` parses as JSON and matches a fresh snapshot; `/debug` returns 200 `text/html` containing `id="feed"` and `id="npu-now"`; a POST anywhere returns 405 (read-only pinned); `.stop()` frees the port.
-- [ ] **Step 2: Run** → FAIL.
-- [ ] **Step 3: Implement.** `http.server.ThreadingHTTPServer` + `BaseHTTPRequestHandler` in a daemon thread; handler holds a reference to the buffer via closure. `do_POST/PUT/DELETE` → 405. The page, complete and inline (structure fixed; visual polish is the implementer's):
+- [x] **Step 1: Failing tests** — start on port 0, then over real HTTP (`urllib.request`): `/debug/stats.json` parses as JSON and matches a fresh snapshot; `/debug` returns 200 `text/html` containing `id="feed"` and `id="npu-now"`; a POST anywhere returns 405 (read-only pinned); `.stop()` frees the port.
+- [x] **Step 2: Run** → FAIL.
+- [x] **Step 3: Implement.** `http.server.ThreadingHTTPServer` + `BaseHTTPRequestHandler` in a daemon thread; handler holds a reference to the buffer via closure. `do_POST/PUT/DELETE` → 405. The page, complete and inline (structure fixed; visual polish is the implementer's):
   - header strip: transcript path · tick count · WAL `sent/queued` · held events + turn-open age
   - `#npu-now`: current segment id + **elapsed timer ticking client-side** from `current.started_iso`; shows `idle` when `current` is null
   - `#feed`: newest-first list, each entry `[HH:MM:SS] [tag] summary`, tag rendered as a colored chip; **filter chips** for `tick/triage/render/llm/push/error` toggling visibility client-side; clicking an `llm` entry expands its previews/token/latency detail
   - JS: `setInterval(refresh, 1000)`, one `fetch('/debug/stats.json')`, no libraries; `font-variant-numeric: tabular-nums`; failed fetch shows a red "worker unreachable" banner rather than console noise
-- [ ] **Step 4: Run** → PASS; CLI coverage stays 100% (extend `test_cli.py` following its pattern for the new flag, including `--debug-port 0` meaning disabled). **Step 5: Commit** — `feat(worker): /debug dashboard — live NPU-now, tagged feed, read-only`.
+- [x] **Step 4: Run** → PASS; CLI coverage stays 100% (extend `test_cli.py` following its pattern for the new flag, including `--debug-port 0` meaning disabled). **Step 5: Commit** — `feat(worker): /debug dashboard — live NPU-now, tagged feed, read-only`.
 
 ---
 

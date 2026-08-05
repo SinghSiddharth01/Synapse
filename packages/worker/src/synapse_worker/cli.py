@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -38,8 +39,9 @@ from synapse_distiller import (
     load_config,
     load_pack_by_name,
 )
-from synapse_providers import NPUProvider
+from synapse_providers import CallLog, NPUProvider, RecordingProvider
 
+from synapse_worker.debug_server import DebugServer
 from synapse_worker.discovery import (
     binding_path_for_agent,
     find_claude_code_transcripts,
@@ -48,11 +50,13 @@ from synapse_worker.discovery import (
 )
 from synapse_worker.loop import WorkerLoop
 from synapse_worker.producer import FileSink, HttpSink, Producer
+from synapse_worker.stats import StatsBuffer
 from synapse_worker.triage_log import TriageLog
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_AGENT = "claude-code"  # the only Source adapter that exists (Plan A.3)
+DEFAULT_DEBUG_PORT = 8790
 
 
 def build_distiller(config, binding: LocalBinding) -> Distiller:
@@ -78,7 +82,20 @@ def build_distiller(config, binding: LocalBinding) -> Distiller:
     )
 
 
-def _build(args: argparse.Namespace):
+def _resolve_debug_port(args: argparse.Namespace) -> int:
+    """--debug-port wins; else SYNAPSE_DEBUG_PORT; else the default. 0 disables
+    the dashboard entirely -- it must not fall back to the default, so this
+    is `is not None`, not `or` (0 is falsy and `or` would silently discard it).
+    """
+    if getattr(args, "debug_port", None) is not None:
+        return args.debug_port
+    env = os.environ.get("SYNAPSE_DEBUG_PORT")
+    if env is not None:
+        return int(env)
+    return DEFAULT_DEBUG_PORT
+
+
+def _build(args: argparse.Namespace, debug_port: int = 0):
     config = load_config()
     worker_cfg = config.worker
     state_dir = Path(worker_cfg.state_dir)
@@ -110,6 +127,17 @@ def _build(args: argparse.Namespace):
             agent=DEFAULT_AGENT,
         )
     distiller = build_distiller(config, binding)
+
+    # Debug instrumentation only exists when the dashboard is enabled -- an
+    # untouched provider stays untouched, and RecordingProvider is transparent
+    # (same result, exceptions re-raised) so this changes nothing else about
+    # what the distiller does.
+    stats: StatsBuffer | None = None
+    if debug_port:
+        call_log = CallLog()
+        stats = StatsBuffer(call_log)
+        distiller.provider = RecordingProvider(distiller.provider, "distiller", call_log)
+
     loop = WorkerLoop(
         transcript=transcript,
         distiller=distiller,
@@ -118,9 +146,10 @@ def _build(args: argparse.Namespace):
         state_dir=state_dir,
         budget_tokens=config.segment_budget,
         idle_flush_seconds=worker_cfg.idle_flush_seconds,
+        stats=stats,
     )
     source = resolved.source if resolved is not None else "explicit --transcript"
-    return config, loop, transcript, producer, source
+    return config, loop, transcript, producer, source, stats
 
 
 def _no_transcript():
@@ -159,7 +188,8 @@ async def cmd_join(args: argparse.Namespace) -> int:
 
 
 async def cmd_run(args: argparse.Namespace) -> int:
-    config, loop, transcript, _, source = _build(args)
+    debug_port = _resolve_debug_port(args)
+    config, loop, transcript, _, source, stats = _build(args, debug_port)
     interval = args.interval or config.worker.poll_interval_seconds
 
     print(config.describe())
@@ -173,7 +203,15 @@ async def cmd_run(args: argparse.Namespace) -> int:
     print(f"poll interval    {interval}s")
     print(f"idle flush       {config.worker.idle_flush_seconds}s")
     print(f"sink             {config.worker.sink}")
-    print(f"state            {config.worker.state_dir}\n")
+    print(f"state            {config.worker.state_dir}")
+
+    debug_server: DebugServer | None = None
+    if debug_port:
+        debug_server = DebugServer(stats, debug_port, transcript=str(transcript))
+        bound_port = debug_server.start()
+        print(f"debug            http://127.0.0.1:{bound_port}/debug\n")
+    else:
+        print("debug            disabled (--debug-port 0)\n")
 
     # The prompt-drop guard, once, before any transcript content is processed.
     # A model that has stopped reading its prompt would otherwise write invented
@@ -183,6 +221,8 @@ async def cmd_run(args: argparse.Namespace) -> int:
         print(f"CANARY FAILED: {canary.detail}", file=sys.stderr)
         print("Refusing to distil — findings from this model would be invented.",
               file=sys.stderr)
+        if debug_server is not None:
+            debug_server.stop()
         return 1
     print(f"canary           ok (prompt_tokens={canary.input_tokens})\n")
 
@@ -198,6 +238,8 @@ async def cmd_run(args: argparse.Namespace) -> int:
         pass
     result = await loop.shutdown()
     print(f"\nshutdown — {result.summary()}")
+    if debug_server is not None:
+        debug_server.stop()
     return 0
 
 
@@ -387,6 +429,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--from-start",
         action="store_true",
         help="condense the whole transcript, not just new content (expensive)",
+    )
+    run.add_argument(
+        "--debug-port", type=int, default=None,
+        help=f"port for the live /debug dashboard (default {DEFAULT_DEBUG_PORT}; "
+             f"0 disables; overridable via SYNAPSE_DEBUG_PORT)",
     )
     run.set_defaults(func=cmd_run)
 

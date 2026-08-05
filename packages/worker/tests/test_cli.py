@@ -91,6 +91,29 @@ async def test_run_stops_when_the_canary_fails(tmp_path, monkeypatch, capsys) ->
     assert ran.called is False
 
 
+async def test_run_stops_the_debug_server_when_the_canary_fails(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """A canary failure must not leak the dashboard's listening socket."""
+    transcript = tmp_path / "sess.jsonl"
+    _write_transcript(transcript)
+    monkeypatch.setattr(cli, "check_canary", _async(FAILING_CANARY))
+    _FakeDebugServer.instances.clear()
+    monkeypatch.setattr(cli, "DebugServer", _FakeDebugServer)
+
+    exit_code = await cli.cmd_run(
+        _ns(
+            transcript=str(transcript), interval=None, ticks=1, from_start=False,
+            debug_port=8790,
+        )
+    )
+
+    assert exit_code == 1
+    [server] = _FakeDebugServer.instances
+    assert server.started is True
+    assert server.stopped is True
+
+
 async def test_run_with_from_start_does_not_attach_at_end(tmp_path, monkeypatch, capsys) -> None:
     transcript = tmp_path / "sess.jsonl"
     _write_transcript(transcript)
@@ -192,6 +215,115 @@ async def test_run_with_no_transcript_anywhere_exits_cleanly(tmp_path, monkeypat
         await cli.cmd_run(_ns(transcript=None, interval=0.01, ticks=1, from_start=False))
 
     assert excinfo.value.code == 2
+
+
+# ---------------------------------------------------------------------------
+# run — --debug-port
+# ---------------------------------------------------------------------------
+
+async def test_run_starts_the_debug_server_on_the_default_port(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    transcript = tmp_path / "sess.jsonl"
+    _write_transcript(transcript)
+    monkeypatch.setattr(cli, "check_canary", _async(PASSING_CANARY))
+    monkeypatch.delenv("SYNAPSE_DEBUG_PORT", raising=False)
+    _FakeDebugServer.instances.clear()
+    monkeypatch.setattr(cli, "DebugServer", _FakeDebugServer)
+
+    exit_code = await cli.cmd_run(
+        _ns(
+            transcript=str(transcript), interval=0.01, ticks=1, from_start=False,
+            debug_port=None,
+        )
+    )
+
+    assert exit_code == 0
+    [server] = _FakeDebugServer.instances
+    assert server.port == 8790
+    assert server.started is True
+    assert server.stopped is True
+    assert "debug" in capsys.readouterr().out
+
+
+async def test_run_with_debug_port_zero_disables_the_dashboard(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    from synapse_providers import RecordingProvider
+
+    transcript = tmp_path / "sess.jsonl"
+    _write_transcript(transcript)
+    seen = {}
+
+    async def fake_canary(provider):
+        seen["provider"] = provider
+        return PASSING_CANARY
+
+    monkeypatch.setattr(cli, "check_canary", fake_canary)
+    _FakeDebugServer.instances.clear()
+    monkeypatch.setattr(cli, "DebugServer", _FakeDebugServer)
+
+    exit_code = await cli.cmd_run(
+        _ns(
+            transcript=str(transcript), interval=0.01, ticks=1, from_start=False,
+            debug_port=0,
+        )
+    )
+
+    assert exit_code == 0
+    assert _FakeDebugServer.instances == []
+    assert not isinstance(seen["provider"], RecordingProvider)
+
+
+async def test_run_uses_synapse_debug_port_env_when_flag_unset(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    transcript = tmp_path / "sess.jsonl"
+    _write_transcript(transcript)
+    monkeypatch.setattr(cli, "check_canary", _async(PASSING_CANARY))
+    monkeypatch.setenv("SYNAPSE_DEBUG_PORT", "9999")
+    _FakeDebugServer.instances.clear()
+    monkeypatch.setattr(cli, "DebugServer", _FakeDebugServer)
+
+    exit_code = await cli.cmd_run(
+        _ns(
+            transcript=str(transcript), interval=0.01, ticks=1, from_start=False,
+            debug_port=None,
+        )
+    )
+
+    assert exit_code == 0
+    [server] = _FakeDebugServer.instances
+    assert server.port == 9999
+
+
+async def test_run_wraps_the_distiller_provider_when_debug_enabled(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    from synapse_providers import RecordingProvider
+
+    transcript = tmp_path / "sess.jsonl"
+    _write_transcript(transcript)
+    seen = {}
+
+    async def fake_canary(provider):
+        seen["provider"] = provider
+        return PASSING_CANARY
+
+    monkeypatch.setattr(cli, "check_canary", fake_canary)
+    monkeypatch.setattr(cli, "DebugServer", _FakeDebugServer)
+    _FakeDebugServer.instances.clear()
+
+    exit_code = await cli.cmd_run(
+        _ns(
+            transcript=str(transcript), interval=0.01, ticks=1, from_start=False,
+            debug_port=None,
+        )
+    )
+
+    assert exit_code == 0
+    assert isinstance(seen["provider"], RecordingProvider)
+    assert seen["provider"].component == "distiller"
 
 
 # ---------------------------------------------------------------------------
@@ -836,12 +968,38 @@ class _Namespace:
         self.ticks = 1
         self.from_start = False
         self.skipped = False
+        # 0 (disabled) by default so the many cmd_run tests above that never
+        # mention --debug-port don't each try to bind a real socket on 8790.
+        # Tests that care about the dashboard pass debug_port explicitly.
+        self.debug_port = 0
         for key, value in kwargs.items():
             setattr(self, key, value)
 
 
 def _ns(**kwargs) -> _Namespace:
     return _Namespace(**kwargs)
+
+
+class _FakeDebugServer:
+    """Stands in for the real DebugServer so cmd_run tests never bind a real
+    socket. Records construction args and start()/stop() calls."""
+
+    instances: list["_FakeDebugServer"] = []
+
+    def __init__(self, stats, port, *, transcript=None):
+        self.stats = stats
+        self.port = port
+        self.transcript = transcript
+        self.started = False
+        self.stopped = False
+        _FakeDebugServer.instances.append(self)
+
+    def start(self) -> int:
+        self.started = True
+        return self.port
+
+    def stop(self) -> None:
+        self.stopped = True
 
 
 def _async(value):
