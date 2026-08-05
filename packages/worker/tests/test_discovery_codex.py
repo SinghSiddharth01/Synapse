@@ -14,6 +14,7 @@ finds a Codex fixture tree") actually asks for.
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from datetime import datetime, timezone
@@ -30,6 +31,21 @@ from synapse_worker.discovery import (
 )
 from synapse_worker.sources.claude_code import ClaudeCodeSource
 from synapse_worker.sources.codex import CodexSource
+
+
+def _codex_session_meta_line(cwd: str, session_id: str = "codex-sess") -> str:
+    """A minimal `session_meta` line recording `cwd` -- `find_codex_transcripts`
+    reads this back to decide whether a rollout belongs to the directory being
+    queried (Codex's day-tree, unlike Claude Code's `<slug>` dir, does not
+    partition by project on its own)."""
+    return json.dumps(
+        {
+            "timestamp": "2026-08-05T09:00:00Z",
+            "ordinal": 0,
+            "type": "session_meta",
+            "payload": {"id": session_id, "session_id": session_id, "cwd": cwd},
+        }
+    )
 
 
 def _make_codex_transcript(root, day: str, ts: str, uuid: str, content: str = ""):
@@ -143,10 +159,13 @@ def test_resolve_transcript_heuristic_dispatches_to_codex_via_the_agent_param(tm
     regardless. This is the bug the registry fixes."""
     root = tmp_path / "sessions"
     uuid = "1c9b6d8e-27ac-4f1e-9f2c-8a2b1e6d4c11"
-    path = _make_codex_transcript(root, "2026/08/05", "2026-08-05T10-00-00", uuid)
     state_dir = tmp_path / "state"
     cwd = tmp_path / "repo"
     cwd.mkdir()
+    path = _make_codex_transcript(
+        root, "2026/08/05", "2026-08-05T10-00-00", uuid,
+        content=_codex_session_meta_line(str(cwd)) + "\n",
+    )
 
     result = resolve_transcript(cwd, state_dir, agent="codex", projects_root=root)
 
@@ -159,16 +178,77 @@ def test_resolve_transcript_heuristic_dispatches_to_codex_via_the_agent_param(tm
 def test_a_stale_codex_transcript_is_not_treated_as_live(tmp_path) -> None:
     root = tmp_path / "sessions"
     uuid = "1c9b6d8e-27ac-4f1e-9f2c-8a2b1e6d4c11"
-    path = _make_codex_transcript(root, "2026/08/05", "2026-08-05T10-00-00", uuid)
-    stale = time.time() - 3600  # older than LIVE_WINDOW_SECONDS (30 min)
-    os.utime(path, (stale, stale))
     state_dir = tmp_path / "state"
     cwd = tmp_path / "repo"
     cwd.mkdir()
+    path = _make_codex_transcript(
+        root, "2026/08/05", "2026-08-05T10-00-00", uuid,
+        content=_codex_session_meta_line(str(cwd)) + "\n",
+    )
+    stale = time.time() - 3600  # older than LIVE_WINDOW_SECONDS (30 min)
+    os.utime(path, (stale, stale))
 
     result = resolve_transcript(cwd, state_dir, agent="codex", projects_root=root)
 
     assert result is None
+
+
+def test_a_codex_transcript_belonging_to_a_different_repo_is_not_detected(tmp_path) -> None:
+    """BLOCKER regression pin: Codex's day-tree is not partitioned by project,
+    so without reading each rollout's own `session_meta.cwd`, a transcript
+    from an unrelated repo would be silently treated as belonging to `cwd` --
+    and `join`/`run` would then distil that other project's conversation into
+    THIS repo's Shared Session."""
+    root = tmp_path / "sessions"
+    uuid = "1c9b6d8e-27ac-4f1e-9f2c-8a2b1e6d4c11"
+    state_dir = tmp_path / "state"
+    cwd = tmp_path / "repo-a"
+    cwd.mkdir()
+    other_repo = tmp_path / "secret-client-repo"
+    other_repo.mkdir()
+    _make_codex_transcript(
+        root, "2026/08/05", "2026-08-05T10-00-00", uuid,
+        content=_codex_session_meta_line(str(other_repo)) + "\n",
+    )
+
+    result = resolve_transcript(cwd, state_dir, agent="codex", projects_root=root)
+
+    assert result is None
+
+
+def test_a_codex_transcript_with_no_readable_session_meta_is_not_detected(tmp_path) -> None:
+    """A rollout this adapter cannot positively attribute to `cwd` must be
+    excluded, not included by default -- 'cannot tell' must not mean
+    'matches'."""
+    root = tmp_path / "sessions"
+    uuid = "1c9b6d8e-27ac-4f1e-9f2c-8a2b1e6d4c11"
+    state_dir = tmp_path / "state"
+    cwd = tmp_path / "repo"
+    cwd.mkdir()
+    _make_codex_transcript(root, "2026/08/05", "2026-08-05T10-00-00", uuid, content="")
+
+    result = resolve_transcript(cwd, state_dir, agent="codex", projects_root=root)
+
+    assert result is None
+
+
+def test_find_codex_transcripts_with_cwd_none_is_unfiltered(tmp_path) -> None:
+    """The low-level, unscoped query (`cwd=None`) some callers deliberately
+    want -- e.g. `status`-style listings -- must keep returning every
+    candidate, exactly as before this filtering was added."""
+    root = tmp_path / "sessions"
+    a = _make_codex_transcript(
+        root, "2026/08/05", "2026-08-05T09-00-00", "1c9b6d8e-27ac-4f1e-9f2c-8a2b1e6d4c11",
+        content=_codex_session_meta_line("/repo-a") + "\n",
+    )
+    b = _make_codex_transcript(
+        root, "2026/08/05", "2026-08-05T10-00-00", "2d0c7e9f-38bd-5a2f-a03d-9b3c2f7e5d22",
+        content=_codex_session_meta_line("/repo-b") + "\n",
+    )
+
+    found = {t.path for t in find_codex_transcripts(None, root)}
+
+    assert found == {a, b}
 
 
 def test_a_pinned_codex_binding_wins_over_the_heuristic(tmp_path) -> None:
@@ -275,7 +355,10 @@ def test_join_binds_two_agents_at_once(tmp_path, monkeypatch) -> None:
 
     claude_path = _make_claude_transcript(claude_root, cwd, "sess-1")
     codex_uuid = "1c9b6d8e-27ac-4f1e-9f2c-8a2b1e6d4c11"
-    codex_path = _make_codex_transcript(codex_root, "2026/08/05", "2026-08-05T10-00-00", codex_uuid)
+    codex_path = _make_codex_transcript(
+        codex_root, "2026/08/05", "2026-08-05T10-00-00", codex_uuid,
+        content=_codex_session_meta_line(str(cwd)) + "\n",
+    )
 
     bindings = join_session("team-standup", "akhil", cwd, tmp_path / "state")
 
@@ -309,3 +392,28 @@ def test_join_binds_only_the_live_agent_when_the_other_has_nothing(tmp_path, mon
     bindings = join_session("team-standup", "akhil", cwd, tmp_path / "state")
 
     assert [b.agent for b in bindings] == ["claude-code"]
+
+
+def test_join_does_not_bind_a_codex_session_from_a_different_repo(tmp_path, monkeypatch) -> None:
+    """BLOCKER regression pin, the exact scenario from the finding: a Codex
+    session that is live right now but belongs to a DIFFERENT repository must
+    not be bound into this repo's Shared Session just because Codex's
+    day-tree happens to hold both projects' rollouts together."""
+    import synapse_worker.discovery as discovery
+
+    repo_a = tmp_path / "repo-a"
+    repo_a.mkdir()
+    secret_client_repo = tmp_path / "secret-client-repo"
+    secret_client_repo.mkdir()
+    claude_root = tmp_path / "claude-projects"  # left empty
+    codex_root = tmp_path / "codex-sessions"
+    monkeypatch.setattr(discovery, "CLAUDE_PROJECTS", claude_root)
+    monkeypatch.setattr(discovery, "CODEX_SESSIONS", codex_root)
+    _make_codex_transcript(
+        codex_root, "2026/08/05", "2026-08-05T10-00-00", "1c9b6d8e-27ac-4f1e-9f2c-8a2b1e6d4c11",
+        content=_codex_session_meta_line(str(secret_client_repo)) + "\n",
+    )
+
+    bindings = join_session("team-standup", "akhil", repo_a, tmp_path / "state")
+
+    assert bindings == []

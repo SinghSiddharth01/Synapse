@@ -39,6 +39,7 @@ this codebase already breaks on it the same way).
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
@@ -50,7 +51,7 @@ from pathlib import Path
 from synapse_contracts import LocalBinding, SessionBinding, read_binding, write_binding
 
 from synapse_worker.sources.claude_code import ClaudeCodeSource
-from synapse_worker.sources.codex import CodexSource
+from synapse_worker.sources.codex import SESSION_META_TYPE, CodexSource
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +133,54 @@ def _codex_session_id_from_filename(path: Path) -> str | None:
     return match.group("uuid") if match else None
 
 
+def _codex_transcript_cwd(path: Path) -> str | None:
+    """The working directory a Codex rollout was recorded under, read from its
+    own `session_meta` line — the only place that lives, since (unlike Claude
+    Code's `<slug>` directory) Codex's day-tree does not partition by project.
+    `session_meta` is written once, near the top of the file (see module
+    docstring), so this scans forward from the top until it finds one rather
+    than assuming line 0. Returns `None` when no readable `session_meta` line
+    exists — a torn write, a line caught mid-append, or a file this adapter's
+    own parser would also skip — and the caller treats `None` as "does not
+    match", never as "matches everything": a transcript we cannot positively
+    identify must not be attributed to a directory we merely hope it belongs
+    to.
+    """
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(record, dict) or record.get("type") != SESSION_META_TYPE:
+                    continue
+                payload = record.get("payload")
+                if not isinstance(payload, dict):
+                    return None
+                cwd = payload.get("cwd")
+                return str(cwd) if cwd is not None else None
+    except OSError:
+        return None
+    return None
+
+
+def _codex_transcript_matches_cwd(path: Path, cwd: Path) -> bool:
+    recorded = _codex_transcript_cwd(path)
+    if recorded is None:
+        return False
+    try:
+        return Path(recorded).resolve() == Path(cwd).resolve()
+    except (OSError, RuntimeError):
+        # A recorded cwd that cannot be resolved on this machine (e.g. a path
+        # from a different OS or a since-deleted mount) still deserves a
+        # literal comparison rather than being discarded outright.
+        return str(recorded) == str(cwd)
+
+
 def find_codex_transcripts(
     cwd: Path | None = None, projects_root: Path | None = None
 ) -> list[DiscoveredTranscript]:
@@ -142,16 +191,16 @@ def find_codex_transcripts(
 
         ~/.codex/sessions/<YYYY>/<MM>/<DD>/rollout-<timestamp>-<uuid>.jsonl
 
-    **`cwd` is accepted for interface parity with `find_claude_code_
-    transcripts` but is NOT used to filter here.** Unlike Claude Code, whose
-    `<slug>` directory encodes the working directory, Codex's day-tree does
-    not partition by project at all — every project's rollouts land in the
-    same `YYYY/MM/DD` folder, distinguished only by the `cwd` field inside
-    each file's `session_meta` line. Filtering correctly would mean opening
-    every candidate file to read that line; this pass does not do that.
-    Documented limitation, not a silent one — a developer with several Codex
-    projects open sees all of their transcripts here, not just the one under
-    `cwd`.
+    Unlike Claude Code, whose `<slug>` directory encodes the working
+    directory for free, Codex's day-tree does not partition by project at
+    all — every project's rollouts land in the same `YYYY/MM/DD` folder,
+    distinguished only by the `cwd` field inside each file's `session_meta`
+    line. So when `cwd` is given, this opens each candidate to read that
+    line (`_codex_transcript_cwd`) and excludes anything that does not
+    resolve to the same directory — including anything whose `session_meta`
+    cannot be read at all. `cwd=None` (the low-level, unscoped query some
+    callers deliberately want) returns every candidate, unfiltered, exactly
+    as before.
     """
     root = Path(projects_root) if projects_root else CODEX_SESSIONS
     if not root.is_dir():
@@ -163,6 +212,8 @@ def find_codex_transcripts(
         try:
             stat = path.stat()
         except OSError:
+            continue
+        if cwd is not None and not _codex_transcript_matches_cwd(path, cwd):
             continue
         found.append(
             DiscoveredTranscript(

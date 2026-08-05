@@ -296,8 +296,17 @@ def test_build_with_explicit_agent_flag_skips_straight_to_that_agent(tmp_path, m
     monkeypatch.setattr(discovery, "CODEX_SESSIONS", codex_root)
     day_dir = codex_root / "2026" / "08" / "05"
     day_dir.mkdir(parents=True, exist_ok=True)
+    # find_codex_transcripts now reads each candidate's own session_meta.cwd
+    # to decide whether it belongs to Path.cwd() (== tmp_path here, via the
+    # _isolated_cwd autouse fixture) -- an empty file would no longer match.
+    session_meta_line = json.dumps(
+        {
+            "timestamp": "2026-08-05T10-00-00Z", "ordinal": 0, "type": "session_meta",
+            "payload": {"id": "codex-sess", "session_id": "codex-sess", "cwd": str(tmp_path)},
+        }
+    )
     (day_dir / "rollout-2026-08-05T10-00-00-1c9b6d8e-27ac-4f1e-9f2c-8a2b1e6d4c11.jsonl").write_text(
-        "", encoding="utf-8"
+        session_meta_line + "\n", encoding="utf-8"
     )
 
     config, loop, transcript, _, source, _ = cli._build(_ns(transcript=None, agent="codex"))
