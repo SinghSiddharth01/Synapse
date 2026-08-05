@@ -215,7 +215,12 @@ as `memory_version > version_before`, and `synthesis.merge` bumps `memory_versio
 on every structurally-valid verdict, merges or not (`adr/0004`'s Amendment, 2026-08-05: it counts
 **verdict rounds applied**, not merges — see the Amendment for the corrected gloss). A verdict with
 `"merges": []` renders the exact same `synthesized: true` as the flagship merge. The `/watermark`
-call above is the actual observation: sum its `by_type` counts and compare against §A's — **25**
+call above is one observation — but **⟨rehearsed live 2026-08-05⟩ the sum arithmetic only holds
+if *exactly* the flagship pair merges, and the live 8B merges and trivia-marks far more than that**
+(24 pushed → 8 retrievable in one observed run — a better story, and it breaks the arithmetic).
+The robust observation is the **service `/debug` log tail**: point at the `Merged` entry naming
+`f-005a-01, f-005b-01` (or the chain absorbing them); `scripts/rehearse_demo.py --live` checks it.
+The arithmetic remains valid in §A where nothing merges: sum `by_type` against §A's — **25**
 here (26 pushed findings minus 2 merge sources plus 1 synthesized result), against **26** in §A,
 where `seg-005a`/`seg-005b` never merge. If the sum reads 26 here too, the merge did not happen —
 say so, do not claim it off `synthesized: true` alone. `seg-005b` merged into `seg-005a`'s lineage
