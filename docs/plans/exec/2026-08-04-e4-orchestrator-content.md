@@ -30,7 +30,7 @@ Amendment F Q11 put the arrival briefing in the agent-agnostic floor **on the as
 **Interfaces:**
 - Produces: `create_mcp(instructions: str | None = None) -> FastMCP` — module-level `mcp = create_mcp()` stays for the CLI. Tasks 3–4 pass computed instructions into this factory.
 
-- [ ] **Step 1: Write the failing unit test**
+- [x] **Step 1: Write the failing unit test**
 
 Append to `packages/orchestrator/tests/test_server.py`:
 
@@ -47,12 +47,12 @@ def test_default_instructions_contain_the_sentinel():
     assert SENTINEL in create_mcp().instructions
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `uv run pytest packages/orchestrator/tests/test_server.py -v`
 Expected: FAIL — `create_mcp` and `SENTINEL` don't exist.
 
-- [ ] **Step 3: Refactor server.py into a factory**
+- [x] **Step 3: Refactor server.py into a factory**
 
 Keep the module docstring; replace the construction:
 
@@ -77,7 +77,7 @@ def create_mcp(instructions: str | None = None) -> FastMCP:
 mcp = create_mcp()
 ```
 
-- [ ] **Step 4: Write the live probe**
+- [x] **Step 4: Write the live probe**
 
 ```python
 # scripts/verify_instructions.py
@@ -118,7 +118,7 @@ if __name__ == "__main__":
     sys.exit(asyncio.run(main()))
 ```
 
-- [ ] **Step 5: Run both, then commit**
+- [x] **Step 5: Run both, then commit**
 
 Run: `uv run pytest packages/orchestrator -q` → PASS.
 Run the live probe against a booted shell → expect `PROVEN` (record the outcome either way in `docs/STATE.md`).

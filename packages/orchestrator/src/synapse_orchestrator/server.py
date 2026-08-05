@@ -36,14 +36,24 @@ from __future__ import annotations
 
 from mcp.server.fastmcp import FastMCP
 
-mcp = FastMCP(
-    name="synapse",
-    instructions=(
-        "Synapse passively distils this coding session into shared team "
-        "memory. Nothing is exposed yet — query and contribute land with "
-        "Plan D Task D.3, once the Synapse Service exists to back them."
-    ),
+# Stable marker asserted by scripts/verify_instructions.py through a REAL MCP
+# client. If a client ever fails to surface it, amendment F Q11's tier
+# assignment (briefing = agent-agnostic floor) is wrong and must be revisited
+# BEFORE more briefing work is built.
+SENTINEL = "[synapse-briefing]"
+
+_DEFAULT_INSTRUCTIONS = (
+    f"{SENTINEL} Synapse passively distils this coding session into shared "
+    "team memory. No session is bound yet — run `synapse-worker join "
+    "<shared_id>` in a terminal to connect one."
 )
+
+
+def create_mcp(instructions: str | None = None) -> FastMCP:
+    return FastMCP(name="synapse", instructions=instructions or _DEFAULT_INSTRUCTIONS)
+
+
+mcp = create_mcp()
 
 # No tools or prompts registered. A connecting client sees a named server with
 # an empty capability set, which is honest: there is nothing usable here yet.

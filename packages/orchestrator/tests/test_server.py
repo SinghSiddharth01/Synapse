@@ -21,3 +21,15 @@ def test_no_tools_or_prompts_are_registered_yet() -> None:
     real, working capability — not a placeholder — per Plan D Task D.3."""
     assert server.mcp._prompt_manager._prompts == {}
     assert server.mcp._tool_manager._tools == {}
+
+
+from synapse_orchestrator.server import SENTINEL, create_mcp
+
+
+def test_factory_carries_custom_instructions():
+    server = create_mcp("Shared Session: fec decode. 3 findings.")
+    assert server.instructions == "Shared Session: fec decode. 3 findings."
+
+
+def test_default_instructions_contain_the_sentinel():
+    assert SENTINEL in create_mcp().instructions
