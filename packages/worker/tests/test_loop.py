@@ -331,6 +331,35 @@ async def test_triage_disabled_passes_everything_through(tmp_path, worker_loop_f
     assert TriageLog(loop.state_dir).load_skipped() == []
 
 
+async def test_readonly_browsing_turn_is_triaged_out_even_after_compaction(
+    tmp_path, worker_loop_factory
+):
+    """Blocker fix regression, pinned end-to-end through a real
+    WorkerLoop.tick(). Before the fix, compaction dropped every trivial
+    read-only tool_use/tool_result pair outright; an all-browsing turn (two
+    small, clean Read/Grep results, no substantial prose) then had zero
+    tool_use events left for triage.readonly-run to key on, fell through to
+    default-keep, and reached the distiller -- the exact false positive
+    A.5b exists to prevent. See test_compaction.py's unit-level pin of the
+    same property."""
+    loop = worker_loop_factory(tmp_path)
+    write_transcript_lines(loop.transcript, [
+        user_text("what does this file do"),
+        assistant_tool_use("Read", "a.py", "tid-1"),
+        tool_result("Read", "x = 1", "tid-1"),
+        assistant_tool_use("Grep", "TODO", "tid-2"),
+        tool_result("Grep", "no matches", "tid-2"),
+        assistant_text("Nothing notable in there."),
+        user_text("ok thanks"),   # closes the turn
+    ])
+    result = await loop.tick()
+    assert result.skipped_triage == 1
+    assert result.findings == 0
+    from synapse_worker.triage_log import TriageLog
+    [(seg, reason)] = TriageLog(loop.state_dir).load_skipped()
+    assert reason == "readonly-run"
+
+
 async def test_shutdown_applies_triage_to_the_flushed_final_turn(tmp_path, worker_loop_factory):
     """The idle-flushed final turn deserves the same filter as tick()'s -- and
     it is the turn most likely to be a lint-clean wrap-up. Regression for the

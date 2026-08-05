@@ -174,9 +174,21 @@ class WorkerLoop:
         if self.stats:
             kept = len(compacted.events)
             saved = original_chars - sum(len(e.content) for e in compacted.events)
+            # `saved` can legitimately come out negative (compaction's own
+            # omission/trivial markers are text too, and an error-dense
+            # tool_result can survive nearly intact) -- label that honestly
+            # rather than showing "-N chars saved", which reads as a bug in
+            # the dashboard rather than what actually happened. See
+            # compaction.py's MAX_SURVIVOR_LINES amendment: this should now
+            # be rare, not impossible, so it still needs to be reported
+            # straight when it happens ("dashboards show ... honestly").
+            saved_desc = (
+                f"{saved} chars saved" if saved >= 0
+                else f"{-saved} chars added (markers on an already-small segment)"
+            )
             self.stats.event(
                 "compaction",
-                f"{segment.id}: {kept}/{original_events} events kept · {saved} chars saved",
+                f"{segment.id}: {kept}/{original_events} events kept · {saved_desc}",
                 segment=segment.id,
                 events_kept=kept,
                 events_total=original_events,
