@@ -32,7 +32,11 @@ client, which would give one Orchestrator per Agent and dissolve the
 single-egress property the Orchestrator exists to create.
 """
 
+import logging
+
 from mcp.server.fastmcp import FastMCP
+
+logger = logging.getLogger(__name__)
 
 # Stable marker asserted by scripts/verify_instructions.py through a REAL MCP
 # client. If a client ever fails to surface it, amendment F Q11's tier
@@ -77,13 +81,37 @@ def register_tools(server: FastMCP, *, binding, service_url: str, relay,
                 resp = await client.post(url, json={
                     "query": question, "agent_session": binding.agent_session_id})
                 resp.raise_for_status()
-                findings = resp.json().get("findings", [])
+                data = resp.json()
+            # A well-formed empty result ({"findings": []}) and a response that
+            # doesn't even have a "findings" list are different situations —
+            # the first is a true "nothing relevant", the second is E3's
+            # contract not matching what this reads, and must not be rendered
+            # as the same confident "checked, found nothing" answer.
+            if not isinstance(data, dict) or "findings" not in data:
+                raise ValueError(f"response had no 'findings' list: {data!r}")
+            findings = data["findings"]
+            if not isinstance(findings, list):
+                raise ValueError(f"'findings' was not a list: {findings!r}")
+            lines = []
+            for f in findings:
+                attributions = f["attributions"]
+                if not attributions:
+                    raise ValueError(f"finding {f.get('id')!r} has no attributions")
+                # A Synthesized Finding carries every source it merged from
+                # (CONTEXT.md) — crediting only attributions[0] would silently
+                # turn a pooled, teammate-derived insight into what reads as
+                # one person's, in the common case the asking agent's own.
+                contributors = dict.fromkeys(a["contributor"] for a in attributions)
+                lines.append(f"- [{f['type']}] {f['text']} — {', '.join(contributors)}")
         except (_httpx.HTTPError, OSError) as exc:
             return f"Shared memory is unreachable right now ({exc.__class__.__name__})."
-        if not findings:
+        except (ValueError, KeyError, TypeError) as exc:
+            logger.warning("query: response from %s didn't match the expected shape (%s)",
+                           url, exc)
+            return ("Shared memory returned something `query` couldn't parse — try again, "
+                    "or ask a teammate directly for now.")
+        if not lines:
             return "Team memory has nothing relevant to that. (Checked — not skipped.)"
-        lines = [f"- [{f['type']}] {f['text']} — {f['attributions'][0]['contributor']}"
-                 for f in findings]
         return "Relevant team findings, best first:\n" + "\n".join(lines)
 
     @server.tool(description=(
