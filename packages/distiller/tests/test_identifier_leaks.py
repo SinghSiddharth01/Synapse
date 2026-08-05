@@ -62,11 +62,25 @@ def test_shapes_snake_camel_dotted_path_and_fileext():
         assert expected in leaks
 
 
-def test_public_vocabulary_is_not_a_leak():
-    seg = _segment("switched from pgbouncer to asyncpg after running ruff")
-    finding = "Switched from pgbouncer to asyncpg after a ruff pass."
+def test_plain_words_are_never_extracted_as_identifiers():
+    """pgbouncer/asyncpg/ruff/pytest/redis/uv/json/jsonl/codex are plain
+    lowercase words with no internal structure (no separator, no case-hump),
+    so `_identifier_tokens` never extracts them as identifier-shaped in the
+    first place — they do not need an allowlist entry to stay unflagged.
+    They used to sit in DEFAULT_ALLOWLIST anyway; that was dead weight the
+    allowlist filter never actually exercised (see
+    test_allowlist_actually_suppresses_a_reachable_entry for a token the
+    filter genuinely has to work to suppress), so they were pruned."""
+    seg = _segment("switched from pgbouncer to asyncpg after running ruff under pytest and uv")
+    finding = "Switched from pgbouncer to asyncpg after a ruff pass under pytest and uv."
     assert identifier_leaks(finding, seg) == []
-    assert {"pgbouncer", "asyncpg", "ruff"} <= DEFAULT_ALLOWLIST
+    for word in ("pgbouncer", "asyncpg", "ruff", "pytest", "redis", "uv",
+                 "jsonl", "json", "codex"):
+        assert word not in DEFAULT_ALLOWLIST, (
+            f"{word!r} is a plain, separator-free word; the tokenizer can "
+            "never emit it as an identifier, so it must not sit in the "
+            "allowlist as if it needed one"
+        )
 
 
 def test_allowlist_actually_suppresses_a_reachable_entry():
@@ -167,3 +181,20 @@ def test_case_swapped_kebab_copy_is_still_caught():
     seg = _segment("service Auth-Gateway-V2 timed out during the deploy")
     finding = "The auth-gateway-v2 service timed out."
     assert identifier_leaks(finding, seg) == ["auth-gateway-v2"]
+
+
+def test_long_hex_string_copy_is_caught():
+    """A commit sha, hash, or key fragment has no separator at all, so none
+    of the snake/kebab/dotted/camelCase alternatives can see it — only a raw
+    run of hex digits long enough (16+) to be structure rather than an
+    ordinary short number."""
+    seg = _segment("bisected the regression to commit a1b2c3d4e5f6a789 in the log")
+    finding = "Bisected the regression to a1b2c3d4e5f6a789."
+    assert identifier_leaks(finding, seg) == ["a1b2c3d4e5f6a789"]
+
+
+def test_short_hex_like_number_is_not_flagged():
+    """Below the 16-char floor this is indistinguishable from an ordinary
+    short number or id fragment; the detector deliberately does not guess."""
+    seg = _segment("worker 1042 failed with code deadbeef")
+    assert identifier_leaks("Worker 1042 failed with code deadbeef.", seg) == []

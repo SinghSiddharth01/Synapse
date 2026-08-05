@@ -10,9 +10,11 @@ Two metrics, both computable without an LLM, both first-class:
 
   empty-segment discipline  the all-noise fixture must yield an empty array.
 
-Quality-vs-goldens is the LLM-judged axis and is deliberately not here. A
-two-fixture corpus is a directional signal, not a statistical claim — say so
-in any report built from this.
+Quality-vs-goldens is the LLM-judged axis and is deliberately not here.
+Whatever the corpus's fixture count is at the time of a run, it is a
+directional signal, not a statistical claim — scripts/run_npu_eval.py derives
+and prints the live count with that caveat attached. Do not hardcode a count
+here; it goes stale the moment the corpus grows or shrinks.
 """
 
 from __future__ import annotations
@@ -113,11 +115,22 @@ def score_fixture(
 # problem, not a privacy one.
 
 DEFAULT_ALLOWLIST: frozenset[str] = frozenset({
-    # public tools & libraries the corpus names on purpose
-    "pgbouncer", "asyncpg", "ruff", "pytest", "redis", "uv", "jsonl", "json",
     # our own public vocabulary (CONTEXT.md terms that look identifier-shaped)
-    "claude-code", "codex", "tool_use", "tool_result", "dead_end", "open_question",
+    "claude-code", "tool_use", "tool_result", "dead_end", "open_question",
+    # public-domain engineering shorthand a golden names on purpose, kept
+    # rather than reworded — see fixtures/README.md's rule that eval targets
+    # are never edited to satisfy the metric. Both happen to be kebab-shaped
+    # (hence needing an entry at all): "refresh-on-401" (seg-002) and
+    # "mid-stream" (seg-003).
+    "refresh-on-401", "mid-stream",
 })
+# NOTE: plain lowercase words with no internal structure — "pgbouncer",
+# "asyncpg", "ruff", "pytest", "redis", "uv", "json", "jsonl", "codex" — used
+# to live here too. _IDENTIFIER_RE below never extracts a bare word like that
+# as identifier-shaped in the first place (no separator, no case-hump), so an
+# allowlist entry for one is dead weight: it can never suppress anything the
+# tokenizer would have flagged. Pruned; see
+# test_plain_words_are_never_extracted_as_identifiers.
 
 # The trailing boundary intentionally excludes "." (unlike the leading
 # boundary below, which still excludes it). An identifier is very often the
@@ -134,6 +147,7 @@ _IDENTIFIER_RE = re.compile(
       | (?:/|[A-Za-z]:\\)[\w.\\/-]+           # absolute path (unix or windows)
       | [\w-]+(?:/[\w.-]+)+                   # relative path with a slash
       | \d{1,3}(?:\.\d{1,3}){3}               # IPv4 address
+      | [0-9a-fA-F]{16,}                      # long hex string (sha/hash/key fragment)
       | \w+=[^\s,;]+                          # key=value
       | [A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+       # dotted.name (incl. file.ext, host)
       | [A-Za-z0-9]+(?:_[A-Za-z0-9]+)+        # snake_case (either letter case)
