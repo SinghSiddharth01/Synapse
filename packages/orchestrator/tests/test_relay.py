@@ -61,9 +61,23 @@ async def test_resync_repushes_everything_even_after_ack(tmp_path):
     relay.record([_finding("f-1"), _finding("f-2")])
     await relay.flush()
     assert relay.pending_count() == 0
-    pushed = await relay.resync()
-    assert pushed == 2                                      # retained, not deleted on ack
+    pushed, total = await relay.resync()
+    assert (pushed, total) == (2, 2)                        # retained, not deleted on ack
     assert {f["id"] for f in calls[-1]["findings"]} == {"f-1", "f-2"}
+
+
+async def test_resync_reports_failure_distinctly_from_nothing_to_push(tmp_path):
+    """(0, 0) — nothing was ever recorded — must not read the same as a failed
+    push of something that WAS recorded. Collapsing both into a bare int is
+    exactly the ambiguity `resync`'s (pushed, total) shape exists to remove."""
+    def down(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("service down")
+    relay = _relay(tmp_path, down)
+    relay.record([_finding("f-1")])
+    assert await relay.resync() == (0, 1)                   # tried and failed: NOT success
+
+    empty = _relay(tmp_path / "empty", down)
+    assert await empty.resync() == (0, 0)                   # nothing to do: distinguishable
 
 
 async def test_flush_with_nothing_pending_is_free(tmp_path):
@@ -71,3 +85,20 @@ async def test_flush_with_nothing_pending_is_free(tmp_path):
         raise AssertionError("no HTTP call expected")
     relay = _relay(tmp_path, handler)
     assert await relay.flush() == (0, 0)
+
+
+async def test_unbound_relay_never_attempts_the_network(tmp_path):
+    """shared_id=None (no Shared Session bound) must behave like a durable,
+    fail-open queue — never invent a session id and post to it."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("no HTTP call expected when unbound")
+    relay = Relay(tmp_path, "http://svc", None, transport=httpx.MockTransport(handler))
+    relay.record([_finding("f-1")])
+    assert await relay.flush() == (0, 1)
+    assert await relay.resync() == (0, 1)
+
+    relay.rebind("sh-late-join")
+    def up(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"accepted": 1, "memory_version": 1})
+    relay._transport = httpx.MockTransport(up)               # simulate a later join
+    assert await relay.flush() == (1, 0)                     # recovered, not lost

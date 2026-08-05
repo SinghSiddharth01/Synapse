@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 
 class Relay:
-    def __init__(self, state_dir: Path, service_url: str, shared_id: str, *,
+    def __init__(self, state_dir: Path, service_url: str, shared_id: str | None, *,
                  timeout: float = 10.0,
                  transport: httpx.AsyncBaseTransport | None = None) -> None:
         self.state_dir = Path(state_dir)
@@ -32,6 +32,14 @@ class Relay:
         self.shared_id = shared_id
         self.timeout = timeout
         self._transport = transport
+
+    def rebind(self, shared_id: str | None) -> None:
+        """Point future sends at a different (or no) Shared Session.
+
+        Lets a long-lived Relay track a binding that changes after boot —
+        e.g. the producer endpoint re-resolving on every request — without
+        losing the durable log already on disk."""
+        self.shared_id = shared_id
 
     # ── write-ahead ─────────────────────────────────────────────────────────
     def record(self, findings: list[Finding]) -> None:
@@ -65,6 +73,16 @@ class Relay:
 
     # ── egress ──────────────────────────────────────────────────────────────
     async def _post(self, findings: list[Finding]) -> bool:
+        if self.shared_id is None:
+            # No Shared Session is bound. Inventing one (the previous behaviour
+            # posted to a literal "unbound" session id) would egress real
+            # Findings to a session nobody created. Treat exactly like a
+            # service that is merely unreachable: durable, queued, no network
+            # attempt — `resync` (or the next producer POST, once a binding
+            # exists) recovers them.
+            logger.info("No Shared Session bound; %d finding(s) retained locally, "
+                       "not sent", len(findings))
+            return False
         payload = {"findings": [f.model_dump(mode="json") for f in findings]}
         url = f"{self.service_url}/v1/sessions/{self.shared_id}/findings"
         try:
@@ -89,9 +107,20 @@ class Relay:
                 fh.write(f.id + "\n")
         return (len(pending), 0)
 
-    async def resync(self) -> int:
-        """Re-push the entire retained log. The recovery path for a service restart."""
+    async def resync(self) -> tuple[int, int]:
+        """Re-push the entire retained log. The recovery path for a service restart.
+
+        Returns (pushed, total). `pushed == total` (including the (0, 0) empty
+        case) is success; `pushed < total` — always 0, since `_post` is all-or-
+        nothing — means resync did NOT restore the log, whether because the
+        service rejected/refused the push or because no Shared Session is
+        currently bound. Collapsing that into a single int made "nothing to
+        push" and "push failed" the same number; callers must be able to tell
+        them apart to report failure honestly."""
         everything = self._all_findings()
-        if everything and await self._post(everything):
-            return len(everything)
-        return 0
+        total = len(everything)
+        if total == 0:
+            return (0, 0)
+        if await self._post(everything):
+            return (total, total)
+        return (0, total)
