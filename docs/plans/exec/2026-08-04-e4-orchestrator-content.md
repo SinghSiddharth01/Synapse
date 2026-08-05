@@ -373,6 +373,35 @@ return type — restoring the signature this task originally specified. See
 `relay.py`'s module docstring and `cli.cmd_resync` for the full mechanism,
 and `test_relay.py`'s re-join tests for the exact reproduction.
 
+#### Post-review amendment (2026-08-04), round 3
+
+Round 3 review found the partition above closes the leak only for whatever
+reaches `Relay.record()` — a NARROWER claim than "the cross-Shared-Session
+leak is closed," which is how the paragraph above reads on its own.
+`record()` also gained a `shared_id` keyword override in this pass (`def
+record(self, findings, *, shared_id=<unset>)`): a caller that already
+resolved its own target (app.py's per-agent routing, below; `contribute()`
+in server.py) can tag a batch explicitly instead of going through the
+mutable `self.shared_id` / `rebind()`, which removes a live concurrency
+hazard (two coroutines sharing one `Relay` could otherwise have one's
+`record()` observe the other's `rebind()` between call and `await
+flush()`).
+
+**What is still open, in scope terms.** A Finding can still be delivered
+to the wrong Shared Session if it is sitting in the WORKER's own
+write-ahead log (`synapse_worker.producer.Producer`, a *different* durable
+log than this one) at the moment of a `synapse-worker join <new_id>` for
+the SAME Agent product. That log's envelope carries no Shared Session
+identity, the Agent Session id does not change across a re-join, and
+Attribution does not carry a `shared_id` either — so nothing on the wire
+lets this process tell "a stale retry from before the re-join" apart from
+"a Finding produced fresh after it." Closing this needs the producer to
+declare its Shared Session on the wire, which is Task 5 / worker package
+territory and an authorized skip on this branch. It is NOT closed by this
+task or by Task 3's round 3 fix below, and should not be read as closed —
+see `relay.py`'s own module docstring for the full statement of what is and
+isn't fixed.
+
 ---
 
 ### Task 3: producer endpoint on the shared app (D.1) + CLI rewire
@@ -585,6 +614,50 @@ See `app.py`'s module docstring and `test_producer_endpoint.py`'s
 `test_unbound_producer_returns_503_and_never_invents_a_session` and
 `test_producer_endpoint_preserves_producer_supplied_attribution` for the
 exact behavior and its tests.
+
+**Deviation, unrecorded until now (round 3 review, nit):** this amendment's
+point 1 above describes `resolve_binding` as a parameter without ever
+stating that it changed `build_app`'s signature away from this task's own
+Interfaces line (`build_app(relay: Relay, mcp_server: FastMCP | None =
+None) -> Starlette`, above). As shipped after round 2, the real signature
+was `build_app(relay, mcp_server=None, *, resolve_binding:
+Callable[[], LocalBinding | None] | None = None)`. Stated explicitly here
+per round 3's nit finding; the Interfaces line itself is left as originally
+written (plan history is not rewritten).
+
+#### Post-review amendment (2026-08-04), round 3
+
+Round 3 review found the fix above closed attribution trust but not
+routing: preserving `attributions` as the producer sent them means nothing
+if the endpoint still tags/routes every Finding in a POST to the SAME
+single `resolve_binding()` result. With two products joined to two
+different Shared Sessions, a correctly-attributed codex-produced Finding
+was still egressing to whatever session claude-code happened to be joined
+to (or vice versa) — a live cross-Shared-Session leak, reproduced
+end-to-end in `test_producer_endpoint.py::test_producer_endpoint_routes_
+each_agent_to_its_own_shared_session`.
+
+**Fix, further superseding `build_app`'s signature from the round 2
+amendment above:** `resolve_binding` (single, called once per request) is
+replaced with `resolve_binding_for_agent: Callable[[str], LocalBinding |
+None] | None`, called once PER FINDING with that Finding's
+`attributions[0].agent` — never with a single request-wide pick. Each
+Finding is grouped by the Shared Session its OWN Agent resolves to and
+`relay.record(group, shared_id=...)` (relay.py's new override) tags it
+accordingly; a Finding whose Agent has no matching binding — including
+"nothing joined at all" — 503s, naming the unmatched agent(s), with the
+same all-or-nothing "nothing durably recorded on a 503" guarantee the
+round 2 fix had. `cli.py` gained `_resolve_binding_for_agent`, reading
+`bindings/<agent>.json` directly rather than `_resolve_binding`'s "most
+recently joined across every product" pick — that pick is still correct
+and unchanged for the surfaces that need exactly one "current" binding
+(the briefing, the banner, `query`/`contribute` — see Task 4's round 3
+amendment).
+
+This does NOT close the sibling gap for a Finding queued in the WORKER's
+own write-ahead log across a re-join of the SAME Agent product — see Task
+2's round 3 amendment note and `relay.py`'s module docstring for why that
+one needs a worker-side (Task 5) change this branch does not make.
 
 ---
 
@@ -849,6 +922,65 @@ both fixed without changing the Interfaces section above:
   both inside one try/except that returns a calm one-line result in
   `query()`'s voice, matching the Global Constraints' "Fail open, always."
   See `server.py`'s `contribute`.
+
+**Two more deviations, unrecorded until now (round 3 review, nit) — both
+improvements, both tested, neither breaking or changing the Interfaces
+section above:**
+
+- `cli.main(argv: list[str] | None = None, *, transport:
+  httpx.AsyncBaseTransport | None = None) -> int` gained a test-only
+  `transport` keyword, threaded into every httpx call `main` makes (Relay,
+  `build_briefing`, `register_tools`) so the CLI's own tests never open a
+  real socket to the default `--service-url`. See `test_cli.py`'s module
+  docstring.
+- `query()` (commit `96c5012`) changed in two ways beyond what this task's
+  Step 3 code shipped: it distinguishes a response that fails to parse
+  (raises, logs, and returns a "couldn't parse" message) from a
+  well-formed empty result (`{"findings": []}`, the honest "checked, found
+  nothing" case) — the original code's `.get("findings", [])` collapsed
+  both into the same confident negative; and it credits EVERY contributor
+  on a Synthesized Finding's `attributions` list, not just
+  `attributions[0]` — crediting only the first would make a pooled,
+  multi-source insight read as one person's, in the common case the asking
+  agent's own. See `test_query_tool_does_not_report_a_false_negative_on_a_
+  shape_mismatch` and `test_query_tool_credits_every_contributor_on_a_
+  synthesized_finding` in `test_tools.py`.
+
+#### Post-review amendment (2026-08-04), round 3
+
+Round 3 review found two findings sharing one root cause: `register_tools`
+closed over a single `binding` resolved once by `cli.main` at boot
+(Interfaces line above: `register_tools(server, *, binding, ...)`), and
+`cli.main` only called it `if binding is not None`. Consequence 1: an
+orchestrator started before any `synapse-worker join` served a
+permanently tool-less MCP server for the life of the process — proven live
+against the real MCP `initialize`/`tools/list` surface
+(`scripts/verify_instructions.py`-style probe). Consequence 2: even when a
+binding existed at boot, a LATER `synapse-worker join <different_id>` was
+invisible to `query`/`contribute` — they kept using the boot-time binding
+forever, while the producer endpoint (Task 3) re-resolved live, so
+`contribute()` could push a Finding to one Shared Session while `query()`
+kept reading another, in the same process and the same MCP session.
+
+**Fix, further superseding this task's Interfaces line:**
+`register_tools(server, *, resolve_binding: Callable[[], LocalBinding |
+None], service_url, relay, distiller_factory: Callable[[LocalBinding],
+Distiller], transport=None) -> None` — `binding` is gone;
+`resolve_binding` is called fresh at the start of every `query`/
+`contribute` invocation, and `distiller_factory` now takes the freshly
+resolved binding as its argument (so `contribute()`'s Distiller — and the
+Attribution it stamps — always matches the Shared Session the Finding is
+about to be recorded under). `cli.main` calls `register_tools`
+unconditionally, once, at boot, never gated on whether a binding exists
+yet. An unbound `query`/`contribute` call now returns a plain "not joined"
+tool result instead of the tool not existing at all. `contribute()` also
+passes its freshly-resolved `binding.shared_id` straight into
+`relay.record()`'s new override (Task 2's round 3 amendment) instead of
+relying on the mutable `relay.shared_id`, so it can no longer disagree
+with a concurrent producer POST about which session it's recording under.
+See `server.py`'s module docstring and `test_tools.py`'s
+`test_query_and_contribute_pick_up_a_join_that_happens_after_registration`
+for the exact reproduction and fix.
 
 ---
 
