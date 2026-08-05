@@ -356,6 +356,65 @@ def test_build_with_explicit_transcript_and_no_agent_flag_defaults_to_claude_cod
     assert loop.binding.agent == "claude-code"
 
 
+async def test_run_reports_other_agents_bindings_it_is_not_following(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """MAJOR regression pin: `join` can bind two agents (claude-code and
+    codex) in one call, but `run` follows exactly one Source per process.
+    Nothing previously told the operator the second binding sits there
+    unfollowed after a `join` that printed both as bound."""
+    from synapse_contracts import SessionBinding, write_binding
+    from synapse_worker.discovery import binding_path_for_agent
+
+    monkeypatch.setattr(cli, "check_canary", _async(PASSING_CANARY))
+
+    claude_transcript = tmp_path / "cc.jsonl"
+    _write_transcript(claude_transcript)
+    codex_transcript = tmp_path / "codex.jsonl"
+    _write_transcript(codex_transcript)
+
+    write_binding(
+        binding_path_for_agent(tmp_path / ".synapse", "claude-code"),
+        SessionBinding(
+            agent_session_id="cc-sess", shared_id="team-standup", contributor="akhil",
+            agent="claude-code", transcript_path=str(claude_transcript),
+            pinned_at=datetime.now(timezone.utc),
+        ),
+    )
+    write_binding(
+        binding_path_for_agent(tmp_path / ".synapse", "codex"),
+        SessionBinding(
+            agent_session_id="codex-sess", shared_id="team-standup", contributor="akhil",
+            agent="codex", transcript_path=str(codex_transcript),
+            pinned_at=datetime.now(timezone.utc),
+        ),
+    )
+
+    exit_code = await cli.cmd_run(_ns(transcript=None, interval=0.01, ticks=1, from_start=False))
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "selection        pinned" in out
+    assert "also bound: codex" in out
+
+
+async def test_run_says_nothing_when_no_other_agent_is_bound(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """The common single-agent case must not print a spurious note."""
+    transcript = tmp_path / "sess.jsonl"
+    _write_transcript(transcript)
+    monkeypatch.setattr(cli, "check_canary", _async(PASSING_CANARY))
+
+    exit_code = await cli.cmd_run(
+        _ns(transcript=str(transcript), interval=0.01, ticks=1, from_start=False)
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "also bound" not in out
+
+
 async def test_run_swallows_keyboard_interrupt_and_still_shuts_down(
     tmp_path, monkeypatch, capsys
 ) -> None:

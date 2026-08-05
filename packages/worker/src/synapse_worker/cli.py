@@ -133,6 +133,25 @@ def _resolve_agent_and_transcript(
     return first_heuristic if first_heuristic is not None else (None, None)
 
 
+def _other_bound_agents(state_dir: Path, followed_agent: str) -> list[str]:
+    """Which OTHER registered agents currently resolve to something `run`
+    could have followed instead -- a `join`-pinned binding, or a live
+    heuristic transcript -- but isn't, because one `WorkerLoop` follows
+    exactly one Source. `join` can bind several agents in one call
+    (`join_session` loops over `AGENT_REGISTRY`); without this, a
+    Codex-and-Claude-Code join prints two bound agents and `run` then acts on
+    only the first it resolves to, with nothing telling the operator the
+    second binding is sitting there unfollowed.
+    """
+    others = []
+    for other in AGENT_REGISTRY:
+        if other == followed_agent:
+            continue
+        if resolve_transcript(Path.cwd(), state_dir, agent=other) is not None:
+            others.append(other)
+    return others
+
+
 def _build(args: argparse.Namespace, debug_port: int = 0):
     config = load_config()
     worker_cfg = config.worker
@@ -252,6 +271,12 @@ async def cmd_run(args: argparse.Namespace) -> int:
               "exactly one instead.")
     else:
         print(f"selection        {source}")
+    ignored_agents = _other_bound_agents(Path(config.worker.state_dir), loop.agent)
+    if ignored_agents:
+        print(f"note             also bound: {', '.join(ignored_agents)} -- this "
+              f"process follows only {loop.agent!r} (one Source per `run`). "
+              f"Start a separate `synapse-worker run --agent <name>` for "
+              f"each other agent to follow it too.")
     print(f"poll interval    {interval}s")
     print(f"idle flush       {config.worker.idle_flush_seconds}s")
     print(f"sink             {config.worker.sink}")
