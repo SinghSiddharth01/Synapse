@@ -545,6 +545,106 @@ async def test_replay_skipped_requeues_only_the_failed_segment(
     assert sink_file.exists() and sink_file.read_text().strip()  # the good one still shipped
 
 
+async def test_replay_skipped_records_each_finding_before_moving_on(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """Invariant 4 (durability before send): a finding must be written to the
+    write-ahead log the moment its segment is distilled, before the NEXT
+    segment is even touched, before `flush()`, and well before `archive()`
+    destroys the recovery journal. Two mutations pin here: buffering findings
+    in a list and calling `producer.record()` once right before `flush()`
+    (no write-ahead at all), and moving `archive()` before the distillation
+    loop (destroying the journal before anything is durable). Both leave the
+    end-state files on disk identical on this happy path -- only the ORDER of
+    calls exposes them, so this test pins order directly rather than only
+    final content."""
+    from synapse_contracts import (
+        AgentEvent,
+        Attribution,
+        Finding,
+        FindingType,
+        Segment,
+        SessionBinding,
+        write_binding,
+    )
+    from synapse_worker.producer import Producer
+    from synapse_worker.triage_log import TriageLog
+
+    state_dir = tmp_path / ".synapse"
+    ts = datetime(2026, 8, 4, tzinfo=timezone.utc)
+    log = TriageLog(state_dir)
+    seg_a = Segment(id="s-a", agent_session_id="as-t",
+                     events=[AgentEvent(role="assistant", kind="text", content="a",
+                                        ts=ts, agent_session_id="as-t")],
+                     started_at=ts, ended_at=ts)
+    seg_b = Segment(id="s-b", agent_session_id="as-t",
+                     events=[AgentEvent(role="assistant", kind="text", content="b",
+                                        ts=ts, agent_session_id="as-t")],
+                     started_at=ts, ended_at=ts)
+    log.record_skip(seg_a, "lint-clean")
+    log.record_skip(seg_b, "lint-clean")
+    write_binding(
+        cli.binding_path_for_agent(state_dir, cli.DEFAULT_AGENT),
+        SessionBinding(
+            agent_session_id="as-t", shared_id="local-dev",
+            contributor="aditya", agent=cli.DEFAULT_AGENT,
+            transcript_path=str(tmp_path / "sess.jsonl"), pinned_at=ts,
+        ),
+    )
+
+    monkeypatch.setattr(cli, "check_canary", _async(PASSING_CANARY))
+
+    calls: list[str] = []
+
+    class _OrderedDistiller:
+        provider = object()
+
+        async def distil(self, segment):
+            calls.append(f"distil:{segment.id}")
+            finding = Finding(
+                id=f"f-{segment.id}", type=FindingType.LEARNING, text="x",
+                attributions=[Attribution(contributor="a", agent_session="as-t",
+                                          agent="claude-code")],
+                ts=ts,
+            )
+            from types import SimpleNamespace
+            return [finding], SimpleNamespace(skipped_empty=False)
+
+    monkeypatch.setattr(cli, "build_distiller", lambda config, binding: _OrderedDistiller())
+
+    original_record = Producer.record
+
+    def spy_record(self, findings):
+        for f in findings:
+            calls.append(f"record:{f.id}")
+        return original_record(self, findings)
+
+    original_flush = Producer.flush
+
+    async def spy_flush(self):
+        calls.append("flush")
+        return await original_flush(self)
+
+    original_archive = TriageLog.archive
+
+    def spy_archive(self):
+        calls.append("archive")
+        return original_archive(self)
+
+    monkeypatch.setattr(Producer, "record", spy_record)
+    monkeypatch.setattr(Producer, "flush", spy_flush)
+    monkeypatch.setattr(TriageLog, "archive", spy_archive)
+
+    exit_code = await cli.cmd_replay(_ns(skipped=True))
+
+    assert exit_code == 0
+    assert calls == [
+        "distil:s-a", "record:f-s-a",
+        "distil:s-b", "record:f-s-b",
+        "flush", "archive",
+    ]
+
+
 async def test_replay_skipped_with_nothing_pending(tmp_path, capsys) -> None:
     exit_code = await cli.cmd_replay(_ns(skipped=True))
 
