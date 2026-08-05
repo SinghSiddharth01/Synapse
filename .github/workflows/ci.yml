@@ -1,0 +1,57 @@
+# CI — the offline suite plus the fake-mode demo rehearsal.
+#
+# Both jobs are free-tier friendly by design: every test runs offline
+# (FakeProvider, no keys, no NPU, no network — a Plan 0 decision), and the
+# rehearsal's default mode scripts its model verdicts, so nothing here ever
+# touches Cirrascale or spends shared credits. Live-smoke runs stay manual
+# and local — do NOT wire INFERENCE_CLOUD_* secrets into Actions.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: suite (offline, 717 tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"   # the repo's floor — local dev runs newer
+          enable-cache: true
+      - run: uv sync
+      - run: uv run pytest -q
+
+  rehearsal:
+    name: demo rehearsal (fake mode, end to end)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync
+      # Real service + orchestrator subprocesses over real localhost sockets,
+      # scripted verdicts: every §B demo beat asserted, including the
+      # kill/contribute/restart/resync recovery arc. If a beat fails here it
+      # would have failed on stage.
+      - run: uv run python scripts/rehearse_demo.py
+      - name: keep the beat log as an artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rehearsal-log
+          path: .measurements/rehearsal-fake.log
+          retention-days: 14
