@@ -1,6 +1,6 @@
 # 2. Semantic merge produces a new Finding; originals become tombstones
 
-**Status:** Accepted (2026-08-03)
+**Status:** Accepted (2026-08-03). **Mechanism superseded by [ADR 0004](./0004-the-log-is-append-only-and-state-is-a-fold.md) (2026-08-05)** — every decision and consequence below still holds; only *how* a tombstone is represented changed. It is a derived condition (a later `Merged` entry names the finding as a source), not a `merged_into` field written onto the original. Read this ADR for the reasoning, then 0004 for the representation.
 
 ## Context
 
