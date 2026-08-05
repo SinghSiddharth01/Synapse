@@ -41,6 +41,7 @@ from synapse_service.lexical import LexicalIndex
 from synapse_service.log import (
     FindingAppended,
     Log,
+    MarkedTrivial,
     Merged,
     TopicAssigned,
     TopicId,
@@ -70,6 +71,10 @@ class Appended:
     topic_id: TopicId
     topic_founded: bool
     version: int
+    """`Log.version` -- the ENTRY COUNT, internal. Nothing consumes this field
+    today, which is exactly the condition under which someone wires it to a
+    watermark later. It is not `SessionContext.memory_version`. If you need a
+    number for a client, `store.get_context(sid).memory_version` is the one."""
 
 
 @dataclass
@@ -124,6 +129,14 @@ class SharedMemory:
         """
         self.log.append(Merged(result=result, sources=sources))
         return self._index_and_assign(result, sources=sources)
+
+    def mark_trivial(self, finding_ids: tuple[FindingId, ...]) -> None:
+        """Record synthesis's trivia verdict. Nothing is written onto the
+        findings; they leave the view because this entry exists."""
+        if not finding_ids:
+            return
+        self.log.append(MarkedTrivial(finding_ids=finding_ids))
+        self._view = None
 
     def split_topic(self, topic_id: TopicId) -> tuple[TopicId, TopicId]:
         """2-means a collapsed topic. Appends the split; re-tags nothing."""
@@ -193,6 +206,8 @@ class SharedMemory:
                 self.merge(entry.result, entry.sources)
             elif isinstance(entry, TopicSplit):
                 self.split_topic(entry.topic_id)
+            elif isinstance(entry, MarkedTrivial):
+                self.mark_trivial(entry.finding_ids)
             # TopicAssigned is re-emitted by append/merge and is not replayed
             # directly; replaying it would double-count centroid membership.
 

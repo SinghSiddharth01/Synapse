@@ -19,22 +19,23 @@ Three things resolve here, all by the same mechanism:
     topic          the last TopicAssigned, then any TopicSplit reassignment
     trivia         synthesis marked the finding as restating an action
 
-RETRIEVABLE  ==  not superseded and status is KEPT.  Defined once, here. No
-consumer outside this module is given the raw entry list, because a predicate
-re-implemented at a call site is one that eventually gets it subtly wrong and
-surfaces something that was merged away.
+RETRIEVABLE  ==  not superseded and not marked trivial.  Defined once, here.
+No consumer outside this module is given the raw entry list, because a
+predicate re-implemented at a call site is one that eventually gets it subtly
+wrong and surfaces something that was merged away.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from synapse_contracts import Finding, FindingId, FindingStatus
+from synapse_contracts import Finding, FindingId
 
 from synapse_service.log import (
     Entry,
     FindingAppended,
     Log,
+    MarkedTrivial,
     Merged,
     TopicAssigned,
     TopicId,
@@ -64,6 +65,7 @@ class View:
     superseded_by: dict[FindingId, FindingId]
     topic_of: dict[FindingId, TopicId]
     members_of: dict[TopicId, tuple[FindingId, ...]] = field(default_factory=dict)
+    trivial: frozenset[FindingId] = frozenset()
 
     def visible(self) -> list[Finding]:
         """Retrievable findings, in log order. The only list consumers get."""
@@ -102,15 +104,17 @@ def fold(log: Log) -> View:
     findings: dict[FindingId, Finding] = {}
     superseded_by: dict[FindingId, FindingId] = {}
     topic_of: dict[FindingId, TopicId] = {}
+    trivial: set[FindingId] = set()
     order: list[FindingId] = []
 
     for entry in log:
-        _apply(entry, findings, superseded_by, topic_of, order)
+        _apply(entry, findings, superseded_by, topic_of, trivial, order)
 
+    # RETRIEVABLE, defined once, here:
     visible_ids = tuple(
         fid
         for fid in order
-        if fid not in superseded_by and findings[fid].status is FindingStatus.KEPT
+        if fid not in superseded_by and fid not in trivial
     )
 
     members: dict[TopicId, list[FindingId]] = {}
@@ -127,6 +131,7 @@ def fold(log: Log) -> View:
         superseded_by=superseded_by,
         topic_of=topic_of,
         members_of={t: tuple(ids) for t, ids in members.items()},
+        trivial=frozenset(trivial),
     )
 
 
@@ -135,6 +140,7 @@ def _apply(
     findings: dict[FindingId, Finding],
     superseded_by: dict[FindingId, FindingId],
     topic_of: dict[FindingId, TopicId],
+    trivial: set[FindingId],
     order: list[FindingId],
 ) -> None:
     """Fold one entry into the accumulating state."""
@@ -147,6 +153,9 @@ def _apply(
             # Last merge wins if a source is somehow claimed twice. It cannot
             # be un-superseded, which is the property that makes a resend inert.
             superseded_by[source] = entry.result.id
+
+    elif isinstance(entry, MarkedTrivial):
+        trivial.update(entry.finding_ids)
 
     elif isinstance(entry, TopicAssigned):
         topic_of[entry.finding_id] = entry.topic_id

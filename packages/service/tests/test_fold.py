@@ -13,7 +13,9 @@ import pytest
 from synapse_contracts import Attribution, Finding, FindingStatus, FindingType
 
 from synapse_service.fold import SupersessionCycleError, fold
-from synapse_service.log import FindingAppended, Log, Merged, TopicAssigned, TopicSplit
+from synapse_service.log import (FindingAppended, Log, MarkedTrivial, Merged,
+                                 TopicAssigned, TopicSplit)
+from synapse_service.memory import SharedMemory
 
 TS = datetime(2026, 8, 4, 12, 0, tzinfo=UTC)
 
@@ -110,19 +112,6 @@ def test_first_write_of_an_id_wins() -> None:
     assert view.findings["a"].text == "original text"
 
 
-def test_trivial_findings_are_stored_but_not_visible() -> None:
-    log = Log(shared_id="s")
-    log.append(
-        FindingAppended(finding=_finding("a", status=FindingStatus.TRIVIAL))
-    )
-    log.append(FindingAppended(finding=_finding("b")))
-
-    view = fold(log)
-
-    assert view.visible_ids == ("b",)
-    assert "a" in view.findings
-
-
 def test_resolve_follows_a_chain_forward() -> None:
     """A Conflict holds ids, and the finding it names may since have merged."""
     log = Log(shared_id="s")
@@ -181,3 +170,63 @@ def test_folding_twice_gives_the_same_view() -> None:
     log.append(Merged(result=_finding("c"), sources=("a",)))
 
     assert fold(log) == fold(log)
+
+
+def test_marked_trivial_removes_a_finding_from_the_view_without_deleting_it():
+    log = Log(shared_id="s")
+    log.append(FindingAppended(finding=_finding("a")))
+    log.append(FindingAppended(finding=_finding("b")))
+    log.append(MarkedTrivial(finding_ids=("a",)))
+
+    view = fold(log)
+
+    assert view.visible_ids == ("b",)
+    assert "a" in view.findings                      # retained, not deleted
+    assert view.trivial == frozenset({"a"})
+
+
+def test_a_producer_supplied_trivial_status_does_not_hide_a_finding():
+    """The fold no longer reads Finding.status AT ALL -- that field is
+    producer-writable and `api.push_findings` runs only model_validate, so a
+    first push carrying status=trivial used to exclude itself from retrieval
+    forever with no way to correct it (adr/0004 Amendment, argument 2).
+
+    Replaces test_trivial_findings_are_stored_but_not_visible, which asserted
+    the opposite against the OLD mechanism."""
+    log = Log(shared_id="s")
+    log.append(FindingAppended(finding=_finding("a", status=FindingStatus.TRIVIAL)))
+    log.append(FindingAppended(finding=_finding("b")))
+
+    view = fold(log)
+
+    assert view.visible_ids == ("a", "b")
+
+
+def test_a_finding_both_merged_and_marked_trivial_is_absent_once_not_twice():
+    log = Log(shared_id="s")
+    log.append(FindingAppended(finding=_finding("a")))
+    log.append(Merged(result=_finding("syn"), sources=("a",)))
+    log.append(MarkedTrivial(finding_ids=("a",)))
+
+    view = fold(log)
+
+    assert view.visible_ids == ("syn",)
+    assert list(view.visible_ids).count("syn") == 1
+
+
+def test_marked_trivial_round_trips_through_rebuild():
+    """The pin on adr/0004's central claim: 'the log is the only thing that
+    has to survive.' If a MarkedTrivial entry does not come back from a replay,
+    the trivia verdict has become a second source of truth hiding as a cache."""
+    memory = SharedMemory(shared_id="s")
+    memory.append(_finding("a"))
+    memory.append(_finding("b"))
+    memory.mark_trivial(("a",))
+    before = memory.view()
+
+    memory.rebuild()
+    after = memory.view()
+
+    assert after.visible_ids == before.visible_ids == ("b",)
+    assert after.trivial == before.trivial == frozenset({"a"})
+    assert set(after.findings) == set(before.findings)

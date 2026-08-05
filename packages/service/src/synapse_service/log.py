@@ -24,10 +24,11 @@ makes three separate problems disappear:
   3. Conflicts reference finding ids. Nothing dangles, because nothing is ever
      removed.
 
-Four entry kinds, and they are deliberately all the same shape of thing — a
-fact that happened, at a position. `Merged`, `TopicAssigned` and `TopicSplit`
-are not mutations dressed up as events; supersession and topic membership are
-*computed* from their presence during the fold (see fold.py).
+Five entry kinds, and they are deliberately all the same shape of thing — a
+fact that happened, at a position. `Merged`, `MarkedTrivial`, `TopicAssigned`
+and `TopicSplit` are not mutations dressed up as events; supersession, trivia
+and topic membership are all *computed* from their presence during the fold
+(see fold.py).
 
 See docs/adr/0002-semantic-merge-and-tombstones.md and Plan C Task C.2.
 """
@@ -70,14 +71,40 @@ class Merged:
 
 
 @dataclass(frozen=True)
-class TopicAssigned:
-    """A finding joined a topic, or founded one.
+class MarkedTrivial:
+    """Synthesis judged these findings to restate an action without insight.
 
-    Membership is decided by cosine against existing centroids (see
-    semantic.py) — deterministic, no model. It is recorded rather than
-    re-derived because centroids drift as members join, so assignment depends
-    on arrival order. Replaying the decision is cheap; recomputing it is not,
-    and would have to reproduce that order exactly.
+    The FIFTH kind (adr/0004 Amendment A3, 2026-08-05). The original four
+    cannot express the trivia verdict, and the fold's old visibility rule read
+    `Finding.status` -- a producer-writable field that nothing in this package
+    ever wrote, and that adr/0004 itself tells readers to treat as undefined.
+
+    Durability judgment has exactly two homes (`adr/0003`): triage upstream and
+    this verdict downstream. This entry kind is what keeps the second one from
+    being deleted by the move to an append-only log.
+    """
+
+    finding_ids: tuple[FindingId, ...]
+    kind: Literal["marked_trivial"] = "marked_trivial"
+
+
+@dataclass(frozen=True)
+class TopicAssigned:
+    """Which topic a finding landed in, recorded at the moment it landed.
+
+    Read by `fold()` to build `View.topic_of`, which is what `View.members_of`
+    and every topic label are derived from.
+
+    ⟨CORRECTED 2026-08-05⟩ This entry is NOT replayed by `SharedMemory.rebuild()`
+    -- `rebuild()` re-derives it, by calling `append`/`merge` again and letting
+    `_index_and_assign` emit a fresh one (see the comment at the tail of
+    `rebuild()`). So a label's stability across a rebuild rests on the REPLAY
+    ORDER being identical, not on this entry being read back. The docstring
+    previously argued "replaying the decision is cheap; recomputing it is not",
+    which describes a design this module does not have. Making `rebuild()`
+    actually replay it is a behaviour change and is out of scope for Aug 7; the
+    day assignment stops being deterministic -- a real `Embedder`, or membership
+    pruning -- it stops being out of scope.
     """
 
     finding_id: FindingId
@@ -103,7 +130,7 @@ class TopicSplit:
     kind: Literal["topic_split"] = "topic_split"
 
 
-Entry = Union[FindingAppended, Merged, TopicAssigned, TopicSplit]
+Entry = Union[FindingAppended, Merged, MarkedTrivial, TopicAssigned, TopicSplit]
 
 
 @dataclass
@@ -136,11 +163,17 @@ class Log:
 
     @property
     def version(self) -> int:
-        """Monotonic and total. This is `memory_version` for the watermark.
+        """The entry count. Monotonic, total, and INTERNAL.
 
-        It advances on every entry rather than only on merges, so "has anything
-        changed since I last looked" is answerable without a model call and
-        without inspecting what kind of change it was.
+        Its only job is invalidating the fold cache in `SharedMemory.view()`.
+
+        It is **not** `SessionContext.memory_version` and must never be reported
+        as a watermark. `memory_version` counts VERDICT ROUNDS APPLIED -- it is
+        bumped once at the end of every structurally-valid synthesis verdict,
+        merges or not -- and that is what `/findings`, `/synthesize` and
+        `/watermark` report. Taking this number instead would make
+        `synthesized` True on every push including a pure replay, and turn
+        `new_since` into a count of log entries (2+ per finding).
         """
         return len(self.entries)
 
