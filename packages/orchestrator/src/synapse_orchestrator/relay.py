@@ -7,6 +7,30 @@ delivery, unsent = the difference, RETAINED after ack so `resync` can answer
 a service restart (amendment F Q5). Replay is safe because ingest upserts by
 Finding.id (first-write-wins, E3 Task 1).
 
+#### Plan E amendment (2026-08-05) — what the recovery path actually does
+
+The service's Log is in-memory and dies with a restart; nothing here changes
+that. What this module's `resync()`/`resync_sessions()` DO buy, paired with
+`InMemoryStore.create_session`'s create-or-return (Plan E Task 11): every
+Shared Session this retained log names gets RECREATED (the sh-... 404s after a
+restart otherwise, and cannot be recreated by construction), each group is
+re-pushed to its own session, and `cli.cmd_resync` then calls `/synthesize` on
+every session that converged. **That is TWO model calls per session** — the
+push's own merge over the whole re-pushed batch, then `/synthesize` over at
+most `CANDIDATE_WINDOW` (20) retrievable findings, which REWRITES
+`working_memory` from those twenty. What is recomputed, not restored:
+synthesized findings get new ids; Working Memory and Conflicts are re-derived
+by a fresh model call rather than replayed, so on a large session the result
+is a summary of a slice rather than of everything; `purpose` is lost on a
+genuine recreate (the retained log does not carry it); and any contributor who
+does not resync is gone entirely.
+
+`_post`'s 404-is-retryable rule exists for this: the overwhelmingly likely 404
+here is "the service restarted and no longer knows this session", which stops
+being true the moment the recreate pass above runs — so those findings stay
+queued and flush themselves with no human involved. Only 400–499 excluding 404
+is terminal (`dropped.jsonl`); a 5xx or a transport error is always retried.
+
 #### Post-review amendment (2026-08-04)
 
 Round 2 found a blocker: the log was one undifferentiated stream and
@@ -76,6 +100,7 @@ class Relay:
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.findings_path = self.state_dir / "findings.jsonl"
         self.sent_path = self.state_dir / "sent.jsonl"
+        self.dropped_path = self.state_dir / "dropped.jsonl"
         self.service_url = service_url.rstrip("/")
         self.shared_id = shared_id
         self.timeout = timeout
@@ -150,9 +175,12 @@ class Relay:
     def _sent_ids(self) -> set[str]:
         return set(self._load(self.sent_path))
 
+    def _dropped_ids(self) -> set[str]:
+        return set(self._load(self.dropped_path))
+
     def _pending(self) -> list[tuple[str | None, Finding]]:
-        sent = self._sent_ids()
-        return [(sid, f) for sid, f in self._all_entries() if f.id not in sent]
+        excluded = self._sent_ids() | self._dropped_ids()
+        return [(sid, f) for sid, f in self._all_entries() if f.id not in excluded]
 
     def pending_count(self) -> int:
         return len(self._pending())
@@ -190,7 +218,22 @@ class Relay:
         return groups
 
     # ── egress ──────────────────────────────────────────────────────────────
-    async def _post(self, shared_id: str, findings: list[Finding]) -> bool:
+    async def _post(self, shared_id: str, findings: list[Finding]) -> str:
+        """'ok' | 'retry' | 'terminal'.
+
+        `httpx.HTTPError` includes `HTTPStatusError`, so the single except
+        below used to make a permanent 422 indistinguishable from a transient
+        outage: the relay looped forever, logging 'Service unavailable' about a
+        request that could never succeed.
+
+        404 IS NOT TERMINAL. The likeliest 404 here is 'the service restarted
+        and no longer knows this session', which stops being true the moment
+        `cmd_resync` recreates it (Step 2) -- so the queue flushes itself with
+        no human involved. Only 4xx that cannot become true are terminal.
+
+        Returns a STRING, not a bool. Both non-ok values are truthy; every
+        caller must compare against 'ok' explicitly.
+        """
         payload = {"findings": [f.model_dump(mode="json") for f in findings]}
         url = f"{self.service_url}/v1/sessions/{shared_id}/findings"
         try:
@@ -198,11 +241,28 @@ class Relay:
                                          timeout=self.timeout) as client:
                 resp = await client.post(url, json=payload)
                 resp.raise_for_status()
-            return True
+            return "ok"
+        except httpx.HTTPStatusError as exc:
+            code = exc.response.status_code
+            if code == 404:
+                logger.warning(
+                    "404 from %s — the service does not know session %r. %d finding(s) "
+                    "stay queued; `synapse-orchestrator resync` recreates the session and "
+                    "they flush themselves.", url, shared_id, len(findings))
+                return "retry"
+            if 400 <= code < 500:
+                logger.warning(
+                    "Terminal %d from %s; dropping %d finding(s) for session %r from the "
+                    "retry queue. `synapse-orchestrator resync` re-offers them.",
+                    code, url, len(findings), shared_id)
+                return "terminal"
+            logger.info("Service error %d; %d finding(s) for session %r stay queued",
+                        code, len(findings), shared_id)
+            return "retry"
         except (httpx.HTTPError, OSError) as exc:
             logger.info("Service unavailable (%s); %d finding(s) for session %r stay queued",
                         exc.__class__.__name__, len(findings), shared_id)
-            return False
+            return "retry"
 
     async def flush(self) -> tuple[int, int]:
         """Push every pending Finding, each to the Shared Session it was
@@ -210,7 +270,13 @@ class Relay:
         happens to be right now. Returns `(sent, still-pending)`, totalled
         across every session present in the backlog. A Finding recorded
         while unbound counts toward `still-pending` but is never attempted
-        (there is nowhere to send it)."""
+        (there is nowhere to send it).
+
+        A `retry` result (a 404, an outage, a 5xx) leaves the finding
+        pending — it is re-attempted on the next flush. A `terminal` result
+        (400/422/…) writes its ids to `dropped.jsonl` and counts it as
+        neither sent nor pending: no amount of re-attempting can make a
+        permanently malformed payload succeed."""
         pending = self._pending()
         if not pending:
             return (0, 0)
@@ -218,36 +284,49 @@ class Relay:
         pending_total = sum(1 for sid, _ in pending if sid is None)
         sent_total = 0
         newly_sent_ids: list[str] = []
+        newly_dropped_ids: list[str] = []
         for shared_id, findings in groups.items():
-            if await self._post(shared_id, findings):
+            outcome = await self._post(shared_id, findings)
+            if outcome == "ok":
                 sent_total += len(findings)
                 newly_sent_ids.extend(f.id for f in findings)
-            else:
+            elif outcome == "terminal":
+                newly_dropped_ids.extend(f.id for f in findings)
+            else:                                       # "retry"
                 pending_total += len(findings)
         if newly_sent_ids:
             with self.sent_path.open("a", encoding="utf-8") as fh:
                 for fid in newly_sent_ids:
                     fh.write(fid + "\n")
+        if newly_dropped_ids:
+            with self.dropped_path.open("a", encoding="utf-8") as fh:
+                for fid in newly_dropped_ids:
+                    fh.write(fid + "\n")
         return (sent_total, pending_total)
 
-    async def resync(self) -> int:
-        """Re-push the entire retained log — sent or not — the recovery path
-        for a service restart (amendment F Q5). Each Finding goes only to
-        the Shared Session recorded alongside it (see `record()`); a Finding
-        recorded while unbound has no session to resync to and is skipped
-        (see `retained_count()`).
+    async def resync_sessions(self) -> dict[str, int]:
+        """Re-push the entire retained log — sent or not — and report WHICH
+        sessions converged. `{shared_id: count}`, successes only.
 
-        Returns the total count of Findings successfully re-pushed, across
-        every Shared Session in the backlog — the plan's documented `-> int`
-        signature (Task 2 Interfaces). A prior pass changed this to
-        `tuple[int, int]` to let a caller distinguish "nothing to push" from
-        "push failed"; that distinction is still available, just from
-        `retained_count()` compared against this return value, rather than
-        baked into the return type itself — see `cli.cmd_resync`.
+        `resync()` keeps its documented bare-int signature and is now one line
+        over this. The caller needs the ids: findings are partitioned by the
+        Shared Session each was RECORDED under (see `record()`), so a backlog
+        routinely spans several, and re-synthesizing only the currently-bound
+        one leaves every other session with its findings back and no Working
+        Memory, no conflicts and no merges.
+
+        `dropped.jsonl` is deliberately IGNORED here: this is the
+        operator-invoked recovery path, and a session recreated by
+        create-or-return should get those findings offered again.
         """
         groups = self._group(self._all_entries())
-        pushed = 0
+        pushed: dict[str, int] = {}
         for shared_id, findings in groups.items():
-            if await self._post(shared_id, findings):
-                pushed += len(findings)
+            if await self._post(shared_id, findings) == "ok":     # never truthiness
+                pushed[shared_id] = pushed.get(shared_id, 0) + len(findings)
         return pushed
+
+    async def resync(self) -> int:
+        """Total re-pushed across every session. The plan's documented `-> int`
+        (Task 2 Interfaces), unchanged."""
+        return sum((await self.resync_sessions()).values())

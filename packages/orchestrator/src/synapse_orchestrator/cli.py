@@ -174,7 +174,8 @@ async def cmd_resync(args: argparse.Namespace, *,
             except (httpx.HTTPError, OSError):
                 pass          # the push below reports the real failure, loudly
 
-    pushed = await relay.resync()
+    pushed_by_session = await relay.resync_sessions()
+    pushed = sum(pushed_by_session.values())
 
     label = shared_id or "unbound"
     # The loud-failure branch stays exactly where main has it and fires BEFORE
@@ -202,7 +203,7 @@ async def cmd_resync(args: argparse.Namespace, *,
     #    docs say so rather than leaving it for the demo to reveal.
     synthesized: list[str] = []
     async with httpx.AsyncClient(transport=transport, timeout=10.0) as client:
-        for sid in known_sessions:
+        for sid in sorted(pushed_by_session):         # only the ones that converged
             try:
                 resp = await client.post(f"{base}/v1/sessions/{sid}/synthesize")
                 resp.raise_for_status()
