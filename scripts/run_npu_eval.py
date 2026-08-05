@@ -131,7 +131,10 @@ async def main() -> int:
         print(f"\n  identifier leaks across corpus: {', '.join(all_leaks)}")
         print("  The privacy claim does NOT hold for this run. Do not demo this table.")
     else:
-        print("\n  identifier leaks: none detected (allowlist applies — see evaluation.py)")
+        print(
+            "\n  identifier leaks: none detected by this heuristic — evidence, not "
+            "proof (allowlist and known gaps in evaluation.py: identifier_leaks docstring)"
+        )
 
     if scores:
         total_out = sum(s.output_tokens for s in scores)
