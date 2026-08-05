@@ -192,6 +192,23 @@ def test_one_clean_lint_result_does_not_veto_a_real_edit_in_the_same_segment():
     assert d.keep
 
 
+def test_clean_and_failing_status_on_the_SAME_line_reads_as_a_failure():
+    # Adjudicated fix for the same-line false negative: task runners commonly
+    # print one status line per stage, pipe- or semicolon-joined ("just check"
+    # style: "lint: all checks passed | tests: 3 failed"). Before this fix,
+    # `_has_uncleared_error` vetoed the whole LINE the instant any clean
+    # phrase appeared on it, even when an unrelated stage on the very same
+    # line had genuinely failed. Per-line scanning has to become per-clause:
+    # a real failure and a clean phrase in different clauses of one line must
+    # still read as a failure -- the clean phrase only vetoes an error match
+    # that shares ITS clause.
+    d = triage(_seg([
+        _ev(role="user", kind="tool_result", tool_name="Bash",
+            content="lint: all checks passed | tests: 3 failed"),
+    ]))
+    assert d.keep and d.reason == "error-signal"
+
+
 def test_lint_clean_phrase_in_unrelated_log_does_not_swallow_substantial_analysis():
     # The phrase "all checks passed" appearing in a generic CI log (not an
     # actual lint tool_result) must not silently skip real analysis sitting

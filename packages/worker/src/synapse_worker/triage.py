@@ -45,19 +45,37 @@ class TriageDecision:
     reason: str
 
 
-def _has_uncleared_error(content: str) -> bool:
-    """True if some LINE of `content` reads as an error not cleared on that
-    same line.
+def _clauses(content: str):
+    """Split `content` into per-line, then per-clause, chunks.
 
-    Per-line, not per-content: one Bash call routinely interleaves a clean
-    lint pass with a failing test run (or a clean-count phrase like "0 errors"
-    on one line and a real failure on another), and a clean-report phrase
-    anywhere in the content must not veto a real error sitting on a different
-    line of the same tool_result.
+    Task runners routinely print one status per stage on a SINGLE line,
+    pipe- or semicolon-joined ("just check" style: "lint: all checks passed |
+    tests: 3 failed"). Splitting only on newline leaves a clean stage and a
+    genuinely failing stage sharing one string, and the clean-phrase veto
+    below would then suppress the failure. Splitting further on `|`/`;` turns
+    each independently-reported stage into its own clause, so the veto only
+    ever applies within the stage that earned it.
+    """
+    for line in content.splitlines():
+        for clause in re.split(r"[|;]", line):
+            yield clause
+
+
+def _has_uncleared_error(content: str) -> bool:
+    """True if some CLAUSE of `content` reads as an error not cleared in that
+    same clause (see `_clauses`).
+
+    Per-clause, not per-content: a clean-report phrase anywhere in the
+    content must not veto a real error sitting in a different clause of the
+    same tool_result — but a clean phrase and a real failure sharing one
+    clause (e.g. "Found 3 errors (3 fixed, 0 remaining)", where "errors" is
+    just the clean report's own count noun) still reads as clean: the tie
+    only breaks toward failure when the failure is independently reported,
+    not when it's the clean phrase's own vocabulary.
     """
     return any(
-        ERROR_RE.search(line) and not LINT_CLEAN_RE.search(line)
-        for line in content.splitlines()
+        ERROR_RE.search(clause) and not LINT_CLEAN_RE.search(clause)
+        for clause in _clauses(content)
     )
 
 
