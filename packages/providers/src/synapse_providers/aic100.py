@@ -166,10 +166,24 @@ class AIC100Provider(ModelProvider):
                     "max_tokens": self.max_tokens, "temperature": temperature})
                 resp.raise_for_status()
                 payload = resp.json()
-                text = payload["choices"][0].get("text", "")
+                choice = payload["choices"][0]
+                text = choice.get("text", "")
                 parsed = extract_first_json_object(text)
                 if parsed is not None and _satisfies_schema(parsed, response_schema):
                     return self._result(parsed, payload, started, schema_valid=True)
+                if choice.get("finish_reason") == "length":
+                    # A response cut off by max_tokens takes the IDENTICAL
+                    # path as unparseable garbage from here on (retry, then
+                    # honest schema_valid=False) -- nothing in the
+                    # ModelResult distinguishes "the model was wrong" from
+                    # "we cut it off mid-answer". Log it distinctly so an
+                    # operator watching logs (not just HTTP 200s) can tell
+                    # the two apart and knows to raise max_tokens rather
+                    # than blame the model or the prompt.
+                    logger.warning("AIC100 response truncated at max_tokens=%d "
+                                   "(finish_reason=length) on attempt %d; a truncated "
+                                   "response is indistinguishable from garbage downstream "
+                                   "without this log line", self.max_tokens, attempt)
                 prompt = (base_prompt
                          + "\n\nYour previous response did not match the schema:\n"
                          + text.strip()[:500]

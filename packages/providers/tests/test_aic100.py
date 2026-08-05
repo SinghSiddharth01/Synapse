@@ -2,6 +2,7 @@
    1. schema calls must route via /completions (chat eats JSON into empty tool_calls)
    2. response_format must never be sent (silently ignored -> false confidence)"""
 import json
+import logging
 
 import httpx
 import pytest
@@ -150,6 +151,29 @@ def test_satisfies_schema_tolerates_a_verdict_missing_one_of_several_required_ke
 def test_satisfies_schema_still_rejects_a_response_matching_none_of_the_keys():
     unrelated = {"totally": "unrelated"}
     assert _satisfies_schema(unrelated, MULTI_KEY_SCHEMA) is False
+
+
+async def test_a_truncated_response_is_logged_distinctly_from_a_parse_failure(caplog):
+    """SYNTH_SYSTEM asks for a working-memory rewrite (under 500 words,
+    ~650-700 tokens alone) plus JSON scaffolding for merges/trivial_ids/
+    conflicts, all under max_tokens=800 by default. A response cut off by
+    the token budget takes the IDENTICAL code path as unparseable garbage
+    (extract -> None -> retry -> None -> schema_valid=False): both
+    silently return schema_valid=False with no distinguishing signal
+    anywhere the HTTP layer or synthesis.py can see. finish_reason must at
+    least be logged distinctly so an operator watching logs (not just "all
+    200s, no memory") can tell a truncation from the model simply being
+    wrong."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={
+            "choices": [{"text": '{"working_memory": "cut off mid-sentence and then',
+                        "finish_reason": "length"}],
+            "usage": {"prompt_tokens": 4, "completion_tokens": 800}})
+    with caplog.at_level(logging.WARNING):
+        result = await _provider(handler).complete(
+            [{"role": "user", "content": "u"}], response_schema=SCHEMA)
+    assert result.schema_valid is False
+    assert any("truncat" in rec.message.lower() for rec in caplog.records)
 
 
 async def test_the_retry_is_not_a_byte_identical_resend():
