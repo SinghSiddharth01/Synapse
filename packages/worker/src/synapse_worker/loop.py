@@ -31,10 +31,12 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from synapse_contracts import AgentEvent, LocalBinding
+from synapse_contracts import AgentEvent, LocalBinding, Segment, read_binding
 from synapse_distiller import Distiller
 from synapse_distiller.guards import PromptDropError
 
+from synapse_worker.compaction import compact
+from synapse_worker.discovery import binding_path_for_agent
 from synapse_worker.follower import TranscriptFollower
 from synapse_worker.producer import Producer
 from synapse_worker.segmenter import Segmenter
@@ -54,6 +56,7 @@ class TickResult:
     findings: int = 0
     sent: int = 0
     pending_send: int = 0
+    held: int = 0
     pending_events: int = 0
     skipped_no_change: bool = False
     flushed_incomplete: bool = False
@@ -75,6 +78,8 @@ class TickResult:
             bits.append(f"{self.sent} sent")
         if self.pending_send:
             bits.append(f"{self.pending_send} queued")
+        if self.held:
+            bits.append(f"{self.held} held (other session)")
         if self.pending_events:
             bits.append(f"{self.pending_events} events held (turn open)")
         if self.flushed_incomplete:
@@ -102,6 +107,31 @@ class WorkerLoop:
         self.distiller = distiller
         self.producer = producer
         self.binding = binding
+        # Sync the Producer's write-ahead log to THIS loop's binding, whatever
+        # `shared_id` it happened to be constructed with — the re-join
+        # envelope (producer.py's module docstring, STATE.md trap #8) needs
+        # `flush()`'s notion of "current" to always match the binding this
+        # loop actually runs under, not a stale or default value from
+        # construction time.
+        #
+        # AMENDMENT (fixer pass, blocker): this alone only covers the
+        # cross-process half of trap #8 — a NEW `run` started after `join
+        # <new_id>` picks the new binding up correctly, because `_build`
+        # re-resolves it from disk before constructing this loop at all. The
+        # same-process half (`synapse-worker join <new_id>` typed in another
+        # terminal while THIS `run` is still live) has no channel to this
+        # object at all: nothing here ever re-reads
+        # `.synapse/bindings/<agent>.json` again after this one call, so a
+        # Finding recorded under the old binding before the re-join would
+        # keep reading as deliverable under the old `shared_id` forever, and
+        # `flush()` would ship it — which the orchestrator, resolving the
+        # destination fresh from disk on every POST
+        # (`_resolve_binding_for_agent`, its own docstring: "read fresh from
+        # disk"), would then deliver under the NEW session. `_sync_binding_
+        # from_disk` below closes that gap by doing on the worker side,
+        # once per `tick()`/`shutdown()`, exactly what the orchestrator
+        # already does per POST.
+        self.producer.rebind(binding.shared_id)
         self.state_dir = Path(state_dir)
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.stats = stats
@@ -150,8 +180,87 @@ class WorkerLoop:
         self.follower.start_at_end(self.transcript)
         self.follower.save()
 
+    def _sync_binding_from_disk(self) -> None:
+        """Re-resolve this Agent product's join binding from disk and
+        `rebind()` the Producer when it moved — the same-process half of
+        the re-join envelope (STATE.md trap #8) that `__init__`'s one-time
+        `rebind()` call cannot cover; see the comment there.
+
+        Called at the top of every `tick()` (including the "no change"
+        retry-flush path, so a re-join is noticed even with no new
+        transcript content) and at the top of `shutdown()` — anywhere this
+        loop is about to consult or act on "the current binding".
+
+        Deliberately narrow: only a REAL on-disk join binding for THIS
+        loop's own Agent product (`binding_path_for_agent(state_dir,
+        self.binding.agent)`) can move the Producer's target, and only when
+        its `shared_id` actually differs from what's currently bound — an
+        absent file (never joined, or `--transcript`/`--shared-id` used
+        directly) leaves the constructed binding untouched, exactly as
+        before this method existed. A single small JSON file stat+read per
+        call is the same cost the orchestrator already pays reading this
+        same shape of file fresh on every POST
+        (`_resolve_binding_for_agent`).
+        """
+        joined = read_binding(binding_path_for_agent(self.state_dir, self.binding.agent))
+        if joined is not None and joined.shared_id != self.producer.shared_id:
+            logger.info(
+                "Live re-join detected (%r -> %r); syncing the write-ahead "
+                "log's notion of \"current\" so nothing already queued is "
+                "silently retargeted",
+                self.producer.shared_id, joined.shared_id,
+            )
+            self.producer.rebind(joined.shared_id)
+
+    def _compact(self, segment: Segment) -> Segment:
+        """Compaction (Plan A.5) — AFTER triage's keep decision, in both
+        `tick()` and `shutdown()`. See compaction.py's module docstring for
+        why the order matters: triage's judgment about whether a Segment is
+        worth sending to the model at all must be made against the full,
+        unmodified Segment triage was actually handed — A.5b's "triage reads
+        the full Segment" note, taken literally — never against a
+        truncated/ranked view compaction has already reshaped. Compaction's
+        job starts only once a Segment has already earned a `keep`: from
+        that point on it shapes only what the model sees, never whether the
+        Segment survives at all. Only called for segments `triage` (or the
+        `triage_enabled=False` bypass) has already decided to keep."""
+        original_events = len(segment.events)
+        original_chars = sum(len(e.content) for e in segment.events)
+        compacted = compact(segment)
+        if self.stats:
+            kept = len(compacted.events)
+            saved = original_chars - sum(len(e.content) for e in compacted.events)
+            # `saved` can legitimately come out negative (compaction's own
+            # omission/trivial markers are text too, and an error-dense
+            # tool_result can survive nearly intact) -- label that honestly
+            # rather than showing "-N chars saved", which reads as a bug in
+            # the dashboard rather than what actually happened. See
+            # compaction.py's MAX_SURVIVOR_LINES amendment: this should now
+            # be rare, not impossible, so it still needs to be reported
+            # straight when it happens ("dashboards show ... honestly").
+            saved_desc = (
+                f"{saved} chars saved" if saved >= 0
+                else f"{-saved} chars added (markers on an already-small segment)"
+            )
+            self.stats.event(
+                "compaction",
+                f"{segment.id}: {kept}/{original_events} events kept · {saved_desc}",
+                segment=segment.id,
+                events_kept=kept,
+                events_total=original_events,
+                chars_saved=saved,
+            )
+        return compacted
+
     async def tick(self) -> TickResult:
         result = TickResult()
+        # Before anything else: notice a `synapse-worker join <new_id>` that
+        # happened in another terminal since the last tick — see
+        # `_sync_binding_from_disk`'s docstring and STATE.md trap #8. Must
+        # run even on the "no change" retry-flush path immediately below,
+        # since that path still calls `flush()`/`pending_count()` against
+        # `self.producer`'s notion of "current".
+        self._sync_binding_from_disk()
 
         if not self.follower.has_new_data(self.transcript):
             idle = (datetime.now(timezone.utc) - self._last_change).total_seconds()
@@ -162,6 +271,7 @@ class WorkerLoop:
                 result.pending_events = self.segmenter.pending_events
                 # Still retry anything the sink rejected earlier.
                 result.sent, result.pending_send = await self.producer.flush()
+                result.held = self.producer.pending_count()[1]
                 if self.stats:
                     self.stats.event(
                         "push",
@@ -188,6 +298,12 @@ class WorkerLoop:
         result.segments = len(segments)
 
         for segment in segments:
+            # Triage FIRST, on the Segment exactly as segmented -- before
+            # compaction has a chance to reshape it. See compaction.py's
+            # module docstring and `_compact`'s docstring above: a
+            # keep/skip judgment made against a truncated/ranked view is a
+            # judgment made against evidence compaction chose to show, not
+            # the evidence that was actually there.
             if self.triage_enabled:
                 decision = triage(segment)
                 if not decision.keep:
@@ -209,6 +325,9 @@ class WorkerLoop:
                         segment=segment.id,
                         reason=decision.reason,
                     )
+            # Only now, for a Segment triage has already decided is worth
+            # sending to the model: shape what the model actually sees.
+            segment = self._compact(segment)
             if self.stats:
                 self.stats.distil_started(segment.id, len(segment.events))
             try:
@@ -257,6 +376,7 @@ class WorkerLoop:
             result.findings += len(findings)
 
         result.sent, result.pending_send = await self.producer.flush()
+        result.held = self.producer.pending_count()[1]
         result.pending_events = self.segmenter.pending_events
         if self.stats:
             self.stats.event(
@@ -288,10 +408,15 @@ class WorkerLoop:
     async def shutdown(self) -> TickResult:
         """Flush the open turn so nothing is stranded mid-conversation."""
         logger.info("Shutting down: flushing the open turn")
+        # Same reasoning as tick()'s call — a re-join could have happened
+        # after the last tick and before shutdown flushes.
+        self._sync_binding_from_disk()
         result = TickResult(flushed_incomplete=True)
         segments = self.segmenter.drain(flush_incomplete=True)
         result.segments = len(segments)
         for segment in segments:
+            # Same ordering as tick(): triage the Segment as segmented,
+            # before compaction can reshape what triage would see.
             if self.triage_enabled:
                 decision = triage(segment)
                 if not decision.keep:
@@ -299,6 +424,7 @@ class WorkerLoop:
                     result.skipped_triage += 1
                     logger.info("Triage skipped %s (%s)", segment.id, decision.reason)
                     continue
+            segment = self._compact(segment)
             try:
                 findings, stats = await self.distiller.distil(segment)
                 if not stats.skipped_empty:
@@ -307,5 +433,6 @@ class WorkerLoop:
             except Exception:  # noqa: BLE001
                 logger.exception("Distillation failed for %s during shutdown", segment.id)
         result.sent, result.pending_send = await self.producer.flush()
+        result.held = self.producer.pending_count()[1]
         self._persist_state()
         return result

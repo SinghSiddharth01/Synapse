@@ -70,6 +70,14 @@ def test_debug_page_returns_html_with_required_ids() -> None:
         assert "text/html" in content_type
         assert 'id="feed"' in body
         assert 'id="npu-now"' in body
+        # The re-join envelope's "held (other session)" display (STATE.md
+        # trap #8) — see test_worker_debug_page_js.py for the executed-JS
+        # coverage of what actually populates this sub-label.
+        assert 'id="stat-wal-sub"' in body
+        # Plan A.5 compaction's feed chip, the render tag's sibling — see
+        # test_stats.py's test_compaction_runs_before_triage_and_the_render_
+        # event_sees_its_output for what actually populates the feed.
+        assert 'data-tag="compaction"' in body
     finally:
         server.stop()
 

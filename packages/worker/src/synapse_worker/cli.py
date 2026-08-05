@@ -49,14 +49,40 @@ from synapse_worker.discovery import (
     resolve_transcript,
 )
 from synapse_worker.loop import WorkerLoop
-from synapse_worker.producer import FileSink, HttpSink, Producer
+from synapse_worker.producer import FileSink, HttpSink, Producer, read_last_bound_shared_id
 from synapse_worker.stats import StatsBuffer
 from synapse_worker.triage_log import TriageLog
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_AGENT = "claude-code"  # the only Source adapter that exists (Plan A.3)
+DEFAULT_SHARED_ID = "local-dev"  # `run`'s un-joined fallback; also what
+# `_current_shared_id` treats as "current" when NEITHER a join binding NOR
+# the WAL's last-bound marker have ever recorded anything — a genuinely
+# fresh install.
 DEFAULT_DEBUG_PORT = 8790
+
+
+def _current_shared_id(state_dir: Path) -> str:
+    """The Shared Session a Producer built OUTSIDE a WorkerLoop should treat
+    as "current" for the re-join envelope's held/deliverable split
+    (producer.py's module docstring, STATE.md trap #8): the pinned binding
+    if `join` has been run for this agent; else whatever `rebind()` last
+    bound this WAL to LIVE (`producer.py`'s `read_last_bound_shared_id` —
+    an un-joined `run --shared-id X` calls `rebind("X")` once at startup
+    regardless of whether that run ever produces a finding worth `record()`ing,
+    so this reflects the most recently LIVE binding, not merely the most
+    recently WRITTEN one — see producer.py's AMENDMENT for why that
+    distinction is load-bearing); else `DEFAULT_SHARED_ID`, for a WAL never
+    bound to anything at all. `WorkerLoop.__init__` handles the
+    joined/running case itself (`producer.rebind(binding.shared_id)`);
+    `cmd_status` and `cmd_replay` build their own Producer with no loop
+    around it, so they call this directly."""
+    joined = read_binding(binding_path_for_agent(state_dir, DEFAULT_AGENT))
+    if joined is not None:
+        return joined.shared_id
+    last = read_last_bound_shared_id(state_dir / "wal")
+    return last if last is not None else DEFAULT_SHARED_ID
 
 
 def build_distiller(config, binding: LocalBinding) -> Distiller:
@@ -282,10 +308,14 @@ async def cmd_status(args: argparse.Namespace) -> int:
               f"{t.age_seconds/60:.0f} min since last write")
 
     state_dir = Path(config.worker.state_dir)
-    producer = Producer(state_dir / "wal", FileSink(Path(config.worker.sink_file)))
-    pending = producer.unsent()
+    producer = Producer(
+        state_dir / "wal", FileSink(Path(config.worker.sink_file)), _current_shared_id(state_dir)
+    )
+    deliverable, held = producer.pending_count()
     print(f"\nwrite-ahead log  {producer.findings_path}")
-    print(f"unsent findings  {len(pending)}")
+    print(f"unsent findings  {deliverable + held}")
+    if held:
+        print(f"  held (other session)  {held}")
     return 0
 
 
@@ -302,7 +332,14 @@ async def cmd_replay(args: argparse.Namespace) -> int:
         if config.worker.sink == "http"
         else FileSink(Path(config.worker.sink_file))
     )
-    producer = Producer(state_dir / "wal", sink)
+    # The re-join envelope (producer.py's module docstring, STATE.md trap #8)
+    # needs a "current" to split held from deliverable -- this Producer has
+    # no WorkerLoop around it to supply one, so read whatever's joined now
+    # (or the same un-joined fallback `_build` uses) exactly once, up front.
+    # Both branches below share it: `--skipped` records new findings under
+    # it, and the plain drain-the-log path needs it too, or a WAL populated
+    # by a normal (possibly un-joined) `run` would read every entry as held.
+    producer = Producer(state_dir / "wal", sink, _current_shared_id(state_dir))
 
     if args.skipped:
         log = TriageLog(state_dir)
@@ -393,6 +430,7 @@ async def cmd_replay(args: argparse.Namespace) -> int:
                     replayed += len(findings)
 
         sent, pending = await producer.flush()
+        held = producer.pending_count()[1]
         archived = log.archive()
         if failed:
             # Idempotent retry: only what failed goes back to the (now fresh,
@@ -406,6 +444,8 @@ async def cmd_replay(args: argparse.Namespace) -> int:
             f"Replayed {succeeded} skipped segments -> {replayed} findings "
             f"({sent} sent, {pending} queued)."
         )
+        if held:
+            message += f" {held} held (other session)."
         if failed:
             message += f" {len(failed)} segment(s) failed and were re-queued."
         if archived is not None:
@@ -414,7 +454,9 @@ async def cmd_replay(args: argparse.Namespace) -> int:
         return 0 if not failed else 1
 
     sent, still_pending = await producer.flush()
-    print(f"sent {sent}, still pending {still_pending}")
+    held = producer.pending_count()[1]
+    print(f"sent {sent}, still pending {still_pending}"
+          + (f", {held} held (other session)" if held else ""))
     return 0 if still_pending == 0 else 1
 
 
@@ -435,7 +477,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--interval", type=float, help="seconds between checks")
     run.add_argument("--ticks", type=int, help="stop after N ticks (default: forever)")
     run.add_argument("--contributor", default="aditya")
-    run.add_argument("--shared-id", default="local-dev")
+    run.add_argument("--shared-id", default=DEFAULT_SHARED_ID)
     run.add_argument(
         "--from-start",
         action="store_true",

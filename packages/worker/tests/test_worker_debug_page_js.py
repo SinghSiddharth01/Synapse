@@ -51,10 +51,10 @@ def _extract_script(html: str) -> str:
     return m.group(1)
 
 
-def _run_scenario(script: str, tmp_path: Path) -> dict:
+def _run_scenario(script: str, tmp_path: Path, driver: str = "debug_page_driver.js") -> dict:
     combined = "\n".join([
         (SUPPORT_DIR / "minidom.js").read_text(encoding="utf-8"),
-        (SUPPORT_DIR / "debug_page_driver.js").read_text(encoding="utf-8")
+        (SUPPORT_DIR / driver).read_text(encoding="utf-8")
         .replace("/*__EXTRACTED_SCRIPT__*/", script),
     ])
     js_file = tmp_path / "scenario.js"
@@ -86,3 +86,28 @@ def test_an_expanded_llm_entry_survives_the_next_poll(tmp_path) -> None:
     # second to read a prompt/output preview before it silently collapsed.
     assert outcome["expandedAfterPoll"] is True
     assert outcome["detailReparented"] is True
+
+
+def test_push_node_shows_held_when_nonzero_and_clears_when_it_drops_to_zero(tmp_path) -> None:
+    """The re-join envelope's dashboard-honesty requirement (STATE.md trap
+    #8 / E7 Chain B1's Done-when: "dashboards show held/compaction
+    honestly"). The PUSH node's sent/queued count alone can't distinguish
+    "nothing is wrong" from "N findings are silently stuck behind a
+    session mismatch" -- this pins that the sub-label actually says so, and
+    stops saying so the moment `held` clears."""
+    stats = StatsBuffer(CallLog())
+    server = DebugServer(stats, port=0)
+    try:
+        port = server.start()
+        body = _get_html(f"http://127.0.0.1:{port}/debug")
+    finally:
+        server.stop()
+
+    outcome = _run_scenario(_extract_script(body), tmp_path, driver="debug_page_driver_held.js")
+
+    assert outcome["valueWithHeld"] == "3 / 1"
+    assert "held (other session)" in outcome["subWithHeld"]
+    assert "2" in outcome["subWithHeld"]
+
+    assert outcome["valueAfterCleared"] == "1 / 0"
+    assert outcome["subAfterCleared"] == "sent / queued"

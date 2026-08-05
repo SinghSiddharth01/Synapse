@@ -436,6 +436,160 @@ async def test_status_reports_unsent_findings(tmp_path, capsys) -> None:
     assert "unsent findings  1" in out
 
 
+async def test_status_reports_held_findings_from_a_different_session(tmp_path, capsys) -> None:
+    """The re-join envelope (producer.py's module docstring, STATE.md trap
+    #8): a finding recorded under a Shared Session other than the one
+    currently joined must show up as held, not silently counted as plain
+    "unsent" the way it was before the envelope existed."""
+    from synapse_contracts import Attribution, Finding, FindingType, SessionBinding, write_binding
+    from synapse_worker.producer import FileSink, Producer
+
+    state_dir = tmp_path / ".synapse"
+    write_binding(
+        cli.binding_path_for_agent(state_dir, cli.DEFAULT_AGENT),
+        SessionBinding(
+            agent_session_id="as-t", shared_id="team-standup",
+            contributor="aditya", agent=cli.DEFAULT_AGENT,
+            transcript_path=str(tmp_path / "sess.jsonl"),
+            pinned_at=datetime(2026, 8, 4, tzinfo=timezone.utc),
+        ),
+    )
+    # Recorded while a DIFFERENT session ("other-team") was bound -- held
+    # once "team-standup" is joined, per the envelope above.
+    producer = Producer(state_dir / "wal", FileSink(tmp_path / "upstream.jsonl"), "other-team")
+    producer.record([
+        Finding(
+            id="f-1", type=FindingType.LEARNING, text="x",
+            attributions=[Attribution(contributor="a", agent_session="s", agent="claude-code")],
+            ts=datetime(2026, 8, 4, tzinfo=timezone.utc),
+        )
+    ])
+
+    exit_code = await cli.cmd_status(_ns())
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "unsent findings  1" in out
+    assert "held (other session)  1" in out
+
+
+async def test_current_shared_id_follows_the_most_recent_live_run_not_the_most_recent_write(
+    tmp_path, capsys
+) -> None:
+    """Fixer-major regression, cli-level (see test_producer.py's identical
+    pin at the Producer level for the full trap #8 reproduction). Two
+    sequential un-joined `run --shared-id ...` invocations sharing one WAL:
+    the SECOND run's own findings never get durably recorded. Before this
+    fix, `_current_shared_id`'s un-joined fallback re-derived "current" from
+    the WAL's last WRITTEN line, so it would still read as the FIRST run's
+    "team-a" -- and `cmd_status`/`cmd_replay` would then treat "team-a"-
+    tagged findings as deliverable while the actually-live session had moved
+    on to "team-b", shipping them to the wrong session. `_current_shared_id`
+    must resolve to "team-b" here, and "team-a"'s queued finding must show
+    as held, not as plain unsent."""
+    from synapse_contracts import Attribution, Finding, FindingType
+    from synapse_worker.producer import FileSink, Producer
+
+    state_dir = tmp_path / ".synapse"
+    producer_a = Producer(state_dir / "wal", FileSink(tmp_path / "upstream.jsonl"))
+    producer_a.rebind("team-a")  # `run --shared-id team-a`, un-joined
+    producer_a.record([
+        Finding(
+            id="f-1", type=FindingType.LEARNING, text="x",
+            attributions=[Attribution(contributor="a", agent_session="s", agent="claude-code")],
+            ts=datetime(2026, 8, 4, tzinfo=timezone.utc),
+        )
+    ])
+    # `run --shared-id team-b`, still un-joined -- produces nothing durable
+    # of its own (no record() call), exactly like a turn triage skips.
+    producer_b = Producer(state_dir / "wal", FileSink(tmp_path / "upstream.jsonl"))
+    producer_b.rebind("team-b")
+
+    assert cli._current_shared_id(state_dir) == "team-b"
+
+    exit_code = await cli.cmd_status(_ns())
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "unsent findings  1" in out
+    assert "held (other session)  1" in out  # f-1 (team-a) is NOT current
+
+
+async def test_current_shared_id_prefers_a_joined_binding_over_a_divergent_last_bound_marker(
+    tmp_path, capsys
+) -> None:
+    """Fixer-major finding: `_current_shared_id`'s precedence -- a `join`ed
+    binding first, the WAL's last-bound marker only as a fallback when
+    nothing is joined -- is the load-bearing half of 3c0c6fd's fix, and
+    neither existing test above exercises the ORDER between the two: both
+    run with no join binding on disk at all, so they only ever reach the
+    marker branch.
+
+    This is the scenario that would actually distinguish a marker-first
+    ordering from a join-first one: `join sh-A` (writes the binding file),
+    `run` records f-1 while bound to sh-A (the orchestrator is down, so it
+    stays queued), the worker stops, then `join sh-B` overwrites the binding
+    file -- but nothing calls `rebind()`, so the WAL's last-bound marker
+    still reads "sh-A". Under a marker-first ordering, `_current_shared_id`
+    would resolve to "sh-A", `cmd_status`/`cmd_replay` would treat f-1 as
+    deliverable, and a `replay` would ship it -- while the orchestrator,
+    resolving the destination fresh from the (now sh-B) binding file, would
+    deliver it under the WRONG session. That is exactly the wrong-session
+    delivery 3c0c6fd's own commit message says it closed, reachable again by
+    a one-line reordering that neither pre-existing test notices. The join
+    binding must win: f-1 shows as held, not as plain unsent."""
+    from synapse_contracts import Attribution, Finding, FindingType, SessionBinding, write_binding
+    from synapse_worker.producer import FileSink, Producer
+
+    state_dir = tmp_path / ".synapse"
+
+    # `join sh-A`, then `run` -- rebind() persists the marker, matching a
+    # real run's construction-time sync (WorkerLoop.__init__).
+    write_binding(
+        cli.binding_path_for_agent(state_dir, cli.DEFAULT_AGENT),
+        SessionBinding(
+            agent_session_id="as-t", shared_id="sh-A",
+            contributor="aditya", agent=cli.DEFAULT_AGENT,
+            transcript_path=str(tmp_path / "sess.jsonl"),
+            pinned_at=datetime(2026, 8, 4, tzinfo=timezone.utc),
+        ),
+    )
+    producer = Producer(state_dir / "wal", FileSink(tmp_path / "upstream.jsonl"))
+    producer.rebind("sh-A")
+    producer.record([
+        Finding(
+            id="f-1", type=FindingType.LEARNING, text="x",
+            attributions=[Attribution(contributor="a", agent_session="s", agent="claude-code")],
+            ts=datetime(2026, 8, 4, tzinfo=timezone.utc),
+        )
+    ])
+    # Worker process stops here -- f-1 never sent (no sink to drain into in
+    # this test; `cmd_status` below never attempts a send either way).
+
+    # `join sh-B` in a fresh terminal: overwrites the binding file. Nothing
+    # calls `rebind()` from a bare `join` (only a `run`'s construction does),
+    # so the WAL's last-bound marker still reads "sh-A" -- the divergence
+    # this test exists to exercise.
+    write_binding(
+        cli.binding_path_for_agent(state_dir, cli.DEFAULT_AGENT),
+        SessionBinding(
+            agent_session_id="as-t", shared_id="sh-B",
+            contributor="aditya", agent=cli.DEFAULT_AGENT,
+            transcript_path=str(tmp_path / "sess.jsonl"),
+            pinned_at=datetime(2026, 8, 4, tzinfo=timezone.utc),
+        ),
+    )
+
+    assert cli._current_shared_id(state_dir) == "sh-B"  # the joined binding wins
+
+    exit_code = await cli.cmd_status(_ns())
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "unsent findings  1" in out
+    assert "held (other session)  1" in out  # f-1 (sh-A) is NOT current
+
+
 # ---------------------------------------------------------------------------
 # replay
 # ---------------------------------------------------------------------------

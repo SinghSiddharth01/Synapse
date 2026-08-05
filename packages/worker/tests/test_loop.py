@@ -6,13 +6,22 @@ Offline — FakeProvider, no NPU, no network.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-from synapse_contracts import LocalBinding
+from synapse_contracts import (
+    Attribution,
+    Finding,
+    FindingType,
+    LocalBinding,
+    SessionBinding,
+    write_binding,
+)
 from synapse_distiller import Distiller, load_pack_by_name
 from synapse_providers import FakeProvider
 
+from synapse_worker.discovery import binding_path_for_agent
 from synapse_worker.loop import WorkerLoop
 from synapse_worker.producer import FileSink, Producer
 
@@ -224,6 +233,136 @@ async def test_dropped_prompt_does_not_poison_the_log(tmp_path) -> None:
     assert producer.unsent() == []
 
 
+async def test_worker_loop_syncs_the_producer_to_its_own_binding_on_construction(
+    tmp_path,
+) -> None:
+    """The re-join envelope (producer.py's module docstring, STATE.md trap
+    #8) is inert unless `flush()`'s notion of "current" actually matches the
+    binding this loop runs under. `WorkerLoop.__init__` must sync a
+    freshly-built Producer to ITS OWN binding
+    (`producer.rebind(binding.shared_id)`) regardless of whatever
+    `shared_id` the Producer happened to be constructed with -- this pins
+    that construction alone does it, and that it survives a real tick: a
+    finding recorded under a DIFFERENT session before this loop existed
+    stays held, never silently retargeted to this loop's session."""
+    transcript = tmp_path / "t.jsonl"
+    transcript.touch()
+    producer = Producer(
+        tmp_path / "wal", FileSink(tmp_path / "upstream.jsonl"), "session-other"
+    )
+    stale = Finding(
+        id="f-stale", type=FindingType.LEARNING, text="from a previous session",
+        attributions=[Attribution(contributor="aditya", agent_session="sess-1",
+                                  agent="claude-code")],
+        ts=datetime(2026, 8, 4, tzinfo=timezone.utc),
+    )
+    producer.record([stale])  # recorded while bound to "session-other"
+
+    loop = WorkerLoop(
+        transcript=transcript,
+        distiller=Distiller(FakeProvider(scripts=[condensed("fresh")]),
+                            BINDING, PACK, ["text"], "labelled"),
+        producer=producer,
+        binding=BINDING,  # shared_id="shared-1" -- a DIFFERENT session than above
+        state_dir=tmp_path / "state",
+        budget_tokens=5000,
+    )
+
+    # Construction alone must already have synced the binding.
+    assert producer.pending_count() == (0, 1)
+
+    transcript.write_text(user("a") + assistant("b") + user("c"), encoding="utf-8")
+    result = await loop.tick()
+
+    # The fresh finding (produced under THIS loop's real binding) ships; the
+    # stale one stays held -- never retargeted to "shared-1", never dropped.
+    assert result.sent == 1
+    assert result.held == 1
+    upstream = [
+        json.loads(row)["text"]
+        for row in (tmp_path / "upstream.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert upstream == ["fresh"]
+    assert producer.pending_count() == (0, 1)
+
+
+async def test_live_worker_notices_a_join_to_a_different_session_mid_run(tmp_path) -> None:
+    """The same-process half of trap #8 (fixer-blocker fix). `synapse-worker
+    join <new_id>`, typed in another terminal while THIS `run` is still
+    live, writes straight to `.synapse/bindings/claude-code.json` -- there
+    is no other channel to the running process. The test right above this
+    one (`test_worker_loop_syncs_the_producer_to_its_own_binding_on_
+    construction`) only pins the ONE-TIME sync `WorkerLoop.__init__` does;
+    it cannot detect a re-join that happens after construction, which is
+    the normal way a developer switches sessions mid-work. Without
+    `_sync_binding_from_disk`, a Finding recorded under the ORIGINAL
+    binding keeps reading as deliverable under it forever -- and the
+    orchestrator, which resolves the destination fresh from disk on every
+    POST (`_resolve_binding_for_agent`), would then deliver it under
+    whatever the join moved to: a real cross-session leak, not a cosmetic
+    mis-report. This pins the fix end to end through `tick()`; test_producer.py
+    already pins the Producer half of the mechanism in isolation."""
+    state_dir = tmp_path / "state"
+    transcript = tmp_path / "t.jsonl"
+    transcript.touch()
+    producer = Producer(state_dir / "wal", FileSink(tmp_path / "upstream.jsonl"))
+    loop = WorkerLoop(
+        transcript=transcript,
+        distiller=Distiller(FakeProvider(scripts=[]), BINDING, PACK, ["text"], "labelled"),
+        producer=producer,
+        binding=BINDING,  # shared_id="shared-1"
+        state_dir=state_dir,
+        budget_tokens=5000,
+    )
+    stale = Finding(
+        id="f-A", type=FindingType.LEARNING, text="recorded under session A",
+        attributions=[Attribution(contributor="aditya", agent_session="sess-1",
+                                  agent="claude-code")],
+        ts=datetime(2026, 8, 4, tzinfo=timezone.utc),
+    )
+    producer.record([stale])  # recorded while bound to "shared-1" (construction synced this)
+    assert producer.pending_count() == (1, 0)  # deliverable under the original binding
+
+    # `synapse-worker join shared-2` in another terminal -- writes the join
+    # binding file directly. Nothing calls `producer.rebind()` from here;
+    # this is exactly the gap the fix closes.
+    write_binding(
+        binding_path_for_agent(state_dir, "claude-code"),
+        SessionBinding(
+            agent_session_id="sess-1", shared_id="shared-2", contributor="aditya",
+            agent="claude-code", transcript_path=str(transcript),
+            pinned_at=datetime(2026, 8, 4, tzinfo=timezone.utc),
+        ),
+    )
+
+    # No new transcript content -- this also exercises the "no change"
+    # retry-flush path, which must notice the re-join too (STATE.md trap #8's
+    # scenario calls `flush()` with nothing new having happened).
+    result = await loop.tick()
+
+    assert result.held == 1
+    assert result.sent == 0
+    assert producer.pending_count() == (0, 1)  # held, not lost, not retargeted
+    assert not (tmp_path / "upstream.jsonl").exists()  # never shipped to session B
+
+    # Re-joining BACK to the session it was actually produced under drains
+    # it -- the other half of the guarantee (mirrors test_producer.py's
+    # test_rejoin_back_to_the_original_session_drains_the_held_finding).
+    write_binding(
+        binding_path_for_agent(state_dir, "claude-code"),
+        SessionBinding(
+            agent_session_id="sess-1", shared_id="shared-1", contributor="aditya",
+            agent="claude-code", transcript_path=str(transcript),
+            pinned_at=datetime(2026, 8, 4, tzinfo=timezone.utc),
+        ),
+    )
+    drained = await loop.tick()
+
+    assert drained.sent == 1
+    assert drained.held == 0
+    assert producer.pending_count() == (0, 0)
+
+
 async def test_bookkeeping_lines_produce_no_segments(tmp_path) -> None:
     loop, _ = build(tmp_path, [])
     transcript = tmp_path / "t.jsonl"
@@ -275,6 +414,35 @@ async def test_triage_disabled_passes_everything_through(tmp_path, worker_loop_f
     assert result.findings == 1
     from synapse_worker.triage_log import TriageLog
     assert TriageLog(loop.state_dir).load_skipped() == []
+
+
+async def test_readonly_browsing_turn_is_triaged_out_even_after_compaction(
+    tmp_path, worker_loop_factory
+):
+    """Blocker fix regression, pinned end-to-end through a real
+    WorkerLoop.tick(). Before the fix, compaction dropped every trivial
+    read-only tool_use/tool_result pair outright; an all-browsing turn (two
+    small, clean Read/Grep results, no substantial prose) then had zero
+    tool_use events left for triage.readonly-run to key on, fell through to
+    default-keep, and reached the distiller -- the exact false positive
+    A.5b exists to prevent. See test_compaction.py's unit-level pin of the
+    same property."""
+    loop = worker_loop_factory(tmp_path)
+    write_transcript_lines(loop.transcript, [
+        user_text("what does this file do"),
+        assistant_tool_use("Read", "a.py", "tid-1"),
+        tool_result("Read", "x = 1", "tid-1"),
+        assistant_tool_use("Grep", "TODO", "tid-2"),
+        tool_result("Grep", "no matches", "tid-2"),
+        assistant_text("Nothing notable in there."),
+        user_text("ok thanks"),   # closes the turn
+    ])
+    result = await loop.tick()
+    assert result.skipped_triage == 1
+    assert result.findings == 0
+    from synapse_worker.triage_log import TriageLog
+    [(seg, reason)] = TriageLog(loop.state_dir).load_skipped()
+    assert reason == "readonly-run"
 
 
 async def test_shutdown_applies_triage_to_the_flushed_final_turn(tmp_path, worker_loop_factory):
