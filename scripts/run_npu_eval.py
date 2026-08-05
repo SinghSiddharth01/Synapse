@@ -106,6 +106,8 @@ async def main() -> int:
         print(f"    latency         {score.latency_ms/1000:.1f}s   ({decode:.1f} tok/s decode)")
         print(f"    types           {sorted(score.type_coverage) or '—'}")
         print(f"    verbatim max    {score.max_verbatim_overlap:.2f}  (0.0 = fully abstracted)")
+        if score.leaked_identifiers:
+            print(f"  LEAKED IDENTIFIERS: {', '.join(score.leaked_identifiers)}")
         if score.empty_discipline_ok is not None:
             if not pack.judges_durability:
                 # This pack was never asked to filter. Reporting notes here as a
@@ -123,6 +125,14 @@ async def main() -> int:
     print(f"  scored          {len(scores)} fixture(s)")
     if voided:
         print(f"  VOIDED          {', '.join(voided)} (contaminated by this pack)")
+
+    all_leaks = sorted({t for s in scores for t in s.leaked_identifiers})
+    if all_leaks:
+        print(f"\n  identifier leaks across corpus: {', '.join(all_leaks)}")
+        print("  The privacy claim does NOT hold for this run. Do not demo this table.")
+    else:
+        print("\n  identifier leaks: none detected (allowlist applies — see evaluation.py)")
+
     if scores:
         total_out = sum(s.output_tokens for s in scores)
         total_ms = sum(s.latency_ms for s in scores)

@@ -1,28 +1,20 @@
-# Fixtures — ⚠️ PROVISIONAL, SOLO-AUTHORED
+# Fixtures
 
-**These are not yet the contract. Do not treat them as the quality bar.**
+## Status — 2026-08-04
 
-Plan 0 Task 0.3 is explicit about why:
+8 fixtures. seg-001/seg-004 predate the corpus completion; the rest landed with plan E1.
 
-> **Why together:** the fixtures encode a quality bar and a segmentation boundary
-> that two different tracks must agree on. Written by one person, they become
-> that person's opinion; written together, they are the contract.
+**Golden sign-off (co-authoring gate — Plan 0.3):**
 
-These two fixtures were authored solo on 2026-08-04 to unblock the Plan B
-device slice — the distiller, the guards, and the NPU provider needed *something*
-to run against on real hardware. They are scaffolding for the mechanism, not a
-settled eval target.
+| fixture | authored by | signed off by |
+|---|---|---|
+| seg-001 | aditya | — PROVISIONAL |
+| seg-002…seg-007 | (E1 author) | — PROVISIONAL |
 
-## Before these harden
-
-- [ ] Co-author `seg-001` and `seg-004` with all three track owners
-- [ ] Add the remaining three from Plan 0 Task 0.3: `seg-002` (second ordinary
-      turn, different shape), `seg-003` (oversized `tool_result`), `seg-005`
-      (two near-duplicate findings across two Contributors)
-- [ ] Confirm the segmentation boundary with Plan A's owner — the segmenter must
-      reproduce these Segments *exactly*, and that test is the anti-drift gate
-      between Plans A and B
-- [ ] Delete this warning once the above is done
+Goldens are the eval target and the quality bar. Until each row has all three
+names, treat judge scores as directional. `fixtures/triage.json` records what
+triage should do per fixture, including two ACCEPTED FALSE POSITIVE entries.
+`test_fixture_contamination.py` enforces zero six-gram overlap with prompt packs.
 
 ## What is here
 

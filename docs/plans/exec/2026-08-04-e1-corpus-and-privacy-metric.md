@@ -563,7 +563,7 @@ git commit -m "feat(eval): identifier-leak detector — catches the single-token
 **Interfaces:**
 - Consumes: `FixtureScore.leaked_identifiers` from Task 5.
 
-- [ ] **Step 1: Write the failing contamination test**
+- [x] **Step 1: Write the failing contamination test**
 
 The `v1-baseline` incident, automated: no committed fixture may share a distinctive phrase with any prompt pack's few-shots.
 
@@ -602,7 +602,7 @@ def test_fixture_shares_no_sixgram_with_any_pack(fixture_id):
         )
 ```
 
-- [ ] **Step 2: Run it**
+- [x] **Step 2: Run it**
 
 Run: `uv run pytest packages/distiller/tests/test_fixture_contamination.py -v`
 Expected: **likely one FAILURE** — `v1-baseline` is documented as contaminated against `seg-004`. If it fails there: that pack is frozen as evidence, so add the documented exception at the top of the test rather than editing the pack:
@@ -613,7 +613,7 @@ KNOWN_CONTAMINATED = {("seg-004", "v1-baseline.toml")}  # frozen evidence; decla
 
 and inside the loop: `if (fixture_id, pack_path.name) in KNOWN_CONTAMINATED: continue`. Every NEW fixture must pass clean.
 
-- [ ] **Step 3: Wire leaks into the eval output**
+- [x] **Step 3: Wire leaks into the eval output**
 
 In `scripts/run_npu_eval.py`, the per-fixture reporting loop already prints from each `score` (a `FixtureScore`). Immediately after the existing per-fixture print block that reports `max_verbatim_overlap`, add:
 
@@ -633,7 +633,7 @@ and in the summary section at the bottom (after the voided-pack report), add:
         print("\n  identifier leaks: none detected (allowlist applies — see evaluation.py)")
 ```
 
-- [ ] **Step 4: Update fixtures/README.md**
+- [x] **Step 4: Update fixtures/README.md**
 
 Replace its provisional-status section with:
 
@@ -655,7 +655,7 @@ triage should do per fixture, including two ACCEPTED FALSE POSITIVE entries.
 `test_fixture_contamination.py` enforces zero six-gram overlap with prompt packs.
 ```
 
-- [ ] **Step 5: Run the full distiller suite, then commit**
+- [x] **Step 5: Run the full distiller suite, then commit**
 
 Run: `uv run pytest packages/distiller -q`
 Expected: PASS.
