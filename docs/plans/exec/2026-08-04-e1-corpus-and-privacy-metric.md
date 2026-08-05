@@ -31,7 +31,7 @@ The hardest triage case: a decision reached conversationally, with no tool call,
 **Interfaces:**
 - Produces: fixture ids `seg-002` consumable via `load_segment("seg-002")` / `load_goldens("seg-002")`. E2's triage tests and the eval harness consume these by id.
 
-- [ ] **Step 1: Write the failing corpus test**
+- [x] **Step 1: Write the failing corpus test**
 
 ```python
 # packages/distiller/tests/test_fixture_corpus.py
@@ -70,12 +70,12 @@ def test_seg002_is_conversational():
     assert "decision" in types
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `uv run pytest packages/distiller/tests/test_fixture_corpus.py -v`
 Expected: FAIL — `test_corpus_is_complete` (only seg-001/seg-004 exist), and the parametrized cases for missing ids fail with `FileNotFoundError`.
 
-- [ ] **Step 3: Write the fixture**
+- [x] **Step 3: Write the fixture**
 
 ```json
 // fixtures/segments/seg-002.json
@@ -123,12 +123,12 @@ Expected: FAIL — `test_corpus_is_complete` (only seg-001/seg-004 exist), and t
 ]
 ```
 
-- [ ] **Step 4: Run the seg-002-specific tests**
+- [x] **Step 4: Run the seg-002-specific tests**
 
 Run: `uv run pytest packages/distiller/tests/test_fixture_corpus.py::test_seg002_is_conversational packages/distiller/tests/test_fixture_corpus.py::test_fixture_parses -v -k "seg-002 or conversational"`
 Expected: PASS for seg-002 cases. `test_corpus_is_complete` still fails — that is the tracking test for the whole plan and goes green at Task 4.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add fixtures/segments/seg-002.json fixtures/findings/seg-002.findings.json packages/distiller/tests/test_fixture_corpus.py
