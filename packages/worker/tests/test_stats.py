@@ -34,6 +34,25 @@ def assistant(text: str) -> str:
     return line(type="assistant", message={"content": [{"type": "text", "text": text}]})
 
 
+def assistant_tool_use(tool_name: str, command: str, tool_id: str = "tool-1") -> str:
+    return line(
+        type="assistant",
+        message={"content": [
+            {"type": "tool_use", "id": tool_id, "name": tool_name, "input": {"command": command}}
+        ]},
+    )
+
+
+def tool_result(tool_name: str, content: str, tool_id: str = "tool-1") -> str:
+    # tool_name accepted purely for readability at the call site -- see
+    # test_loop.py's identical helper for why the real name is resolved via
+    # tool_id instead.
+    return line(
+        type="user",
+        message={"content": [{"type": "tool_result", "tool_use_id": tool_id, "content": content}]},
+    )
+
+
 def condensed(*texts: str) -> dict:
     return {"findings": [{"type": "learning", "text": t} for t in texts]}
 
@@ -116,3 +135,48 @@ async def test_worker_tick_populates_the_feed(tmp_path) -> None:
 
     llm_calls = [c for c in snapshot["llm"] if c["component"] == "distiller"]
     assert len(llm_calls) >= 1
+
+
+async def test_render_event_retained_count_excludes_kinds_the_distiller_drops(tmp_path) -> None:
+    """`retained` is the one number the render tag exists to report: events by
+    kind IN vs. retained under distil_kinds (render_segment's own filter,
+    prompt.py). An all-text fixture can't discriminate the correct
+    kind-filtered count from the wrong `len(segment.events)` -- they're equal
+    either way. This turn mixes a tool_use/tool_result pair in among the text
+    events, with kinds=["text"], so retained (2) must come out strictly below
+    events_in (4).
+    """
+    transcript = tmp_path / "t.jsonl"
+    transcript.touch()
+    producer = Producer(tmp_path / "wal", FileSink(tmp_path / "upstream.jsonl"))
+    call_log = CallLog()
+    stats = StatsBuffer(call_log)
+    provider = RecordingProvider(
+        FakeProvider(scripts=[condensed("pooling mode matters")]), "distiller", call_log
+    )
+    loop = WorkerLoop(
+        transcript=transcript,
+        distiller=Distiller(provider, BINDING, PACK, ["text"], "labelled"),
+        producer=producer,
+        binding=BINDING,
+        state_dir=tmp_path / "state",
+        budget_tokens=5000,
+        stats=stats,
+    )
+    transcript.write_text(
+        user("investigate the flaky test")
+        + assistant_tool_use("Bash", "pytest -x")
+        + tool_result("Bash", "3 passed")
+        + assistant("found the pooling issue")
+        + user("now look at the cache"),  # closes the turn above
+        encoding="utf-8",
+    )
+
+    await loop.tick()
+
+    render_events = [e for e in stats.snapshot()["events"] if e["tag"] == "render"]
+    assert len(render_events) >= 1
+    detail = render_events[0]["detail"]
+    assert detail["events_in"] == 4
+    assert detail["retained"] == 2
+    assert detail["retained"] < detail["events_in"]
