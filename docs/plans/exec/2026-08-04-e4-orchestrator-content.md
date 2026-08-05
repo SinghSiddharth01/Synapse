@@ -527,7 +527,7 @@ git commit -m "feat(orchestrator): producer endpoint on the shared app + resync 
 - Consumes: E3's `/watermark` and `/query` routes; `synapse_distiller.Distiller` + `synapse_providers.NPUProvider` (contribute's round-trip — same model, same pack, same gate as the passive path: this **is** the "one distiller" of the hybrid amendment, invoked in-process); `SessionBinding.to_local_binding()`.
 - Produces: `register_tools(server, *, binding, service_url, relay, distiller_factory) -> None` and `async build_briefing(binding, service_url, *, transport=None) -> str`. The CLI composes: `briefing = await build_briefing(...)`; `server = create_mcp(briefing)`; `register_tools(server, ...)`; `build_app(relay, server)`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 # packages/orchestrator/tests/test_tools.py
@@ -611,12 +611,12 @@ async def test_contribute_round_trips_through_the_distiller_and_relay(tmp_path):
 
 `server.call_tool(name, args)` is FastMCP's programmatic invocation in `mcp==1.9.4`; if its return shape differs from plain text, unwrap per its type (`list[TextContent]` → `result[0].text`) — adjust the two assertions, not the architecture. If the distiller's output-parsing rejects the fake's script shape, copy a working script literal from `packages/distiller/tests/` (the distiller tests already script `FakeProvider` for exactly this call).
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
 Run: `uv run pytest packages/orchestrator/tests/test_tools.py -v`
 Expected: FAIL — `briefing` module and `register_tools` don't exist.
 
-- [ ] **Step 3: Implement `briefing.py`**
+- [x] **Step 3: Implement `briefing.py`**
 
 ```python
 # packages/orchestrator/src/synapse_orchestrator/briefing.py
@@ -671,7 +671,7 @@ async def build_briefing(binding: LocalBinding | None, service_url: str, *,
 
 Note the test asserts `"5 findings"` (4+1) and `"1 conflict"` — the f-string above produces both.
 
-- [ ] **Step 4: Implement `register_tools` in server.py**
+- [x] **Step 4: Implement `register_tools` in server.py**
 
 Append:
 
@@ -744,7 +744,7 @@ CLI composition in `main()` (replacing Task 3's `build_app(relay)` line):
 
 where `build_npu_distiller()` constructs `Distiller(NPUProvider(...), binding.to_local_binding())` from `synapse_distiller.load_config()` exactly the way `synapse_worker.cli`'s run command does — same config, same pack, same model: the one-distiller property.
 
-- [ ] **Step 5: Run everything, then commit**
+- [x] **Step 5: Run everything, then commit**
 
 Run: `uv run pytest packages/orchestrator -q` → PASS.
 

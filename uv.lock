@@ -585,6 +585,8 @@ dependencies = [
     { name = "httpx" },
     { name = "mcp" },
     { name = "synapse-contracts" },
+    { name = "synapse-distiller" },
+    { name = "synapse-providers" },
 ]
 
 [package.metadata]
@@ -592,6 +594,8 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27" },
     { name = "mcp", specifier = "==1.9.4" },
     { name = "synapse-contracts", editable = "packages/contracts" },
+    { name = "synapse-distiller", editable = "packages/distiller" },
+    { name = "synapse-providers", editable = "packages/providers" },
 ]
 
 [[package]]

@@ -25,7 +25,9 @@ import uvicorn
 
 from synapse_contracts.binding import read_binding
 from synapse_orchestrator.app import build_app
+from synapse_orchestrator.briefing import build_briefing
 from synapse_orchestrator.relay import Relay
+from synapse_orchestrator.server import create_mcp, register_tools
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -73,7 +75,38 @@ def main(argv: list[str] | None = None) -> int:
     binding = read_binding(state_dir / "bindings" / "claude-code.json")
     shared_id = binding.shared_id if binding else "unbound"
     relay = Relay(state_dir / "relay", args.service_url, shared_id)
-    app = build_app(relay)
+
+    def build_npu_distiller():
+        # Same config, same pack, same model as synapse_worker.cli's run
+        # command — the "one distiller" property: contribute()'s round trip
+        # uses the identical NPU model and prompt pack as the passive path.
+        from synapse_distiller import Distiller, load_config, load_pack_by_name
+        from synapse_providers import NPUProvider
+
+        config = load_config()
+        provider = NPUProvider(
+            base_url=config.provider.base_url,
+            model=config.model,
+            max_tokens=config.provider.max_tokens,
+            temperature=config.provider.temperature,
+            timeout=config.provider.timeout_s,
+        )
+        return Distiller(
+            provider,
+            binding.to_local_binding(),
+            load_pack_by_name(config.prompt_pack_name),
+            config.distil_kinds,
+            config.render_style,
+        )
+
+    briefing = asyncio.run(build_briefing(
+        binding.to_local_binding() if binding else None, args.service_url))
+    server = create_mcp(briefing)
+    if binding is not None:
+        register_tools(server, binding=binding.to_local_binding(),
+                       service_url=args.service_url, relay=relay,
+                       distiller_factory=build_npu_distiller)
+    app = build_app(relay, server)
     print(f"synapse-orchestrator on http://{args.host}:{args.port} "
           f"(mcp at /mcp, producer at /producer/findings, session: {shared_id})")
     uvicorn.run(app, host=args.host, port=args.port)

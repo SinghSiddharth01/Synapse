@@ -32,8 +32,6 @@ client, which would give one Orchestrator per Agent and dissolve the
 single-egress property the Orchestrator exists to create.
 """
 
-from __future__ import annotations
-
 from mcp.server.fastmcp import FastMCP
 
 # Stable marker asserted by scripts/verify_instructions.py through a REAL MCP
@@ -55,5 +53,58 @@ def create_mcp(instructions: str | None = None) -> FastMCP:
 
 mcp = create_mcp()
 
-# No tools or prompts registered. A connecting client sees a named server with
-# an empty capability set, which is honest: there is nothing usable here yet.
+# No tools or prompts registered on the module-level `mcp`. A connecting
+# client that never joined a session sees a named server with an empty
+# capability set, which is honest: there is nothing usable without a binding.
+# `register_tools` below is what the CLI calls once a binding exists.
+
+
+def register_tools(server: FastMCP, *, binding, service_url: str, relay,
+                   distiller_factory, transport=None) -> None:
+    """Tools speak trigger-voice; bodies stay small. `transport` is test-only."""
+    import httpx as _httpx
+
+    from synapse_contracts import Provenance, Segment
+
+    @server.tool(description=(
+        "Search the team's shared memory. Call BEFORE exploring an unfamiliar "
+        "subsystem, when debugging something a teammate may also be working on, "
+        "or before concluding something is a dead end."))
+    async def query(question: str) -> str:
+        url = f"{service_url.rstrip('/')}/v1/sessions/{binding.shared_id}/query"
+        try:
+            async with _httpx.AsyncClient(transport=transport, timeout=15.0) as client:
+                resp = await client.post(url, json={
+                    "query": question, "agent_session": binding.agent_session_id})
+                resp.raise_for_status()
+                findings = resp.json().get("findings", [])
+        except (_httpx.HTTPError, OSError) as exc:
+            return f"Shared memory is unreachable right now ({exc.__class__.__name__})."
+        if not findings:
+            return "Team memory has nothing relevant to that. (Checked — not skipped.)"
+        lines = [f"- [{f['type']}] {f['text']} — {f['attributions'][0]['contributor']}"
+                 for f in findings]
+        return "Relevant team findings, best first:\n" + "\n".join(lines)
+
+    @server.tool(description=(
+        "Push an insight to the team's shared memory. Call when you have learned "
+        "something non-obvious a teammate would benefit from — a root cause, a "
+        "dead end, a decision and its why. A few sentences of plain prose."))
+    async def contribute(text: str) -> str:
+        from datetime import datetime, timezone
+        ts = datetime.now(timezone.utc)
+        event = {"role": "assistant", "kind": "text", "content": text,
+                 "ts": ts.isoformat(), "agent_session_id": binding.agent_session_id}
+        segment = Segment(id=f"contrib-{ts.strftime('%H%M%S')}",
+                          agent_session_id=binding.agent_session_id,
+                          events=[event], started_at=ts, ended_at=ts)
+        distiller = distiller_factory()
+        findings, stats = await distiller.distil(segment)
+        for f in findings:
+            f.provenance = Provenance.CONTRIBUTED
+        if not findings:
+            return "Nothing durable extracted from that — try stating the insight directly."
+        relay.record(findings)
+        sent, pending = await relay.flush()
+        state = "shared with the team" if sent else f"queued ({pending} pending)"
+        return f"{len(findings)} finding(s) {state}."
