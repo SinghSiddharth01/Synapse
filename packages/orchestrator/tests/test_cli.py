@@ -471,6 +471,79 @@ def test_resync_recreates_and_synthesizes_each_session_the_log_names(tmp_path, c
     assert "synthesized" in capsys.readouterr().out
 
 
+def test_resync_recreates_a_session_whose_findings_were_already_acked_before_a_restart(
+    tmp_path, capsys
+) -> None:
+    """Invariant 4: findings are retained AFTER SENDING precisely so a
+    service restart is recoverable by resync -- that is the whole point of
+    NOT deleting a finding from the log once `sent.jsonl` records it. Every
+    other resync test in this file seeds only `findings.jsonl`, never
+    `sent.jsonl`, so every finding they exercise is still PENDING. None of
+    them touches the actual demo scenario (Beat 7): a push that already
+    succeeded, `sent.jsonl` recording it, and THEN the service dies and
+    loses all state.
+
+    Mutating `Relay.recorded_session_ids` (relay.py) to read `self._pending()`
+    instead of `self._all_entries()` survives the whole suite, including
+    both resync tests above: every finding THEY seed is pending, so
+    pending-vs-all makes no observable difference to them. It matters
+    exactly here -- an already-SENT finding is invisible to `_pending()`, so
+    the mutant's `cmd_resync` Step 1 recreate loop iterates over ZERO
+    sessions, never recreating `sh-joined` on the (restarted, stateless)
+    service, and the push below 404s against a session the mock was never
+    told to create. `resync_sessions()` itself is unaffected by this mutant
+    (it reads `_all_entries()` directly) and still attempts the push either
+    way -- the mutant's damage is entirely in skipping the recreate."""
+    write_binding(
+        tmp_path / "bindings" / "claude-code.json",
+        SessionBinding(agent_session_id="as-1", shared_id="sh-joined",
+                       contributor="aditya", agent="claude-code",
+                       transcript_path="/tmp/t.jsonl",
+                       pinned_at=datetime(2026, 8, 4, tzinfo=timezone.utc)),
+    )
+    import json as _json
+    from synapse_contracts import Attribution, Finding
+    relay_dir = tmp_path / "relay"
+    relay_dir.mkdir(parents=True)
+    finding = Finding(id="f-acked", type="learning", text="insight",
+                      attributions=[Attribution(contributor="aditya", agent_session="as-1",
+                                                agent="claude-code")],
+                      ts=datetime(2026, 8, 4, tzinfo=timezone.utc))
+    (relay_dir / "findings.jsonl").write_text(_json.dumps(
+        {"shared_id": "sh-joined", "finding": _json.loads(finding.model_dump_json())}) + "\n")
+    # ACKED before the restart: the push already succeeded once, and
+    # flush()/contribute() would have written exactly this line.
+    (relay_dir / "sent.jsonl").write_text("f-acked\n")
+
+    # A restarted service: it knows NOTHING until told to create a session
+    # (the recreate pass), then behaves normally for that session only --
+    # unlike the sibling test's mock above, which accepts any push
+    # unconditionally and so cannot tell "recreated first" apart from "never
+    # recreated, pushed anyway."
+    known_sessions: set[str] = set()
+    def restarted_service(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/sessions":
+            body = _json.loads(request.content)
+            known_sessions.add(body["shared_id"])
+            return httpx.Response(201, json={"shared_id": body["shared_id"], "purpose": "",
+                                             "members": [], "created_by": "resync"})
+        sid = request.url.path.split("/")[3]        # /v1/sessions/{sid}/...
+        if sid not in known_sessions:
+            return httpx.Response(404, json={"error": f"unknown session {sid}"})
+        if request.url.path.endswith("/synthesize"):
+            return httpx.Response(200, json={"memory_version": 1, "synthesized": True})
+        return httpx.Response(200, json={"accepted": 1, "memory_version": 0,
+                                         "synthesized": False})
+
+    exit_code = cli.main(["--state-dir", str(tmp_path), "resync"],
+                         transport=httpx.MockTransport(restarted_service))
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "FAILED" not in out
+    assert "re-pushed 1 finding(s)" in out
+
+
 def test_build_npu_distiller_matches_the_workers_config_pack_and_model(monkeypatch) -> None:
     """The plan's 'one distiller' property: contribute()'s round trip must use
     the identical NPU model, base config and prompt pack as the passive
