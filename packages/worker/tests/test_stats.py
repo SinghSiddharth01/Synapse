@@ -320,6 +320,61 @@ async def test_triage_runs_before_compaction_so_a_lint_clean_decoy_cannot_flip_t
     assert render_events == []
 
 
+async def test_shutdown_also_triages_before_compaction(tmp_path) -> None:
+    """The shutdown() half of the reorder, pinned by observation — the final
+    verifier proved reverting shutdown() to compact-then-triage left the whole
+    suite green while tick()'s equivalent mutant died. Same lint-clean decoy
+    as the tick() pin above, but the closing user turn never arrives, so the
+    open turn reaches the pipeline through shutdown()'s flush_incomplete
+    drain instead of tick()'s."""
+    content = _build_log_content()
+
+    transcript = tmp_path / "t.jsonl"
+    transcript.touch()
+    producer = Producer(tmp_path / "wal", FileSink(tmp_path / "upstream.jsonl"))
+    call_log = CallLog()
+    stats = StatsBuffer(call_log)
+    provider = RecordingProvider(
+        FakeProvider(scripts=[condensed("nothing notable in the build log")]),
+        "distiller", call_log,
+    )
+    loop = WorkerLoop(
+        transcript=transcript,
+        distiller=Distiller(provider, BINDING, PACK, ["text"], "labelled"),
+        producer=producer,
+        binding=BINDING,
+        state_dir=tmp_path / "state",
+        budget_tokens=5000,
+        stats=stats,
+    )
+    transcript.write_text(
+        user("can you check the whole build log for anything odd")
+        + assistant_tool_use("Bash", "run full lint+build")
+        + tool_result("Bash", content)
+        + assistant("Looked through it, nothing stood out."),
+        # no closing user turn: the segment stays pending until shutdown()
+        encoding="utf-8",
+    )
+
+    tick_result = await loop.tick()
+    assert tick_result.segments == 0          # turn still open, nothing drained
+    assert tick_result.pending_events > 0
+
+    result = await loop.shutdown()
+
+    # Triage judged the RAW segment and skipped it. Under the pre-fix order
+    # (compact before triage in shutdown()) the buried lint-clean report is
+    # truncated away, triage flips to default-keep, and this is 0.
+    assert result.skipped_triage == 1
+    assert result.findings == 0
+
+    snapshot = stats.snapshot()
+    compaction_events = [e for e in snapshot["events"] if e["tag"] == "compaction"]
+    assert compaction_events == []            # never compacted a skipped Segment
+    render_events = [e for e in snapshot["events"] if e["tag"] == "render"]
+    assert render_events == []                # nothing reached the distiller
+
+
 class _CapturingProvider(FakeProvider):
     """FakeProvider that also remembers the exact `messages` it was called
     with, so a test can inspect the literal text the model would have
