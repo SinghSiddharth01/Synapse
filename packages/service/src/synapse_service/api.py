@@ -19,6 +19,21 @@ from synapse_service.store import InMemoryStore
 from synapse_service.synthesis import Synthesizer
 
 
+def _missing(body: dict, *required: str) -> JSONResponse | None:
+    """The plan's contract is `422 {error}` for a malformed payload
+    (docs/plans/exec/2026-08-04-e3-service.md L719); push_findings was the
+    only route that honored it. create_session, add_member, and query
+    indexed body["..."] directly and raised KeyError on a missing field --
+    an unhandled 500, not a reported, terminal 422. E4's Relay treats 5xx
+    as retryable, so that turned a client bug into an infinite retry loop
+    against a request that could never succeed."""
+    missing = [k for k in required if k not in body]
+    if missing:
+        return JSONResponse({"error": f"missing required field(s): {', '.join(missing)}"},
+                            status_code=422)
+    return None
+
+
 def build_app(provider: ModelProvider) -> Starlette:
     store = InMemoryStore()
     synthesizer = Synthesizer(provider)
@@ -28,6 +43,8 @@ def build_app(provider: ModelProvider) -> Starlette:
 
     async def create_session(request: Request) -> JSONResponse:
         body = await request.json()
+        if (err := _missing(body, "purpose", "created_by")) is not None:
+            return err
         session = store.create_session(purpose=body["purpose"],
                                        created_by=body["created_by"])
         return JSONResponse(session.model_dump(mode="json"), status_code=201)
@@ -37,6 +54,8 @@ def build_app(provider: ModelProvider) -> Starlette:
         if _session_or_404(sid) is None:
             return JSONResponse({"error": f"unknown session {sid}"}, status_code=404)
         body = await request.json()
+        if (err := _missing(body, "contributor")) is not None:
+            return err
         store.add_member(sid, body["contributor"])
         return JSONResponse({"members": store.get_session(sid).members})
 
@@ -113,6 +132,8 @@ def build_app(provider: ModelProvider) -> Starlette:
         if _session_or_404(sid) is None:
             return JSONResponse({"error": f"unknown session {sid}"}, status_code=404)
         body = await request.json()
+        if (err := _missing(body, "query")) is not None:
+            return err
         ranked = await query_findings(
             provider,
             context=store.get_context(sid),

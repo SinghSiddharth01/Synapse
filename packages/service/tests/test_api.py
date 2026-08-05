@@ -137,3 +137,25 @@ async def test_unknown_session_404_and_bad_payload_422():
         r = await client.post(f"/v1/sessions/{sid}/findings",
                               json={"findings": [{"not": "a finding"}]})
         assert r.status_code == 422
+
+
+async def test_every_route_returns_422_on_a_missing_required_field_not_500():
+    """Only push_findings validated its body; create_session, add_member,
+    and query indexed body["..."] directly and raised KeyError -- a 500,
+    not the plan's documented `422 {error}` for a malformed payload. E4's
+    Relay treats 5xx as retryable, so a client bug becomes an infinite
+    retry loop against a request that will never succeed instead of a
+    reported, terminal 422."""
+    async with _client(FakeProvider(scripts=[])) as client:
+        r = await client.post("/v1/sessions", json={"purpose": "p"})   # missing created_by
+        assert r.status_code == 422 and "error" in r.json()
+
+        sid = (await client.post("/v1/sessions", json={"purpose": "p", "created_by": "s"})
+               ).json()["shared_id"]
+
+        r = await client.post(f"/v1/sessions/{sid}/members", json={})  # missing contributor
+        assert r.status_code == 422 and "error" in r.json()
+
+        r = await client.post(f"/v1/sessions/{sid}/query",
+                              json={"agent_session": "as-x"})           # missing query
+        assert r.status_code == 422 and "error" in r.json()
