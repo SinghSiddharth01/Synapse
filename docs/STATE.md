@@ -51,6 +51,24 @@ scripts/                run_npu_eval · trace_one · calibrate_prompt · dump_pr
 
 It surfaced **zero** partners at 422 findings and zero at 2,022, none uniquely. The governing band it exists for sits at 25%. Some of that is the offline embedder; some is a corpus artifact. But it is the piece the design leaned on hardest and it is currently the weakest thing in it. Lane yield on a real corpus decides whether it stays, and the design is arranged so that deleting it changes nothing else.
 
+**Measured again 2026-08-05, after the Plan E integration** (`scripts/measure_recall.py`, 422-finding synthetic corpus, `HashingEmbedder`):
+
+| Run | overall | symbol | lexical | paraphrase | governing | topic lane (surfaced · unique) |
+|---|---|---|---|---|---|---|
+| post-swap (lane ON, no back-fill) | 86.4% (19/22) | 100.0% | 100.0% | 100.0% | 25.0% | 0 · 0 |
+| back-fill, lane ON | 86.4% (19/22) | 100.0% | 100.0% | 100.0% | 25.0% | 0 · 0 |
+| back-fill, lane OFF | 86.4% (19/22) | 100.0% | 100.0% | 100.0% | 25.0% | 0 · 0 |
+| `--recent 2` | 86.4% (19/22) | 100.0% | 100.0% | 100.0% | 25.0% | 0 · 0 |
+| `--recent 8` (shipped) | 86.4% (19/22) | 100.0% | 100.0% | 100.0% | 25.0% | 0 · 0 |
+
+Defaults set from the higher numbers (E5 Task 7): `lanes.DEFAULT_TOPIC_LANE = False`, `DEFAULT_RECENT = 8`.
+
+`--recent` is expected to tie, and `test_default_recent_above_the_reserved_floor_changes_nothing` says why at the unit level: with `RESERVE_DIVISOR = 5` only `max(1, top_k // 5) == 2` of the collected recent ids are ever used, so the constant is provably inert above 2. The harness runs are the stronger version of that claim — 22 queries over 422 findings rather than one query over 40 — and they agreed.
+
+**Regression guard, not evidence.** Synthetic corpus authored alongside the lanes (trap #3, twice now); `HashingEmbedder` has no paraphrase signal, so the two lanes that exist to catch paraphrase are measured with the capability removed. No number here belongs in a demo script or a README, and lane yield on a real corpus — the only honest test of whether a lane earns its cost — is still blocked on the fixture co-sign.
+
+**The first row is post-swap, not as-merged.** It was taken at the top of Task 7, after Tasks 5 and 6 had already changed `fold`, `SharedMemory.append` and the registry. It is the branch's lanes on the integrated tree with the topic lane on and no back-fill — not the branch as it stood on `d491956`.
+
 ## Traps worth re-reading
 
 Five of the six numbered traps from 2026-08-04 still stand; #6 is now closed. Q3 ("who builds the orchestrator"), previously tracked on its own as "Open, unchanged," is also closed as of E4's merge — folded in here as #7 rather than kept as a separate section. Two more traps, #8 and #9, earned during this merge.
