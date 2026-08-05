@@ -12,6 +12,17 @@ Full prior detail: **[`2026-08-04-implementation-report.md`](./2026-08-04-implem
 
 ---
 
+## See it run, on any laptop
+
+```
+uv run python scripts/demo_local.py          # offline, ~2 minutes, nothing to install
+uv run python scripts/demo_local.py --live   # a real model behind both model seams
+```
+
+Five processes over real sockets — a model stand-in, the service, the orchestrator, and two workers each following a live transcript the script appends to *while they tail it*. Detection, segmentation, triage, distillation, the write-ahead log, egress through the orchestrator, synthesis and retrieval all run for real, and both `/debug` dashboards are up the whole time (`:8790` and `:8791` for the workers, `:8899` for the service). The walkthrough ends on the flagship merge: two contributors hit the same ~40 ms DMA timing window in different words, synthesis reconciles them into one co-attributed Finding, and the originals are superseded rather than deleted. `seg-004` is in the feed on purpose — it is triaged out before the model ever sees it, which is visible on the worker dashboard.
+
+**What is fake, and only this: the model.** `scripts/local_model_server.py` stands exactly where GenieX and Cirrascale stand, replaying this repo's own corpus goldens and answering the canary from the prompt; `--live` swaps it for a real model over the same seam with nothing under `packages/` changed. **No number from a replay run is a measurement** — this machine has no NPU. Measurement is E8, below.
+
 ## Built and merged
 
 ```
@@ -23,7 +34,7 @@ packages/orchestrator/  server (query/contribute MCP tools + instructions briefi
 packages/service/       api (sessions/findings/synthesize/watermark/query) · synthesis (semantic merge) · retrieval · store · debug (/debug) · cli
 config/                 synapse.toml + 4 versioned prompt packs
 fixtures/               8 segments (seg-001…seg-007, seg-005 split a/b) + triage.json — PROVISIONAL, solo-authored
-scripts/                run_npu_eval · trace_one · calibrate_prompt · dump_prompt · verify_orchestrator · verify_instructions
+scripts/                demo_local · local_model_server · rehearse_demo · run_npu_eval · trace_one · calibrate_prompt · dump_prompt · verify_orchestrator · verify_instructions
 ```
 
 **Corpus of 8 + the leak metric (E1).** The fixture corpus grew from 2 to 8: `seg-002`, `seg-003`, `seg-005a`/`seg-005b`, `seg-006`, `seg-007` joined `seg-001`/`seg-004`, alongside `fixtures/triage.json` (the keep/skip expectation map E2's tests consume) and a fixture/prompt-pack contamination guard. The blind 8-gram `verbatim_overlap` metric is joined by `identifier_leaks()`, which catches what n-grams can't — `default_pool_size=25` and its kind — and `scripts/run_npu_eval.py` now prints a per-fixture `LEAKED IDENTIFIERS` line plus a corpus-wide summary that refuses to claim a clean bill of health when leaks are present.

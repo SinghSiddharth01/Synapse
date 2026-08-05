@@ -55,6 +55,12 @@ schema-valid rate, decode tok/s, any leaked identifiers, per-fixture scores.
 
 ## Phase 3 — the live loop, on-device (the real thing)
 
+Worth ten minutes first, on this box or any other: `uv run python
+scripts/demo_local.py` runs these same processes with a model stand-in where
+GenieX would be, so you see the intended shape of the dashboards and the merge
+before any of it depends on the NPU. It measures nothing — that is what the
+rest of this runbook is for.
+
 Four terminals + a browser:
 
 ```powershell

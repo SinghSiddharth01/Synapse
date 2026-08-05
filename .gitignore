@@ -24,3 +24,10 @@ __pycache__/
 # Recall-harness output. Cross-task baselines (Task 7 → Task 12) live here
 # rather than in /tmp, which does not survive a reboot between Aug 5 and Aug 6.
 .measurements/
+
+# Local end-to-end walkthrough runtime state (scripts/demo_local.py):
+# scratch transcripts, per-worker WAL, process logs. Machine-local.
+.demo/
+
+# Playwright MCP scratch output (screenshots, snapshots)
+.playwright-mcp/
