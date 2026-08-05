@@ -17,6 +17,8 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
+from pydantic import BaseModel, Field, ValidationError
+
 from synapse_contracts import (Attribution, Conflict, Finding, FindingStatus,
                                FindingType, Provenance, SessionContext)
 from synapse_providers import ModelProvider
@@ -57,6 +59,53 @@ SYNTH_SYSTEM = (
     "contradict each other, report a conflict — do not resolve it. Return JSON "
     "matching the schema exactly, using finding ids verbatim."
 )
+
+
+class _MergeVerdict(BaseModel):
+    source_ids: list[str]
+    text: str
+    type: str
+
+
+class _ConflictVerdict(BaseModel):
+    a: str
+    b: str
+    description: str
+
+
+class _SynthesisVerdicts(BaseModel):
+    """Structural shape of one synthesis verdict, validated as ONE unit
+    before any mutation touches the store (round-2 adjudication on finding
+    "malformed verdicts crashing merge mid-application").
+
+    AIC100Provider's schema gate (_satisfies_schema) only checks the
+    TOP-level object's required keys; it never inspects array items, so a
+    schema_valid=True verdict can still carry a merge/conflict entry that's
+    missing a key or holds the wrong type. The previous approach defended
+    each nested access individually and skipped just the bad entry --
+    which sounds tolerant but is actually PARTIAL APPLICATION: entries
+    before the bad one land, entries after it are silently dropped, and
+    which entries ran first is an implementation accident (list order),
+    not a decision anyone made. That contradicts this module's own "zero
+    loss" docstring and invariant 5's premise that a merge is the only
+    irreversible action in the system.
+
+    Validating the whole payload up front makes the failure mode binary
+    and honest: either the ENTIRE verdict is structurally sound and all of
+    it applies, or none of it does and findings stay exactly as durably
+    landed by step 1 -- the same "model failed, quality degrades, nothing
+    is lost" path already used for a provider exception or
+    schema_valid=False. `working_memory` is optional (None) rather than
+    required so a verdict that answers everything else but omits the
+    working-memory rewrite (the schema gate only demands ONE required key
+    be present, by design -- see aic100._satisfies_schema) still validates;
+    the merge loop below leaves ctx.working_memory untouched in that case.
+    """
+
+    working_memory: str | None = None
+    merges: list[_MergeVerdict] = Field(default_factory=list)
+    trivial_ids: list[str] = Field(default_factory=list)
+    conflicts: list[_ConflictVerdict] = Field(default_factory=list)
 
 
 def _resolve_forward(store: InMemoryStore, shared_id: str, finding_id: str) -> str:
@@ -110,47 +159,33 @@ class Synthesizer:
                            "findings are landed, memory unchanged",
                            result.schema_valid, type(result.data).__name__, shared_id)
             return ctx
-        verdicts = result.data
+
+        # Validate the ENTIRE verdict as one unit before touching the store.
+        # An 8B's schema_valid=True only proves the top-level keys are
+        # present (see _SynthesisVerdicts' docstring) -- a malformed nested
+        # entry anywhere invalidates the whole verdict, never just that
+        # entry. No partial application, ever.
+        try:
+            verdicts = _SynthesisVerdicts.model_validate(result.data)
+        except ValidationError:
+            logger.warning("Synthesis verdict for %s failed structural validation; "
+                           "findings are landed, memory unchanged", shared_id, exc_info=True)
+            return ctx
 
         known = {f.id for f in store.all_findings(shared_id)}
 
-        raw_merges = verdicts.get("merges", [])
-        if not isinstance(raw_merges, list):
-            logger.warning("Synthesis verdict's 'merges' was %s, not a list; ignoring all "
-                           "of it rather than crashing", type(raw_merges).__name__)
-            raw_merges = []
-
-        for merge in raw_merges:
-            # AIC100Provider's schema gate (_satisfies_schema) only checks the
-            # TOP-level object's required keys; it never inspects array items.
-            # A schema_valid=True verdict can still carry a merge entry that
-            # isn't a dict at all, or is missing source_ids/text/type, or has
-            # source_ids of the wrong type. Skip just that entry rather than
-            # crash mid-application -- a KeyError/TypeError here would leave
-            # earlier tombstones written and memory_version un-bumped,
-            # contradicting this module's own "zero loss" docstring.
-            if (not isinstance(merge, dict)
-                    or not isinstance(merge.get("source_ids"), list)
-                    or not isinstance(merge.get("text"), str)
-                    or "type" not in merge):
-                logger.warning("Malformed merge verdict entry %r; skipping", merge)
-                continue
-            sources = [store.get(shared_id, fid) for fid in merge["source_ids"]
-                       if isinstance(fid, str) and fid in known]
+        for merge in verdicts.merges:
+            sources = [store.get(shared_id, fid) for fid in merge.source_ids if fid in known]
             sources = [s for s in sources if s is not None and s.merged_into is None]
             # Plan semantics (restored 2026-08-04, see docs/plans/exec/
             # 2026-08-04-e3-service.md L495-499): an unknown or already-
             # merged id in source_ids is logged and ignored, but does NOT
             # veto the ids that DID resolve -- "applying to the N valid
-            # source(s)" is the plan's own log line. A prior round required
-            # len(sources) >= 2 here (ADR 0002's "two or more"), which is a
-            # reasonable-sounding rule but inverts a test the plan wrote out
-            # by hand; the round-2 adjudication is to follow the plan
-            # exactly, not the ADR's prose read narrowly.
-            if len(sources) < len(merge["source_ids"]):
+            # source(s)" is the plan's own log line.
+            if len(sources) < len(merge.source_ids):
                 logger.warning("Merge verdict referenced source_ids %s but only %d "
                                "resolved to a live finding; applying to the %d valid "
-                               "source(s)", merge["source_ids"], len(sources), len(sources))
+                               "source(s)", merge.source_ids, len(sources), len(sources))
             if not sources:
                 continue
             attributions: list[Attribution] = []
@@ -159,13 +194,13 @@ class Synthesizer:
                     if a not in attributions:
                         attributions.append(a)
             try:
-                ftype = FindingType(merge["type"])
+                ftype = FindingType(merge.type)
             except ValueError:
                 ftype = FindingType.LEARNING       # distiller types are best-effort anyway
             synthesized = Finding(
                 id=f"syn-{uuid.uuid4().hex[:8]}",
                 type=ftype,
-                text=merge["text"],
+                text=merge.text,
                 attributions=attributions,
                 ts=datetime.now(timezone.utc),
                 provenance=Provenance.SYNTHESIZED,
@@ -175,15 +210,7 @@ class Synthesizer:
             for s in sources:
                 s.merged_into = synthesized.id                     # tombstone: text stays
 
-        raw_trivial = verdicts.get("trivial_ids", [])
-        if not isinstance(raw_trivial, list):
-            logger.warning("Synthesis verdict's 'trivial_ids' was %s, not a list; ignoring",
-                           type(raw_trivial).__name__)
-            raw_trivial = []
-        for fid in raw_trivial:
-            if not isinstance(fid, str):
-                logger.warning("Malformed trivial id %r; skipping", fid)
-                continue
+        for fid in verdicts.trivial_ids:
             finding = store.get(shared_id, fid)
             if finding is None:
                 logger.warning("Trivial verdict for unknown id %s; ignored", fid)
@@ -191,20 +218,11 @@ class Synthesizer:
             if finding.merged_into is None:
                 finding.status = FindingStatus.TRIVIAL
 
-        raw_conflicts = verdicts.get("conflicts", [])
-        if not isinstance(raw_conflicts, list):
-            logger.warning("Synthesis verdict's 'conflicts' was %s, not a list; ignoring",
-                           type(raw_conflicts).__name__)
-            raw_conflicts = []
-        for c in raw_conflicts:
-            if (not isinstance(c, dict) or not isinstance(c.get("a"), str)
-                    or not isinstance(c.get("b"), str) or not isinstance(c.get("description"), str)):
-                logger.warning("Malformed conflict verdict entry %r; skipping", c)
+        for c in verdicts.conflicts:
+            if c.a not in known or c.b not in known or c.a == c.b:
                 continue
-            if c["a"] not in known or c["b"] not in known or c["a"] == c["b"]:
-                continue
-            ctx.conflicts.append(Conflict(finding_a=c["a"], finding_b=c["b"],
-                                          description=c["description"]))
+            ctx.conflicts.append(Conflict(finding_a=c.a, finding_b=c.b,
+                                          description=c.description))
 
         # Resolve EVERY stored conflict -- old rounds' and this round's new
         # ones alike -- forward through merged_into, then dedup. Resolving
@@ -233,6 +251,7 @@ class Synthesizer:
                                      description=conflict.description))
         ctx.conflicts = resolved
 
-        ctx.working_memory = verdicts.get("working_memory", ctx.working_memory)
+        if verdicts.working_memory is not None:
+            ctx.working_memory = verdicts.working_memory
         store.bump_version(shared_id)                               # 4. exactly once
         return ctx

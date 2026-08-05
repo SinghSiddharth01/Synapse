@@ -162,15 +162,19 @@ async def test_conflict_on_a_finding_merged_in_the_same_round_resolves_forward()
     assert conflict.finding_b == "f-c"
 
 
-async def test_malformed_merge_entry_is_skipped_not_fatal():
+async def test_malformed_merge_entry_invalidates_the_whole_verdict_not_just_itself():
     """A schema_valid verdict can still carry malformed nested entries -- the
     real AIC100Provider's schema gate only inspects TOP-level required keys,
     never array items (packages/providers/src/synapse_providers/aic100.py's
-    _satisfies_schema). merge() must skip the bad entry and still complete
-    the round, rather than crash mid-application: leaving tombstones written
-    but memory_version un-bumped would contradict this module's own
-    docstring ("a model failure ... leaves findings landed and version
-    unchanged") and invariant 5 (merge is the only irreversible action)."""
+    _satisfies_schema). Round-2 adjudication: merge() validates the WHOLE
+    verdict as one pydantic model before mutating anything. A malformed
+    entry anywhere means NONE of the verdict applies -- not a per-entry
+    skip -- so findings stay exactly as durably landed by step 1 and
+    memory_version stays exactly as it was. Skipping only the bad entry
+    (the previous approach) is partial application: which entries land
+    becomes an accident of list order rather than a decision, and that
+    contradicts this module's own "zero loss" docstring and invariant 5
+    (merge is the only irreversible action)."""
     store = InMemoryStore()
     sid = store.create_session(purpose="p", created_by="s").shared_id
     a, b = _pair()
@@ -179,7 +183,7 @@ async def test_malformed_merge_entry_is_skipped_not_fatal():
               "trivial_ids": [], "conflicts": []}
     ctx = await Synthesizer(FakeProvider(scripts=[script])).merge(store, sid, [a, b])
 
-    assert ctx.memory_version == 1                     # round still completed
+    assert ctx.memory_version == 0                      # whole verdict rejected, not applied
     assert store.get(sid, "f-005a-01").merged_into is None   # never tombstoned
     assert store.get(sid, "f-005b-01").merged_into is None
 
@@ -188,30 +192,35 @@ async def test_merges_of_the_wrong_top_level_type_does_not_crash():
     """AIC100Provider's schema gate only checks that the OBJECT has the
     right top-level keys, not that each key holds the right TYPE -- a
     string where 'merges' should be a list is schema_valid=True per the
-    provider's own gate."""
+    provider's own gate. The whole verdict fails structural validation and
+    is rejected wholesale rather than crashing merge()."""
     store = InMemoryStore()
     sid = store.create_session(purpose="p", created_by="s").shared_id
     a, b = _pair()
     script = {"working_memory": "wm", "merges": "not-a-list",
               "trivial_ids": [], "conflicts": []}
     ctx = await Synthesizer(FakeProvider(scripts=[script])).merge(store, sid, [a, b])
-    assert ctx.memory_version == 1
+    assert ctx.memory_version == 0
 
 
-async def test_conflict_entry_missing_a_key_is_skipped_not_fatal():
+async def test_conflict_entry_missing_a_key_invalidates_the_whole_verdict():
     store = InMemoryStore()
     sid = store.create_session(purpose="p", created_by="s").shared_id
     a, b = _pair()
     script = {"working_memory": "wm", "merges": [], "trivial_ids": [],
               "conflicts": [{"a": "f-005a-01", "description": "missing b"}]}
     ctx = await Synthesizer(FakeProvider(scripts=[script])).merge(store, sid, [a, b])
-    assert ctx.memory_version == 1
+    assert ctx.memory_version == 0
     assert ctx.conflicts == []
 
 
-async def test_a_second_valid_merge_still_applies_after_a_malformed_one_before_it():
-    """The partial-application failure mode: a crash on entry N must not
-    leave entries before N half-applied while entries after N never run."""
+async def test_a_malformed_entry_invalidates_a_second_otherwise_valid_merge_too():
+    """The all-or-nothing failure mode, the other direction: a malformed
+    entry must veto a LATER, well-formed entry in the same verdict too --
+    not just the entries before it. Applying the well-formed one while
+    dropping the malformed one would be partial application by another
+    name (a "does this entry look fine on its own" pass), which is exactly
+    what the round-2 adjudication rules out."""
     store = InMemoryStore()
     sid = store.create_session(purpose="p", created_by="s").shared_id
     a, b = _pair()
@@ -230,9 +239,9 @@ async def test_a_second_valid_merge_still_applies_after_a_malformed_one_before_i
     ctx = await Synthesizer(FakeProvider(scripts=[script])).merge(
         store, sid, [a, b, third, fourth])
 
-    assert store.get(sid, "f-005a-01").merged_into is None     # malformed entry: skipped
-    assert store.get(sid, "f-c").merged_into is not None       # valid entry: still applied
-    assert ctx.memory_version == 1
+    assert store.get(sid, "f-005a-01").merged_into is None     # neither entry applied
+    assert store.get(sid, "f-c").merged_into is None
+    assert ctx.memory_version == 0                              # whole verdict rejected
 
 
 async def test_conflict_recorded_in_an_earlier_round_resolves_forward_when_merged_later():
