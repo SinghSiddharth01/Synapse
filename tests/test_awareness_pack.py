@@ -234,6 +234,55 @@ def test_fail_open_when_the_service_is_unreachable(tmp_path):
     assert elapsed < FAIL_OPEN_BUDGET_SECONDS
 
 
+def test_fail_open_when_the_service_accepts_the_connection_and_never_responds(tmp_path):
+    """Connection-refused (the test above) fails instantly and proves
+    nothing about the hook's own `_TIMEOUT_SECONDS` -- a TCP RST needs no
+    timeout to notice. The failure mode that actually threatens the "under
+    3s" budget, and the one Plan D.6 rule 1 names explicitly ("unreachable,
+    SLOW, or returning nonsense"), is a service that accepts the connection
+    and then just never answers: an overloaded service, a paused container,
+    a wedged synthesis call. Only `_TIMEOUT_SECONDS` on the `urlopen` call
+    can save this test's budget from that -- deleting it (or raising it well
+    past 3s) is a one-line mutant that every other fail-open test in this
+    file is blind to, because all of them fail fast for reasons that have
+    nothing to do with the timeout."""
+    state_dir = tmp_path / ".synapse"
+    _write_binding(state_dir)
+
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+
+    def _accept_and_hang() -> None:
+        try:
+            conn, _addr = listener.accept()
+        except OSError:
+            return
+        # Accept the TCP connection -- so this is NOT connection-refused --
+        # then read the request and write back nothing, ever. The hook's
+        # `urlopen` is left blocked on the response exactly the way it
+        # would be against a wedged Synapse Service.
+        try:
+            time.sleep(FAIL_OPEN_BUDGET_SECONDS + 5)
+        finally:
+            conn.close()
+
+    thread = threading.Thread(target=_accept_and_hang, daemon=True)
+    thread.start()
+    try:
+        start = time.monotonic()
+        result = _run_hook(state_dir, f"http://127.0.0.1:{port}")
+        elapsed = time.monotonic() - start
+    finally:
+        listener.close()
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert result.stderr == ""
+    assert elapsed < FAIL_OPEN_BUDGET_SECONDS
+
+
 def test_fail_open_when_the_response_is_not_json(tmp_path):
     state_dir = tmp_path / ".synapse"
     _write_binding(state_dir)
