@@ -173,6 +173,60 @@ def test_function_call_output_content_items_are_flattened() -> None:
     assert "line two" in event.content
 
 
+def test_function_call_arguments_json_string_is_reparsed_not_left_as_raw_json() -> None:
+    """`function_call.arguments` is a JSON-encoded STRING (the Responses API
+    convention), not an already-parsed object -- `_stringify` re-parses it
+    back into a dict before flattening, the branch that deliberately departs
+    from a naive "value is already a string, just use it" implementation.
+
+    Content is pinned exactly, including the nested-list-loses-key-
+    association quirk the module docstring calls out: a list value
+    (`command`) is flattened by joining its own items with newlines, so
+    `"command: " + <joined items>` reads as if `-lc` and `pytest -q` were
+    their own top-level keys. That is worth pinning deliberately (the
+    finding's own words: "worth pinning deliberately rather than by
+    accident") rather than only ever checked with an `in` substring, which a
+    mutant that skips re-parsing (`return value` unconditionally) also
+    satisfies -- `"pytest" in content` is true of the raw JSON text too.
+    """
+    source = CodexSource()
+    source.parse_line(session_meta())
+
+    arguments = json.dumps(
+        {"command": ["bash", "-lc", "pytest -q"], "workdir": "/repo", "timeout_ms": 120000}
+    )
+    (event,) = source.parse_line(
+        response_item(
+            {"type": "function_call", "name": "shell", "arguments": arguments, "call_id": "call_shell"}
+        )
+    )
+
+    assert event.content == "command: bash\n-lc\npytest -q\nworkdir: /repo\ntimeout_ms: 120000"
+    # The raw JSON syntax must be gone -- a mutant that skips re-parsing
+    # would leave the braces/quotes/colons of the JSON text itself in place.
+    assert "{" not in event.content
+    assert '"' not in event.content
+
+
+def test_function_call_output_json_object_string_is_also_reparsed() -> None:
+    """The same re-parse applies to function_call_output.output when IT
+    happens to be a JSON-object string too -- not just function_call.
+    arguments -- per the module docstring's `_stringify` note."""
+    source = CodexSource()
+    source.parse_line(session_meta())
+    source.parse_line(
+        response_item({"type": "function_call", "name": "shell", "arguments": "{}", "call_id": "call_3"})
+    )
+
+    output = json.dumps({"exit_code": 0, "stdout": "3 passed"})
+    (event,) = source.parse_line(
+        response_item({"type": "function_call_output", "call_id": "call_3", "output": output})
+    )
+
+    assert event.content == "exit_code: 0\nstdout: 3 passed"
+    assert "{" not in event.content
+
+
 def test_custom_tool_call_and_output_resolve_tool_name_from_call_id() -> None:
     """apply_patch is a Freeform tool (ToolSpec::Freeform), so it serializes
     as custom_tool_call/custom_tool_call_output, not function_call -- same
