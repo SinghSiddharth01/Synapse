@@ -1,0 +1,16 @@
+{
+  "id": "seg-005a",
+  "agent_session_id": "as-fixture-005a",
+  "events": [
+    {"role": "user", "kind": "text",
+     "content": "narrow down when the fec decode failure happens",
+     "tool_name": null, "ts": "2026-08-04T11:00:00Z",
+     "agent_session_id": "as-fixture-005a", "cwd": "/repo", "git_branch": "main"},
+    {"role": "assistant", "kind": "text",
+     "content": "Bisecting the timing shows the decode failure only occurs when the gap between the two DMA writes exceeds roughly forty milliseconds. Below that threshold it never reproduces. So this is a timing window of about 40 ms.",
+     "tool_name": null, "ts": "2026-08-04T11:04:00Z",
+     "agent_session_id": "as-fixture-005a", "cwd": "/repo", "git_branch": "main"}
+  ],
+  "started_at": "2026-08-04T11:00:00Z",
+  "ended_at": "2026-08-04T11:04:00Z"
+}

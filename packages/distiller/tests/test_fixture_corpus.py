@@ -42,3 +42,16 @@ def test_seg003_error_is_buried_in_an_oversized_tool_result():
     assert 0.3 < pos < 0.7, "the error must be buried mid-log, not at head or tail"
     types = {f.type.value for f in load_goldens("seg-003")}
     assert "dead_end" in types
+
+
+def test_seg005_pair_is_a_merge_candidate():
+    a = load_goldens("seg-005a")
+    b = load_goldens("seg-005b")
+    assert [f.id for f in a] == ["f-005a-01"]
+    assert [f.id for f in b] == ["f-005b-01"]
+    assert a[0].attributions[0].contributor == "aditya"
+    assert b[0].attributions[0].contributor == "akhil"
+    assert a[0].attributions[0].contributor != b[0].attributions[0].contributor
+    # Same fact, different halves: both mention the 40ms window, only b has load.
+    assert "40" in a[0].text and "40" in b[0].text
+    assert "load" in b[0].text.lower() and "load" not in a[0].text.lower()

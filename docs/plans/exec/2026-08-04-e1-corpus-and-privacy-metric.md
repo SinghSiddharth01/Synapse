@@ -237,7 +237,7 @@ Two Contributors reach overlapping halves of one insight. E3's synthesis test co
 **Interfaces:**
 - Produces: golden ids `f-005a-01` (contributor `aditya`) and `f-005b-01` (contributor `akhil`) — near-duplicate texts. E3 Task 3 references these exact ids.
 
-- [ ] **Step 1: Append the failing test**
+- [x] **Step 1: Append the failing test**
 
 ```python
 def test_seg005_pair_is_a_merge_candidate():
@@ -253,12 +253,12 @@ def test_seg005_pair_is_a_merge_candidate():
     assert "load" in b[0].text.lower() and "load" not in a[0].text.lower()
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `uv run pytest packages/distiller/tests/test_fixture_corpus.py::test_seg005_pair_is_a_merge_candidate -v`
 Expected: FAIL with `FileNotFoundError`.
 
-- [ ] **Step 3: Write the four files**
+- [x] **Step 3: Write the four files**
 
 `seg-005a.json` (`as-fixture-005a`, contributor aditya's session): two events —
 1. `user/text`: "narrow down when the fec decode failure happens" (11:00:00Z)
@@ -296,12 +296,12 @@ Expected: FAIL with `FileNotFoundError`.
 
 (Note `agent: "codex"` on the second — free realism for the cross-agent story; nothing downstream keys on it yet.)
 
-- [ ] **Step 4: Run to verify it passes**
+- [x] **Step 4: Run to verify it passes**
 
 Run: `uv run pytest packages/distiller/tests/test_fixture_corpus.py -v -k seg005`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add fixtures/segments/seg-005a.json fixtures/segments/seg-005b.json fixtures/findings/seg-005a.findings.json fixtures/findings/seg-005b.findings.json packages/distiller/tests/test_fixture_corpus.py

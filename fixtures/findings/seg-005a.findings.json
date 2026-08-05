@@ -1,0 +1,9 @@
+[
+  {
+    "id": "f-005a-01", "type": "learning",
+    "text": "The decode failure is a timing window: it occurs only when the gap between the two DMA writes exceeds roughly 40 ms.",
+    "attributions": [{"contributor": "aditya", "agent_session": "as-fixture-005a", "agent": "claude-code"}],
+    "ts": "2026-08-04T11:04:00Z", "refs": [],
+    "provenance": "distilled", "status": "kept", "merged_from": [], "merged_into": null
+  }
+]

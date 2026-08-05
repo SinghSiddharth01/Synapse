@@ -1,0 +1,16 @@
+{
+  "id": "seg-005b",
+  "agent_session_id": "as-fixture-005b",
+  "events": [
+    {"role": "user", "kind": "text",
+     "content": "can you reproduce that decode failure on the bench?",
+     "tool_name": null, "ts": "2026-08-04T11:10:00Z",
+     "agent_session_id": "as-fixture-005b", "cwd": "/repo", "git_branch": "main"},
+    {"role": "assistant", "kind": "text",
+     "content": "Reproduced — but only under load. With the system otherwise idle the delay stays short and decode succeeds; once background traffic pushes the delay past about 40 ms the failure appears. It fails when the delay exceeds ~40 ms under load.",
+     "tool_name": null, "ts": "2026-08-04T11:15:00Z",
+     "agent_session_id": "as-fixture-005b", "cwd": "/repo", "git_branch": "main"}
+  ],
+  "started_at": "2026-08-04T11:10:00Z",
+  "ended_at": "2026-08-04T11:15:00Z"
+}
