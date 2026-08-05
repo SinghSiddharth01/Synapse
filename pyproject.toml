@@ -33,7 +33,7 @@ dev = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["packages"]
+testpaths = ["packages", "tests"]
 
 [tool.coverage.report]
 # The `if __name__ == "__main__": sys.exit(main())` guard in every CLI module

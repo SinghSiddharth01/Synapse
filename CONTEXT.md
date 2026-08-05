@@ -67,7 +67,7 @@ A Finding written by synthesis that captures the essence of two or more Findings
 _Avoid_: merged finding, combined finding, summary
 
 **Tombstone**:
-A Finding whose essence now lives in a Synthesized Finding. It keeps its text and Attribution but is excluded from retrieval. Not deleted — ingest must recognise its id on retry, Conflicts must follow it forward, and the merge that created it was a small model's judgement.
+A Finding whose essence now lives in a Synthesized Finding. It keeps its text and Attribution but is excluded from retrieval. Not deleted — ingest must recognise its id on retry, Conflicts must follow it forward, and the merge that created it was a small model's judgement. It is a **derived condition, not a written field**: a Finding leaves the View because a later `Merged` entry names it as a source, and nothing is written onto the original (`adr/0004`).
 _Avoid_: deleted, dropped, duplicate, superseded, archived
 
 **Working Memory**:
@@ -104,6 +104,14 @@ _Avoid_: result, hit, match, neighbour
 Of the Candidates a Lane surfaced, the fraction that ended in an accepted merge. The only honest measure of whether a Lane earns its cost.
 _Avoid_: precision, accuracy, hit rate
 
+**Fold**:
+The pure function that replays the Finding Log in order and produces the View. Deterministic, no model, cached on log version and discardable. A fold is the *only* way current state is obtained; nothing derives visibility any other way.
+_Avoid_: reduce, replay (the recovery path is a resync, not a fold), rebuild (that is re-deriving the indexes), projection
+
+**Topic**:
+A cluster of Findings grouped by cosine against a centroid — geometry decides membership, and a label only ever describes it. Topics exist to reach a decision that *governs* a Finding it shares no vocabulary with. A Topic is never an input to what is durable. That governing path is a retrieval lane behind the `topic_lane` flag (`lanes.DEFAULT_TOPIC_LANE`), and **as shipped, the governing lane is off**: it was measured at zero yield (0 partners, 0 uniquely, at 422 findings and at 2,022) and re-measured on this tree, so topics currently earn their place as *labels* in the arrival briefing, not as a retrieval lane.
+_Avoid_: cluster, category, tag, label (a label is a Topic's name, not the Topic), theme
+
 ## Notes
 
 - **The shape of Shared Memory is a deliberate first pass and is expected to evolve.** It is where most of the system's future value lives, so it sits behind a storage seam and should not be over-frozen. Splitting Working Memory from Finding Log is the current best structure, not a settled one.
@@ -114,5 +122,5 @@ _Avoid_: precision, accuracy, hit rate
 - Suppression is scoped to the Agent Session, not the Contributor — the justification is "already in that context window", so one Contributor's two agents still learn from each other. A Finding is suppressed only when *every* Attribution on it is that same Agent Session; a Synthesized Finding carrying a teammate's contribution is always shown.
 - Semantic sameness is synthesis's judgement, not an id comparison. Ids exist for idempotent ingest and for referencing (`merged_from`, `merged_into`, `Conflict`) — never for deciding whether two Findings mean the same thing.
 - `Finding.provenance` (`distilled | contributed`) is a separate axis from Attribution: it records *how* a Finding was produced, not *who* by.
-- **A Tombstone is a derived condition, not a written field** (`adr/0004`). A Finding leaves the View because a later `Merged` entry names it as a source — nothing is written onto the original. Everything the term means is unchanged: text and Attribution retained, excluded from retrieval, reachable by id, reversible. `Finding.merged_into` and `Finding.status` are **not written by the service**; read visibility from the View until the team decides whether the ingest API projects them on egress.
+- **A Tombstone is a derived condition, not a written field** (`adr/0004`). A Finding leaves the View because a later `Merged` entry names it as a source — nothing is written onto the original. Everything the term means is unchanged: text and Attribution retained, excluded from retrieval, reachable by id, reversible. `Finding.merged_into` and `Finding.status` are projected onto egress from the View (`adr/0004`, **Option A, closed 2026-08-05**); they are never written by a producer and never read to decide visibility.
 - **The Finding Log is append-only.** This is why a Producer may safely re-push its entire durable log after a service restart: a replayed append is inert rather than a write that resurrects merged-away Findings. "Idempotent ingest" is still the external property; it is now guaranteed by structure rather than by careful write logic.
