@@ -133,12 +133,60 @@ class Synthesizer:
         retrievable = store.retrievable(shared_id)
         new_ids = {f.id for f in new_findings}
         pushed = [f for f in retrievable if f.id in new_ids]
-        others = [f for f in retrievable if f.id not in new_ids][-CANDIDATE_WINDOW:]
+
+        if pushed:
+            # One candidate lookup per pushed finding, unioned and deduped.
+            # A pure recency slice made an old near-duplicate permanently
+            # unmergeable -- the ADR 0002 merge stopped happening as the
+            # session grew, silently, with nothing reporting the loss.
+            #
+            # COST, named: this is O(pushed x log) select() sweeps. ~2.5 ms per
+            # sweep at 422 findings, so microseconds-to-milliseconds at demo
+            # scale. The PROMPT is fixed-cost; the compute is not.
+            best: dict[str, tuple[float, Finding]] = {}
+            # Why a candidate was surfaced, kept for the prompt. A shared rare
+            # identifier is close to proof, and telling the model so costs a
+            # few tokens per line (lanes.Candidate.render's own argument, which
+            # otherwise reaches no prompt in this integration).
+            marks: dict[str, frozenset[str]] = {}
+            for finding in pushed:
+                result = store.candidates(shared_id, finding.text,
+                                          exclude=frozenset(new_ids))
+                for candidate in result.candidates:
+                    prior = best.get(candidate.finding.id)
+                    if prior is None or candidate.score > prior[0]:
+                        best[candidate.finding.id] = (candidate.score, candidate.finding)
+                    if candidate.shared_symbols:
+                        marks[candidate.finding.id] = (
+                            marks.get(candidate.finding.id, frozenset())
+                            | candidate.shared_symbols)
+            # Rank the UNION before truncating. Truncating dict-insertion order
+            # instead lets the first two pushed findings fill all 20 slots, so
+            # findings 3..N of a backlog flush contribute no partners at all --
+            # the same starvation the recency slice caused, differently shaped.
+            others = [f for _, f in
+                      sorted(best.values(), key=lambda sf: (-sf[0], sf[1].id))
+                      ][:CANDIDATE_WINDOW]
+        else:
+            # The /synthesize self-heal path passes no new findings, so there
+            # is no text to search WITH. Recency is the only rule available,
+            # and this is exactly what that route did before lanes existed.
+            others = [f for f in retrievable if f.id not in new_ids][-CANDIDATE_WINDOW:]
+            marks = {}
+
         candidates = pushed + others
         if not candidates:
             return ctx
 
-        listing = "\n".join(f"[{f.id}] ({f.type.value}) {f.text}" for f in candidates)
+        def _line(f: Finding) -> str:
+            base = f"[{f.id}] ({f.type.value}) {f.text}"
+            shared = marks.get(f.id)
+            # Parentheses, never brackets: test helpers parse `[...]` out of
+            # this listing as finding ids, and a bracketed marker would read as
+            # a phantom id in every one of them.
+            return base + (f"  (shares: {', '.join(sorted(shared))})" if shared else "")
+
+        listing = "\n".join(_line(f) for f in candidates)
         messages = [
             {"role": "system", "content": SYNTH_SYSTEM},
             {"role": "user", "content":
