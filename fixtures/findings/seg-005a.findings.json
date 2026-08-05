@@ -1,0 +1,9 @@
+[
+  {
+    "id": "f-005a-01", "type": "learning",
+    "text": "The decode failure only shows up once the two DMA writes drift more than about 40 ms apart; keep that gap tighter and it never reproduces.",
+    "attributions": [{"contributor": "aditya", "agent_session": "as-fixture-005a", "agent": "claude-code"}],
+    "ts": "2026-08-04T11:04:00Z", "refs": [],
+    "provenance": "distilled", "status": "kept", "merged_from": [], "merged_into": null
+  }
+]

@@ -1,0 +1,16 @@
+[
+  {
+    "id": "f-003-01", "type": "dead_end",
+    "text": "Tuning the flush buffer size does not fix the streaming disconnects — the failure is a missing handler for clients that disconnect mid-stream, not a buffer problem.",
+    "attributions": [{"contributor": "aditya", "agent_session": "as-fixture-003", "agent": "claude-code"}],
+    "ts": "2026-08-04T10:03:00Z", "refs": [],
+    "provenance": "distilled", "status": "kept", "merged_from": [], "merged_into": null
+  },
+  {
+    "id": "f-003-02", "type": "learning",
+    "text": "Under load, streaming responses fail with a connection reset when the client disconnects during the response flush, and this reproduces reliably.",
+    "attributions": [{"contributor": "aditya", "agent_session": "as-fixture-003", "agent": "claude-code"}],
+    "ts": "2026-08-04T10:03:00Z", "refs": [],
+    "provenance": "distilled", "status": "kept", "merged_from": [], "merged_into": null
+  }
+]

@@ -31,7 +31,7 @@ The hardest triage case: a decision reached conversationally, with no tool call,
 **Interfaces:**
 - Produces: fixture ids `seg-002` consumable via `load_segment("seg-002")` / `load_goldens("seg-002")`. E2's triage tests and the eval harness consume these by id.
 
-- [ ] **Step 1: Write the failing corpus test**
+- [x] **Step 1: Write the failing corpus test**
 
 ```python
 # packages/distiller/tests/test_fixture_corpus.py
@@ -70,12 +70,12 @@ def test_seg002_is_conversational():
     assert "decision" in types
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `uv run pytest packages/distiller/tests/test_fixture_corpus.py -v`
 Expected: FAIL — `test_corpus_is_complete` (only seg-001/seg-004 exist), and the parametrized cases for missing ids fail with `FileNotFoundError`.
 
-- [ ] **Step 3: Write the fixture**
+- [x] **Step 3: Write the fixture**
 
 ```json
 // fixtures/segments/seg-002.json
@@ -123,12 +123,12 @@ Expected: FAIL — `test_corpus_is_complete` (only seg-001/seg-004 exist), and t
 ]
 ```
 
-- [ ] **Step 4: Run the seg-002-specific tests**
+- [x] **Step 4: Run the seg-002-specific tests**
 
 Run: `uv run pytest packages/distiller/tests/test_fixture_corpus.py::test_seg002_is_conversational packages/distiller/tests/test_fixture_corpus.py::test_fixture_parses -v -k "seg-002 or conversational"`
 Expected: PASS for seg-002 cases. `test_corpus_is_complete` still fails — that is the tracking test for the whole plan and goes green at Task 4.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add fixtures/segments/seg-002.json fixtures/findings/seg-002.findings.json packages/distiller/tests/test_fixture_corpus.py
@@ -149,7 +149,7 @@ Plan 0.3's compaction fixture. Compaction (A.5) is unbuilt, so today this pins t
 **Interfaces:**
 - Produces: `seg-003`, whose middle `tool_result` event exceeds 4000 chars with the error at roughly the midpoint.
 
-- [ ] **Step 1: Append the failing test**
+- [x] **Step 1: Append the failing test**
 
 ```python
 def test_seg003_error_is_buried_in_an_oversized_tool_result():
@@ -163,12 +163,12 @@ def test_seg003_error_is_buried_in_an_oversized_tool_result():
     assert "dead_end" in types
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `uv run pytest packages/distiller/tests/test_fixture_corpus.py::test_seg003_error_is_buried_in_an_oversized_tool_result -v`
 Expected: FAIL with `FileNotFoundError`.
 
-- [ ] **Step 3: Write the fixture**
+- [x] **Step 3: Write the fixture**
 
 Build the big log programmatically once, paste the result. Generator (run ad hoc, do not commit):
 
@@ -211,17 +211,61 @@ All events: `agent_session_id: "as-fixture-003"`, `cwd: "/repo"`, `git_branch: "
 ]
 ```
 
-- [ ] **Step 4: Run to verify it passes**
+- [x] **Step 4: Run to verify it passes**
 
 Run: `uv run pytest packages/distiller/tests/test_fixture_corpus.py -v -k seg003`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add fixtures/segments/seg-003.json fixtures/findings/seg-003.findings.json packages/distiller/tests/test_fixture_corpus.py
 git commit -m "test(fixtures): seg-003 — oversized tool_result, buried error (Plan 0.3)"
 ```
+
+#### Post-review amendment (2026-08-04)
+
+This task's opening paragraph and Interfaces line claim seg-003 "pins two
+things: budget-splitting doesn't lose the error line, and `dead_end` recall
+when the signal lives in a `tool_result`," with "whose middle `tool_result`
+event exceeds 4000 chars with the error at roughly the midpoint."
+
+Corpus review (findings-e1.json, "Task 2 (seg-003 oversized tool_result)")
+found that under the shipped config (`config/synapse.toml`:
+`distil_kinds = ["text"]`), the oversized `tool_result` is filtered out of
+`render_segment` before the model ever sees it — no budget-splitting occurs,
+and there is no truncation/compaction path to pin, because the fixture stays
+under the derived budget even when every event kind is included. The
+`dead_end` golden is reachable only because the assistant's own prose
+(event 5) restates the failure in words, which means seg-003 currently
+exercises the same code path as seg-002 (a conversational-recall case), not
+the buried-tool_result/compaction case this task set out to build.
+
+This is not a design reversal — it is a gap between what this task's prose
+promises and what the shipped `distil_kinds` default (chosen in
+`config/synapse.toml`) actually exercises today. No fixture change is
+warranted: the fixture *file* still legitimately has an oversized
+`tool_result` with the error buried mid-log
+(`test_seg003_error_is_buried_in_an_oversized_tool_result` pins that), and
+that data property is needed the moment `distil_kinds` widens and/or
+compaction (Plan A.5) lands. What was missing was a test pinning the
+*current, honest* system behaviour so the gap between "the data has this
+shape" and "the system exercises this behaviour today" cannot silently go
+stale in either direction.
+
+Added `test_seg003_buried_error_reaches_the_model_only_via_prose_under_
+shipped_config` (`packages/distiller/tests/test_fixture_corpus.py`), which
+asserts the buried `ConnectionResetError` is absent from the rendered prompt
+under the shipped config, and that the `dead_end` is recoverable only via
+prose. A later review pass replaced this test's `load_config()` call with
+explicit construction from module-level `_SHIPPED_*` constants, since even
+guarding `load_config()` against `SYNAPSE_*` env vars still routed a "pin
+the committed config" test through env-merge machinery it had no need of.
+
+Deferred, tracked, not a defect: compaction/budget-splitting recall for a
+buried `tool_result` remains unbuilt until `distil_kinds` widens or Plan A.5
+lands — already recorded in this file's "Deferred, with reasons" section for
+the related cross-segment `dead_end` case, and applies here too.
 
 ---
 
@@ -237,7 +281,7 @@ Two Contributors reach overlapping halves of one insight. E3's synthesis test co
 **Interfaces:**
 - Produces: golden ids `f-005a-01` (contributor `aditya`) and `f-005b-01` (contributor `akhil`) — near-duplicate texts. E3 Task 3 references these exact ids.
 
-- [ ] **Step 1: Append the failing test**
+- [x] **Step 1: Append the failing test**
 
 ```python
 def test_seg005_pair_is_a_merge_candidate():
@@ -253,12 +297,12 @@ def test_seg005_pair_is_a_merge_candidate():
     assert "load" in b[0].text.lower() and "load" not in a[0].text.lower()
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `uv run pytest packages/distiller/tests/test_fixture_corpus.py::test_seg005_pair_is_a_merge_candidate -v`
 Expected: FAIL with `FileNotFoundError`.
 
-- [ ] **Step 3: Write the four files**
+- [x] **Step 3: Write the four files**
 
 `seg-005a.json` (`as-fixture-005a`, contributor aditya's session): two events —
 1. `user/text`: "narrow down when the fec decode failure happens" (11:00:00Z)
@@ -296,12 +340,12 @@ Expected: FAIL with `FileNotFoundError`.
 
 (Note `agent: "codex"` on the second — free realism for the cross-agent story; nothing downstream keys on it yet.)
 
-- [ ] **Step 4: Run to verify it passes**
+- [x] **Step 4: Run to verify it passes**
 
 Run: `uv run pytest packages/distiller/tests/test_fixture_corpus.py -v -k seg005`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add fixtures/segments/seg-005a.json fixtures/segments/seg-005b.json fixtures/findings/seg-005a.findings.json fixtures/findings/seg-005b.findings.json packages/distiller/tests/test_fixture_corpus.py
@@ -323,7 +367,7 @@ seg-006: an error that is NOT insight (typo, fixed in seconds). seg-007: noise t
 **Interfaces:**
 - Produces: `fixtures/triage.json` — `{"<fixture_id>": {"expected": "keep"|"skip", "note": str}}`. E2 Task 4 parametrizes over it verbatim.
 
-- [ ] **Step 1: Append the failing tests**
+- [x] **Step 1: Append the failing tests**
 
 ```python
 import json
@@ -344,12 +388,12 @@ def test_triage_expectation_map_covers_the_whole_corpus():
     assert raw["seg-002"]["expected"] == "keep"
 ```
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
 Run: `uv run pytest packages/distiller/tests/test_fixture_corpus.py -v -k "adversarial or expectation"`
 Expected: FAIL with `FileNotFoundError`.
 
-- [ ] **Step 3: Write the fixtures and the map**
+- [x] **Step 3: Write the fixtures and the map**
 
 `seg-006.json` (`as-fixture-006`): four events —
 1. `user/text`: "run the unit tests" (12:00:00Z)
@@ -380,17 +424,69 @@ Then `assistant/text`: "Three call sites log errors: the API routes, the worker 
 
 The two ACCEPTED FALSE POSITIVE entries are the honest part: recall-tuned triage deliberately keeps them, synthesis's trivia filter is the layer that catches what they produce. If a later, smarter triage can flip them to `skip`, this file is where that improvement becomes measurable.
 
-- [ ] **Step 4: Run the whole corpus suite**
+- [x] **Step 4: Run the whole corpus suite**
 
 Run: `uv run pytest packages/distiller/tests/test_fixture_corpus.py -v`
 Expected: ALL PASS — including `test_corpus_is_complete`, now that all 8 ids exist.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add fixtures/segments/seg-006.json fixtures/segments/seg-007.json fixtures/findings/seg-006.findings.json fixtures/findings/seg-007.findings.json fixtures/triage.json packages/distiller/tests/test_fixture_corpus.py
 git commit -m "test(fixtures): adversarial triage pair + expectation map — corpus complete at 8"
 ```
+
+#### Post-review amendment (2026-08-04)
+
+Corpus review (findings-e1.json, "Task 4 (seg-006/seg-007 adversarial
+pair)") flagged that this task's goldens were rewritten from `[]` to
+faithful-compression content by a later commit (7fb9f12, "seg-006/seg-007
+need faithful-compression goldens, not empty ones (ADR 0003)") without this
+plan being amended — the checkboxes above stayed `[x]` and Step 3's fixture
+text, this task's opening paragraph ("Their goldens are empty arrays"), and
+Step 1's `test_adversarial_fixtures_have_empty_goldens` all still describe
+the original, now-superseded design.
+
+**Ruling on review: the reversal is correct, upheld.** This task predates
+`adr/0003` (the on-device Distiller compresses; it does not judge —
+durability judgment belongs to triage upstream and synthesis downstream).
+When this task was written, an empty golden for a `keep`-triaged adversarial
+segment encoded a durability judgment ("the distiller should recognize this
+isn't worth keeping and emit nothing") that made sense under the pre-ADR
+design, where the distiller was still expected to filter. Under ADR 0003
+that judgment no longer belongs to the distiller at all — triage has already
+decided `keep` by the time seg-006/seg-007 reach it (see
+`fixtures/triage.json`'s two ACCEPTED FALSE POSITIVE entries), and a
+compress-only distiller asked to faithfully compress real content (seg-006's
+tool_result contains a genuine NameError-driven test failure; seg-007's
+contains three real call sites) SHOULD produce findings. An empty golden
+here is now internally inconsistent with `adr/0003`: it would fail a
+correct, ADR-compliant distiller and reward one that reproduces the pre-ADR
+filtering behaviour the ADR explicitly removed.
+
+What was wrong was not the direction but the **honesty trail**: the goldens
+changed and the test asserting emptiness was deleted and inverted, but this
+plan document was never updated to say so, and the implementation report
+claimed no deviations. That is the defect this amendment corrects.
+
+**Current state, superseding Step 1 and Step 3 above and this task's opening
+paragraph:**
+- `fixtures/findings/seg-006.findings.json` / `seg-007.findings.json` are
+  **non-empty** (`f-006-01`, `f-007-01`), not `[]`.
+- The Step 1 test `test_adversarial_fixtures_have_empty_goldens` no longer
+  exists. In its place: `test_seg006_seg007_have_faithful_compression_
+  goldens` (`packages/distiller/tests/test_fixture_corpus.py`), asserting
+  the goldens are non-empty, with the ADR-0003 rationale above in its
+  docstring.
+- `f-006-01`'s text was further trimmed in a later review pass
+  (findings-e1.json, "Task 4 — seg-006 adversarial fixture + golden") to
+  remove facts ("an undefined-variable typo", "caused one test failure")
+  that live only in the tool_result the shipped `distil_kinds = ("text",)`
+  excludes from the model's view — see
+  `test_seg006_typo_reaches_the_model_only_via_prose_under_shipped_config`.
+- `fixtures/README.md` and `fixtures/triage.json` are updated to describe
+  this corpus as it actually ships; their current text supersedes this
+  task's "Their goldens are empty arrays" line, which is now historical.
 
 ---
 
@@ -405,7 +501,7 @@ The 8-gram metric scored **0.00** on a finding containing `default_pool_size=25`
 **Interfaces:**
 - Produces: `identifier_leaks(finding_text: str, segment: Segment, allowlist: frozenset[str] = DEFAULT_ALLOWLIST) -> list[str]`; `FixtureScore.leaked_identifiers: list[str]` populated by `score_fixture`. E1 Task 6 and any future harness read `leaked_identifiers`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 # packages/distiller/tests/test_identifier_leaks.py
@@ -462,12 +558,12 @@ def test_plain_prose_never_flags():
     assert identifier_leaks("The connection pool was exhausted under load.", seg) == []
 ```
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
 Run: `uv run pytest packages/distiller/tests/test_identifier_leaks.py -v`
 Expected: FAIL with `ImportError: cannot import name 'identifier_leaks'`.
 
-- [ ] **Step 3: Implement in evaluation.py**
+- [x] **Step 3: Implement in evaluation.py**
 
 Append to `packages/distiller/src/synapse_distiller/evaluation.py`:
 
@@ -539,12 +635,12 @@ In `score_fixture(...)`, after the existing `overlaps = ...` line:
 
 and pass `leaked_identifiers=leaks` in the `FixtureScore(...)` constructor call.
 
-- [ ] **Step 4: Run to verify they pass**
+- [x] **Step 4: Run to verify they pass**
 
 Run: `uv run pytest packages/distiller/tests/test_identifier_leaks.py packages/distiller/tests/ -q`
 Expected: PASS, and the rest of the distiller suite stays green.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add packages/distiller/src/synapse_distiller/evaluation.py packages/distiller/tests/test_identifier_leaks.py
@@ -563,7 +659,7 @@ git commit -m "feat(eval): identifier-leak detector — catches the single-token
 **Interfaces:**
 - Consumes: `FixtureScore.leaked_identifiers` from Task 5.
 
-- [ ] **Step 1: Write the failing contamination test**
+- [x] **Step 1: Write the failing contamination test**
 
 The `v1-baseline` incident, automated: no committed fixture may share a distinctive phrase with any prompt pack's few-shots.
 
@@ -602,7 +698,7 @@ def test_fixture_shares_no_sixgram_with_any_pack(fixture_id):
         )
 ```
 
-- [ ] **Step 2: Run it**
+- [x] **Step 2: Run it**
 
 Run: `uv run pytest packages/distiller/tests/test_fixture_contamination.py -v`
 Expected: **likely one FAILURE** — `v1-baseline` is documented as contaminated against `seg-004`. If it fails there: that pack is frozen as evidence, so add the documented exception at the top of the test rather than editing the pack:
@@ -613,7 +709,7 @@ KNOWN_CONTAMINATED = {("seg-004", "v1-baseline.toml")}  # frozen evidence; decla
 
 and inside the loop: `if (fixture_id, pack_path.name) in KNOWN_CONTAMINATED: continue`. Every NEW fixture must pass clean.
 
-- [ ] **Step 3: Wire leaks into the eval output**
+- [x] **Step 3: Wire leaks into the eval output**
 
 In `scripts/run_npu_eval.py`, the per-fixture reporting loop already prints from each `score` (a `FixtureScore`). Immediately after the existing per-fixture print block that reports `max_verbatim_overlap`, add:
 
@@ -633,7 +729,7 @@ and in the summary section at the bottom (after the voided-pack report), add:
         print("\n  identifier leaks: none detected (allowlist applies — see evaluation.py)")
 ```
 
-- [ ] **Step 4: Update fixtures/README.md**
+- [x] **Step 4: Update fixtures/README.md**
 
 Replace its provisional-status section with:
 
@@ -655,7 +751,7 @@ triage should do per fixture, including two ACCEPTED FALSE POSITIVE entries.
 `test_fixture_contamination.py` enforces zero six-gram overlap with prompt packs.
 ```
 
-- [ ] **Step 5: Run the full distiller suite, then commit**
+- [x] **Step 5: Run the full distiller suite, then commit**
 
 Run: `uv run pytest packages/distiller -q`
 Expected: PASS.

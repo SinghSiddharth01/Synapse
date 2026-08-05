@@ -1,0 +1,20 @@
+{
+  "id": "seg-002",
+  "agent_session_id": "as-fixture-002",
+  "events": [
+    {"role": "user", "kind": "text",
+     "content": "Should we cache the JWTs in redis so we stop hitting the auth service on every request?",
+     "tool_name": null, "ts": "2026-08-04T09:00:00Z",
+     "agent_session_id": "as-fixture-002", "cwd": "/repo", "git_branch": "main"},
+    {"role": "assistant", "kind": "text",
+     "content": "Caching would work, but these tokens expire after ninety seconds, so a cache would be stale almost immediately and we'd need invalidation logic anyway. A simpler approach: keep calling the auth service, and only refresh a token when a request actually comes back 401. The auth service call is cheap; the complexity of a cache is not. Let's go with refresh-on-401 instead of caching.",
+     "tool_name": null, "ts": "2026-08-04T09:00:20Z",
+     "agent_session_id": "as-fixture-002", "cwd": "/repo", "git_branch": "main"},
+    {"role": "user", "kind": "text",
+     "content": "ok do that",
+     "tool_name": null, "ts": "2026-08-04T09:00:35Z",
+     "agent_session_id": "as-fixture-002", "cwd": "/repo", "git_branch": "main"}
+  ],
+  "started_at": "2026-08-04T09:00:00Z",
+  "ended_at": "2026-08-04T09:00:35Z"
+}

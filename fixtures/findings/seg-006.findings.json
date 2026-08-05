@@ -1,0 +1,9 @@
+[
+  {
+    "id": "f-006-01", "type": "learning",
+    "text": "A typo in a config name broke a test; correcting it restored a fully passing suite of 42 tests.",
+    "attributions": [{"contributor": "aditya", "agent_session": "as-fixture-006", "agent": "claude-code"}],
+    "ts": "2026-08-04T12:00:55Z", "refs": [],
+    "provenance": "distilled", "status": "kept", "merged_from": [], "merged_into": null
+  }
+]

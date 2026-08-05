@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from synapse_contracts import Finding, FindingType, Segment
 
+from synapse_distiller.evaluation import identifier_leaks, verbatim_overlap
 from synapse_distiller.fixtures import available_fixtures, load_goldens, load_segment
 
 
@@ -44,3 +45,48 @@ def test_seg_001_goldens_abstract_rather_than_quote() -> None:
         assert token in segment_text, f"{token} should appear in the source segment"
         for golden in load_goldens("seg-001"):
             assert token not in golden.text, f"golden quotes {token!r} from the segment"
+
+
+def test_seg005_goldens_abstract_rather_than_quote() -> None:
+    """f-005a-01 and f-005b-01 originally quoted an 8-gram straight out of
+    their own segments ("the gap between the two DMA writes exceeds roughly",
+    "background traffic pushes the delay past about 40 ms") and scored 0.20
+    on verbatim_overlap — a non-zero floor baked into the branch's own
+    PRIVACY metric. These are PROVISIONAL goldens (fixtures/README.md), and
+    abstraction below the 8-gram threshold is the product's own bar, not an
+    aspirational one; pin it at 0.0 so a future rewording can't drift back."""
+    seg_a = load_segment("seg-005a")
+    seg_b = load_segment("seg-005b")
+    for golden in load_goldens("seg-005a"):
+        assert verbatim_overlap(golden.text, seg_a) == 0.0, (
+            f"f-005a golden {golden.id!r} quotes an 8-gram verbatim from its segment"
+        )
+    for golden in load_goldens("seg-005b"):
+        assert verbatim_overlap(golden.text, seg_b) == 0.0, (
+            f"f-005b golden {golden.id!r} quotes an 8-gram verbatim from its segment"
+        )
+
+
+def test_no_golden_in_the_corpus_leaks_an_identifier_from_its_segment() -> None:
+    """Generalizes test_seg_001_goldens_abstract_rather_than_quote across the
+    whole corpus using the Task 5 detector (identifier_leaks), rather than
+    seg-001's hand-picked substring list.
+
+    This is load-bearing for a reason beyond ordinary fixture hygiene: the
+    goldens ARE the privacy bar a run is measured against (scripts/
+    run_npu_eval.py voids the demo the moment any score.leaked_identifiers is
+    non-empty). A distiller that reproduces a golden exactly must not itself
+    be scored as a privacy failure — if a golden leaks, every fixture using
+    it is unusable for the privacy claim regardless of what the model does.
+    """
+    for fixture_id in available_fixtures():
+        segment = load_segment(fixture_id)
+        for golden in load_goldens(fixture_id):
+            leaks = identifier_leaks(golden.text, segment)
+            assert not leaks, (
+                f"{fixture_id} golden {golden.id!r} leaks identifiers copied "
+                f"verbatim from its own segment: {leaks} — reword the golden "
+                f"to abstract rather than quote (see the seg-001 test above), "
+                f"or add a reviewed DEFAULT_ALLOWLIST entry if the token is "
+                f"genuinely public vocabulary"
+            )

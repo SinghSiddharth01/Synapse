@@ -1,0 +1,24 @@
+{
+  "id": "seg-007",
+  "agent_session_id": "as-fixture-007",
+  "events": [
+    {"role": "user", "kind": "text",
+     "content": "how many places do we log errors?",
+     "tool_name": null, "ts": "2026-08-04T12:10:00Z",
+     "agent_session_id": "as-fixture-007", "cwd": "/repo", "git_branch": "main"},
+    {"role": "assistant", "kind": "tool_use",
+     "content": "pattern: logger.error",
+     "tool_name": "Grep", "ts": "2026-08-04T12:10:03Z",
+     "agent_session_id": "as-fixture-007", "cwd": "/repo", "git_branch": "main"},
+    {"role": "user", "kind": "tool_result",
+     "content": "api/routes.py:88: logger.error(\"upstream error: %s\", exc)\nworker/loop.py:141: logger.error(\"fatal error in tick\")\nstore/db.py:52: logger.error(\"connection error, retrying\")\n3 matches",
+     "tool_name": "Grep", "ts": "2026-08-04T12:10:05Z",
+     "agent_session_id": "as-fixture-007", "cwd": "/repo", "git_branch": "main"},
+    {"role": "assistant", "kind": "text",
+     "content": "Three call sites log errors: the API routes, the worker tick, and the db retry path.",
+     "tool_name": null, "ts": "2026-08-04T12:10:20Z",
+     "agent_session_id": "as-fixture-007", "cwd": "/repo", "git_branch": "main"}
+  ],
+  "started_at": "2026-08-04T12:10:00Z",
+  "ended_at": "2026-08-04T12:10:20Z"
+}

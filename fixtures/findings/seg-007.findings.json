@@ -1,0 +1,9 @@
+[
+  {
+    "id": "f-007-01", "type": "learning",
+    "text": "Error logging happens at three call sites: the API route handler, the worker's tick loop, and the database retry path.",
+    "attributions": [{"contributor": "aditya", "agent_session": "as-fixture-007", "agent": "claude-code"}],
+    "ts": "2026-08-04T12:10:20Z", "refs": [],
+    "provenance": "distilled", "status": "kept", "merged_from": [], "merged_into": null
+  }
+]
