@@ -140,7 +140,9 @@ class AIC100Provider(ModelProvider):
                  transport: httpx.AsyncBaseTransport | None = None) -> None:
         self.base_url = (base_url or os.environ.get("INFERENCE_CLOUD_BASE_URL")
                          or DEFAULT_BASE_URL).rstrip("/")
-        self.model = model
+        # INFERENCE_CLOUD_MODEL exists so a rehearsal can A/B synthesis models
+        # (8B on .com vs 70B on the Indonesian instance) without a code change.
+        self.model = os.environ.get("INFERENCE_CLOUD_MODEL", model)
         self.api_key = api_key or os.environ.get("INFERENCE_CLOUD_API_KEY", "")
         self.max_tokens = max_tokens
         self.timeout = timeout

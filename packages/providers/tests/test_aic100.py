@@ -207,3 +207,10 @@ async def test_schema_prompt_shows_an_example_instance_never_the_schema():
     prompt = seen["body"]["prompt"]
     assert '"properties"' not in prompt and '"required"' not in prompt
     assert '"ok": true' in prompt  # the example instance, filled in
+
+
+async def test_model_env_override(monkeypatch):
+    monkeypatch.setenv("INFERENCE_CLOUD_MODEL", "Llama-3.3-70B")
+    assert AIC100Provider(base_url="https://x", api_key="k").model == "Llama-3.3-70B"
+    monkeypatch.delenv("INFERENCE_CLOUD_MODEL")
+    assert AIC100Provider(base_url="https://x", api_key="k").model == "Llama-3.1-8B"
