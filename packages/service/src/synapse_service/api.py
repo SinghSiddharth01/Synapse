@@ -12,9 +12,11 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from synapse_contracts import Finding
-from synapse_providers import ModelProvider
+from synapse_providers import CallLog, ModelProvider, RecordingProvider
 
+from synapse_service.debug import Feed, debug_routes
 from synapse_service.lanes import DEFAULT_TOP_K
+from synapse_service.log import MarkedTrivial, Merged
 from synapse_service.retrieval import query_findings, visible_to
 from synapse_service.store import InMemoryStore
 from synapse_service.synthesis import Synthesizer
@@ -40,12 +42,68 @@ def _missing(body: dict, *required: str) -> JSONResponse | None:
     return None
 
 
-def build_app(provider: ModelProvider) -> Starlette:
+def build_app(provider: ModelProvider, *, debug: bool = True) -> Starlette:
+    """`debug=True` (the default, preserving every existing call site's
+    behavior) mounts `/debug` on this same listener and wraps the provider in
+    `RecordingProvider` so the dashboard has something to read.
+
+    `debug=False` is the off switch the plan's "localhost-only" constraint
+    needs and never had: `synapse-service` shares one Starlette app between
+    the product API and `/debug`, and unlike the worker (which binds `/debug`
+    on its own `127.0.0.1`-only socket, gated by `if debug_port:` in cli.py)
+    there was no way to run this service with `--host 0.0.0.0` (the
+    deployment CONTEXT.md describes) without the debug surface riding along
+    on the public listener with no auth. With `debug=False`: no
+    RecordingProvider wrapping (the provider passed in is used directly, so
+    no 200-entry ring of prompt/output previews accumulates for a service
+    instance nobody will ever point a browser at), no `/debug` routes
+    mounted, no `Feed` -- matching the worker's `if debug_port:` gating of
+    the identical machinery.
+    """
     store = InMemoryStore()
-    synthesizer = Synthesizer(provider)
+
+    # E6: one CallLog, one Feed, for the whole service instance -- wrapping
+    # per component (not per session) is deliberate. RecordingProvider is
+    # transparent (same result, exceptions re-raised), so this changes
+    # nothing about what synthesis or retrieval actually do; it only gives
+    # /debug something to read. Both are None when debug is disabled so
+    # nothing retains a call/prompt history no one can ever look at.
+    call_log = CallLog() if debug else None
+    feed = Feed() if debug else None
+    synthesis_provider = (
+        RecordingProvider(provider, "synthesis", call_log) if debug else provider
+    )
+    retrieval_provider = (
+        RecordingProvider(provider, "retrieval", call_log) if debug else provider
+    )
+    synthesizer = Synthesizer(synthesis_provider)
 
     def _session_or_404(sid: str):
         return store.get_session(sid)
+
+    def _record_synthesis_feed(sid: str, log_before: int) -> None:
+        """Diff the log around the `merge()` call just made, rather than
+        having synthesis.py report counts itself -- keeps this instrumentation
+        entirely in api.py, matching the plan's Files list for this task.
+        A no-op when debug is disabled (`feed is None`)."""
+        if feed is None:
+            return
+        entries = store.log_entries(sid)[log_before:]
+        merged = [e for e in entries if isinstance(e, Merged)]
+        trivial = [e for e in entries if isinstance(e, MarkedTrivial)]
+        trivial_count = sum(len(e.finding_ids) for e in trivial)
+        ctx = store.get_context(sid)
+        feed.event(
+            "synthesis",
+            f"{sid}: {len(merged)} merge(s), {trivial_count} trivial, "
+            f"{len(ctx.conflicts)} conflict(s) (v{ctx.memory_version})",
+            session=sid,
+            new_ids=[e.result.id for e in merged],
+            merges=len(merged),
+            trivial=trivial_count,
+            conflicts=len(ctx.conflicts),
+            version=ctx.memory_version,
+        )
 
     async def create_session(request: Request) -> JSONResponse:
         body = await request.json()
@@ -97,7 +155,9 @@ def build_app(provider: ModelProvider) -> Starlette:
             # A THIRD upsert would cost another N. Removing merge()'s is the
             # real fix and needs all 19 direct call sites in test_synthesis.py
             # to upsert first -- post-demo.
+            log_before = len(store.log_entries(sid))
             await synthesizer.merge(store, sid, findings)
+            _record_synthesis_feed(sid, log_before)
             # A provider outage, an exhausted retry, or a verdict that
             # fails structural validation all make merge() return with
             # memory_version untouched -- "landed, quality degraded" by
@@ -127,7 +187,9 @@ def build_app(provider: ModelProvider) -> Starlette:
         if _session_or_404(sid) is None:
             return JSONResponse({"error": f"unknown session {sid}"}, status_code=404)
         version_before = store.get_context(sid).memory_version
+        log_before = len(store.log_entries(sid))
         await synthesizer.merge(store, sid, [])
+        _record_synthesis_feed(sid, log_before)
         version = store.get_context(sid).memory_version
         return JSONResponse({"memory_version": version,
                              "synthesized": version > version_before})
@@ -230,22 +292,38 @@ def build_app(provider: ModelProvider) -> Starlette:
             candidates = [c.finding for c in cands.candidates]
 
         ranked = await query_findings(
-            provider,
+            retrieval_provider,
             context=store.get_context(sid),
             candidates=candidates,
             query=body["query"],
             asking_agent_session=agent_session,
         )
         store.mark_seen(sid, agent_session)
+        if feed is not None:
+            feed.event(
+                "query",
+                f"{sid}: '{body['query'][:60]}' -> {len(candidates)} candidates, "
+                f"{len(ranked)} ranked",
+                session=sid,
+                candidates=len(candidates),
+                ranked=len(ranked),
+            )
         return JSONResponse({"findings": [f.model_dump(mode="json") for f in ranked]})
 
-    app = Starlette(routes=[
+    routes = [
         Route("/v1/sessions", create_session, methods=["POST"]),
         Route("/v1/sessions/{sid}/members", add_member, methods=["POST"]),
         Route("/v1/sessions/{sid}/findings", push_findings, methods=["POST"]),
         Route("/v1/sessions/{sid}/synthesize", synthesize, methods=["POST"]),
         Route("/v1/sessions/{sid}/watermark", watermark, methods=["GET"]),
         Route("/v1/sessions/{sid}/query", query, methods=["POST"]),
-    ])
+    ]
+    if debug:
+        routes.extend(debug_routes(store, call_log, feed))
+
+    app = Starlette(routes=routes)
     app.state.store = store          # test seam: no route reads it
+    # test seam: lets a test confirm no CallLog exists at all when debug is
+    # disabled (not merely that it's unreachable) -- no route reads this.
+    app.state.call_log = call_log
     return app

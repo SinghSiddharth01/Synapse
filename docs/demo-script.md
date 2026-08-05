@@ -187,6 +187,16 @@ process to remember to bring up mid-beat. `$SVC_PID`/`$ORCH_PID` (not `%1`/`%2`)
 background processes from here on — job numbers get confusing with two backgrounded servers, one
 of which gets killed and restarted mid-script.
 
+Right after these two boot steps, open **`http://127.0.0.1:8790/debug`** (`synapse-worker`) and
+**`http://127.0.0.1:8899/debug`** (`synapse-service`, mounted on the same port the beats below
+already curl) side by side — Beats 3–5 are *watchable*: NPU-now counts the distil seconds live
+when a worker is condensing, and the `Merged` log-tail entry on the service page appears the
+moment Beat 5's push lands, ahead of the narrator reading the JSON off the terminal. (This script's
+own pushes go straight from `.measurements/demo-push*.json` to the service by `curl`, bypassing a
+live worker entirely, so `/debug`'s NPU-now reads `idle` throughout unless a `synapse-worker run`
+is also on stage — the service side is live regardless, since every push and merge above goes
+through it either way.)
+
 **Beats 1–4** are identical to §A's, against the new `$SID`. At beat 4's `/watermark`, expected
 output now additionally carries a `topics` key with at least one label derived from the pushed
 findings (**Task 10**).

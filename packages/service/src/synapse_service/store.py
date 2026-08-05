@@ -85,6 +85,35 @@ class InMemoryStore:
         if contributor not in session.members:
             session.members.append(contributor)
 
+    def session_ids(self) -> list[str]:
+        """Every Shared Session this store knows about, creation order.
+
+        Debug-only accessor (E6): the `/debug` session selector is the one
+        caller that needs to enumerate sessions rather than look one up.
+        """
+        return list(self._sessions)
+
+    # ── debug-only reads (E6) ────────────────────────────────────────────────
+    # Two narrow additions for the /debug dashboard. Both are read accessors
+    # onto structures this module already computes -- no new state, no write
+    # path -- added here rather than reached into from synapse_service.debug
+    # because this module's own docstring calls itself "the storage seam,
+    # narrow on purpose", and a debug page reaching past that seam into
+    # `_memories[sid]` would be exactly the kind of second entrance this
+    # module exists to prevent.
+    def log_entries(self, shared_id: str):
+        """The raw append-only log, in order. CONTEXT.md: "the log IS the
+        merge/topic feed" -- the debug page's log tail reads this directly
+        rather than building a second feed alongside it."""
+        return list(self._memories[shared_id].log)
+
+    def view(self, shared_id: str) -> View:
+        """The current fold. Debug-only: every product route reads through
+        the narrower `retrievable`/`get`/`all_findings` projections above;
+        the dashboard is the one place that wants the fold's own counts
+        (visible/superseded/trivial) directly."""
+        return self._memories[shared_id].view()
+
     # ── the projection (adr/0004, Option A) ─────────────────────────────────
     @staticmethod
     def _project(view: View, finding: Finding) -> Finding:

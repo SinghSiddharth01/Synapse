@@ -35,7 +35,7 @@ Read-only, no model calls from any debug endpoint (pinned by test), localhost-on
 **Interfaces:**
 - Produces: `CallLog(maxlen=200)` with `.append(call)`, `.snapshot() -> list[dict]`; `LLMCall` dataclass `{ts_iso, component, provider_id, input_tokens, output_tokens, latency_ms, schema_valid, ok, prompt_preview, output_preview}`; `RecordingProvider(inner: ModelProvider, component: str, log: CallLog)` implementing `ModelProvider`. Tasks 2 and 4 wrap providers with exactly this.
 
-- [ ] **Step 1: Failing tests**
+- [x] **Step 1: Failing tests**
 
 ```python
 # packages/providers/tests/test_recording.py
@@ -81,9 +81,9 @@ def test_ring_buffer_bounds():
     assert [c["n"] for c in log.snapshot()] == [2, 3, 4]
 ```
 
-- [ ] **Step 2: Run** — `uv run pytest packages/providers/tests/test_recording.py -v` → FAIL (`ModuleNotFoundError`).
+- [x] **Step 2: Run** — `uv run pytest packages/providers/tests/test_recording.py -v` → FAIL (`ModuleNotFoundError`).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```python
 # packages/providers/src/synapse_providers/recording.py
@@ -164,7 +164,7 @@ class RecordingProvider(ModelProvider):
 
 Export from `__init__.py`.
 
-- [ ] **Step 4: Run** → PASS. **Step 5: Commit** — `feat(providers): RecordingProvider — tagged LLM-call instrumentation`.
+- [x] **Step 4: Run** → PASS. **Step 5: Commit** — `feat(providers): RecordingProvider — tagged LLM-call instrumentation`.
 
 ---
 
@@ -178,16 +178,16 @@ Export from `__init__.py`.
 **Interfaces:**
 - Produces: `StatsBuffer(llm: CallLog)` with `.event(tag, summary, **detail)`, `.tick(result_dict)`, `.distil_started(segment_id, events)/.distil_finished()`, `.snapshot() -> dict` (JSON-safe: `{now, current, ticks, events, llm}`). `WorkerLoop.__init__` gains optional `stats: StatsBuffer | None = None`; every hook below is a no-op when `stats is None`.
 
-- [ ] **Step 1: Failing tests** — assert: `snapshot()` is `json.dumps`-able; `distil_started` sets `current = {segment_id, started_iso, events}` and `distil_finished` clears it; `.event("triage", …)` lands in `events` with its tag and ISO ts; ring bounds hold (`maxlen=200` events, 100 ticks); **and an integration test**: run a `WorkerLoop.tick()` (arrange exactly like the nearest existing test in `test_loop.py`) with a `StatsBuffer` attached and assert the snapshot contains ≥1 `tick` event, a `render` event whose detail has `events_in`/`retained`/`kinds`, and (via a `RecordingProvider`-wrapped `FakeProvider`) ≥1 `llm` call with `component == "distiller"`.
-- [ ] **Step 2: Run** → FAIL.
-- [ ] **Step 3: Implement.** `stats.py`: dataclass-free, deques + one dict, all values already JSON-safe. Loop instrumentation points, exactly these, all guarded by `if self.stats:`:
+- [x] **Step 1: Failing tests** — assert: `snapshot()` is `json.dumps`-able; `distil_started` sets `current = {segment_id, started_iso, events}` and `distil_finished` clears it; `.event("triage", …)` lands in `events` with its tag and ISO ts; ring bounds hold (`maxlen=200` events, 100 ticks); **and an integration test**: run a `WorkerLoop.tick()` (arrange exactly like the nearest existing test in `test_loop.py`) with a `StatsBuffer` attached and assert the snapshot contains ≥1 `tick` event, a `render` event whose detail has `events_in`/`retained`/`kinds`, and (via a `RecordingProvider`-wrapped `FakeProvider`) ≥1 `llm` call with `component == "distiller"`.
+- [x] **Step 2: Run** → FAIL.
+- [x] **Step 3: Implement.** `stats.py`: dataclass-free, deques + one dict, all values already JSON-safe. Loop instrumentation points, exactly these, all guarded by `if self.stats:`:
   - end of `tick()`: `stats.tick(asdict(result))` + `stats.event("tick", result.summary())`
   - triage skip branch: `stats.event("triage", f"skip {segment.id} ({decision.reason})", segment=segment.id, reason=decision.reason)`; keep branch: same with `keep`
   - around distil: `stats.distil_started(segment.id, len(segment.events))` before, `stats.distil_finished()` in a `finally:`
   - after distil: `stats.event("render", f"{segment.id}: {retained}/{len(segment.events)} events reached the model", events_in=len(segment.events), retained=retained, kinds=list(self.distiller.kinds), input_tokens=stats_obj.input_tokens)` where `retained = sum(1 for e in segment.events if e.kind in set(self.distiller.kinds))` and `stats_obj` is the `DistillStats` the call returned
   - producer flush result: `stats.event("push", f"{sent} sent, {pending} queued", sent=sent, queued=pending)`
   - every `except` branch that appends to `result.errors`: `stats.event("error", …)`
-- [ ] **Step 4: Run full worker suite** → PASS, 526 floor intact. **Step 5: Commit** — `feat(worker): StatsBuffer — tagged tick/triage/render/llm/push/error feed`.
+- [x] **Step 4: Run full worker suite** → PASS, 526 floor intact. **Step 5: Commit** — `feat(worker): StatsBuffer — tagged tick/triage/render/llm/push/error feed`.
 
 ---
 
@@ -201,14 +201,14 @@ Export from `__init__.py`.
 **Interfaces:**
 - Produces: `DebugServer(stats: StatsBuffer, port: int)` with `.start() -> int` (returns bound port; port 0 = ephemeral for tests) and `.stop()`. Routes: `GET /debug` → HTML, `GET /debug/stats.json` → `stats.snapshot()`, anything else → 404.
 
-- [ ] **Step 1: Failing tests** — start on port 0, then over real HTTP (`urllib.request`): `/debug/stats.json` parses as JSON and matches a fresh snapshot; `/debug` returns 200 `text/html` containing `id="feed"` and `id="npu-now"`; a POST anywhere returns 405 (read-only pinned); `.stop()` frees the port.
-- [ ] **Step 2: Run** → FAIL.
-- [ ] **Step 3: Implement.** `http.server.ThreadingHTTPServer` + `BaseHTTPRequestHandler` in a daemon thread; handler holds a reference to the buffer via closure. `do_POST/PUT/DELETE` → 405. The page, complete and inline (structure fixed; visual polish is the implementer's):
+- [x] **Step 1: Failing tests** — start on port 0, then over real HTTP (`urllib.request`): `/debug/stats.json` parses as JSON and matches a fresh snapshot; `/debug` returns 200 `text/html` containing `id="feed"` and `id="npu-now"`; a POST anywhere returns 405 (read-only pinned); `.stop()` frees the port.
+- [x] **Step 2: Run** → FAIL.
+- [x] **Step 3: Implement.** `http.server.ThreadingHTTPServer` + `BaseHTTPRequestHandler` in a daemon thread; handler holds a reference to the buffer via closure. `do_POST/PUT/DELETE` → 405. The page, complete and inline (structure fixed; visual polish is the implementer's):
   - header strip: transcript path · tick count · WAL `sent/queued` · held events + turn-open age
   - `#npu-now`: current segment id + **elapsed timer ticking client-side** from `current.started_iso`; shows `idle` when `current` is null
   - `#feed`: newest-first list, each entry `[HH:MM:SS] [tag] summary`, tag rendered as a colored chip; **filter chips** for `tick/triage/render/llm/push/error` toggling visibility client-side; clicking an `llm` entry expands its previews/token/latency detail
   - JS: `setInterval(refresh, 1000)`, one `fetch('/debug/stats.json')`, no libraries; `font-variant-numeric: tabular-nums`; failed fetch shows a red "worker unreachable" banner rather than console noise
-- [ ] **Step 4: Run** → PASS; CLI coverage stays 100% (extend `test_cli.py` following its pattern for the new flag, including `--debug-port 0` meaning disabled). **Step 5: Commit** — `feat(worker): /debug dashboard — live NPU-now, tagged feed, read-only`.
+- [x] **Step 4: Run** → PASS; CLI coverage stays 100% (extend `test_cli.py` following its pattern for the new flag, including `--debug-port 0` meaning disabled). **Step 5: Commit** — `feat(worker): /debug dashboard — live NPU-now, tagged feed, read-only`.
 
 ---
 
@@ -222,18 +222,18 @@ Export from `__init__.py`.
 **Interfaces:**
 - Produces: `GET /debug` (HTML) and `GET /debug/stats.json?session=<sid>` → `{sessions: [...], session: {sid, memory_version, watermark, view: {visible, superseded, trivial}, topics: [{label, size}], log_tail: [{position, kind, summary, ts}], merges: [...], queries: [...], llm: [...]}`. `session` omitted → first session. The log tail is read from the brain's append-only log — **the log is the merge/topic feed; do not build a second one.**
 
-- [ ] **Step 1: Failing tests** — over ASGI (`httpx.ASGITransport`, no sockets, matching `test_api.py`'s style): push the seg-005 golden pair with a scripted merge (reuse `test_synthesis.py`'s `MERGE_SCRIPT` shape), then `GET /debug/stats.json` and assert: `log_tail` contains a `Merged` entry; `view.visible == 1` and `view.superseded == 2`; `llm` contains a call with `component == "synthesis"`; a query adds a `retrieval` call and a `queries` record. **Pin read-only + no model calls:** `GET /debug/stats.json` with a `FakeProvider(scripts=[])` must succeed (an exhausted fake raises on any call — success proves the endpoint never touches the provider) and must not change `memory_version`. `/debug` returns 200 HTML containing `id="log-tail"` and `id="feed"`.
-- [ ] **Step 2: Run** → FAIL.
-- [ ] **Step 3: Implement.** `debug.py` exposes `debug_routes(store, call_log, feed) -> list[Route]`; `api.build_app` creates one `CallLog` + one bounded feed deque and mounts. Page structure: session selector · counters strip (version, visible/superseded/trivial, conflicts, topics) · `#log-tail` colored by entry kind (`FindingAppended` grey · `Merged` green · `MarkedTrivial` amber · `TopicAssigned`/`TopicSplit` blue) · Working Memory collapsed `<details>` · `#feed` with `llm/query/synthesis` filter chips, same interaction pattern as the worker page. Same 1 s polling, same unreachable banner.
-- [ ] **Step 4: Run** → PASS, full suite ≥526 green. **Step 5: Commit** — `feat(service): /debug dashboard — log tail, verdicts, tagged llm/query feed`.
+- [x] **Step 1: Failing tests** — over ASGI (`httpx.ASGITransport`, no sockets, matching `test_api.py`'s style): push the seg-005 golden pair with a scripted merge (reuse `test_synthesis.py`'s `MERGE_SCRIPT` shape), then `GET /debug/stats.json` and assert: `log_tail` contains a `Merged` entry; `view.visible == 1` and `view.superseded == 2`; `llm` contains a call with `component == "synthesis"`; a query adds a `retrieval` call and a `queries` record. **Pin read-only + no model calls:** `GET /debug/stats.json` with a `FakeProvider(scripts=[])` must succeed (an exhausted fake raises on any call — success proves the endpoint never touches the provider) and must not change `memory_version`. `/debug` returns 200 HTML containing `id="log-tail"` and `id="feed"`.
+- [x] **Step 2: Run** → FAIL.
+- [x] **Step 3: Implement.** `debug.py` exposes `debug_routes(store, call_log, feed) -> list[Route]`; `api.build_app` creates one `CallLog` + one bounded feed deque and mounts. Page structure: session selector · counters strip (version, visible/superseded/trivial, conflicts, topics) · `#log-tail` colored by entry kind (`FindingAppended` grey · `Merged` green · `MarkedTrivial` amber · `TopicAssigned`/`TopicSplit` blue) · Working Memory collapsed `<details>` · `#feed` with `llm/query/synthesis` filter chips, same interaction pattern as the worker page. Same 1 s polling, same unreachable banner.
+- [x] **Step 4: Run** → PASS, full suite ≥526 green. **Step 5: Commit** — `feat(service): /debug dashboard — log tail, verdicts, tagged llm/query feed`.
 
 ---
 
 ### Task 5: demo-script wiring + docs
 
-- [ ] Add to `docs/demo-script.md` §B, right after the two boot steps: open `http://127.0.0.1:8790/debug` and `http://127.0.0.1:8899/debug` side by side — beats 3–5 are *watchable* (NPU-now counts the distil seconds; the Merged entry appears in the service log tail the moment beat 5's push lands).
-- [ ] `docs/STATE.md`: one line under what exists; `docs/plans/README.md`: E6 row.
-- [ ] Full suite; commit — `docs: dashboards wired into the demo runbook`.
+- [x] Add to `docs/demo-script.md` §B, right after the two boot steps: open `http://127.0.0.1:8790/debug` and `http://127.0.0.1:8899/debug` side by side — beats 3–5 are *watchable* (NPU-now counts the distil seconds; the Merged entry appears in the service log tail the moment beat 5's push lands).
+- [x] `docs/STATE.md`: one line under what exists; `docs/plans/README.md`: E6 row.
+- [x] Full suite; commit — `docs: dashboards wired into the demo runbook`.
 
 ---
 
