@@ -1,9 +1,12 @@
+import json
 from datetime import datetime, timezone
+from pathlib import Path
 
 from synapse_contracts import AgentEvent, Segment
 from synapse_worker.triage import TriageDecision, triage
 
 TS = datetime(2026, 8, 4, tzinfo=timezone.utc)
+FIXTURES_DIR = Path(__file__).resolve().parents[3] / "fixtures"
 
 
 def _seg(events: list[AgentEvent]) -> Segment:
@@ -30,6 +33,24 @@ def test_thinking_block_is_kept():
 def test_decision_language_is_kept():
     d = triage(_seg([_ev(content="that approach is a dead end, switching to polling instead")]))
     assert d.keep and d.reason == "decision-language"
+
+
+def test_seg_004_corpus_fixture_is_the_canonical_lint_clean_skip():
+    """seg-004 is the corpus's ONLY `"expected": "skip"` entry and this
+    module's own docstring names it directly ("match the clean shape BEFORE
+    the error words, or seg-004 style runs read as failures"). Its three
+    tool_results are an `ls` listing, the ruff clean report, and a `git diff
+    --stat` -- only one of the three is clean-report text, so a rule that
+    required ALL of them to match (rather than ANY) would never fire on this
+    fixture and every real multi-tool-call lint turn would leak through as
+    default-keep.
+    """
+    raw = json.loads((FIXTURES_DIR / "segments" / "seg-004.json").read_text())
+    segment = Segment.model_validate(raw)
+
+    d = triage(segment)
+
+    assert not d.keep and d.reason == "lint-clean"
 
 
 def test_lint_clean_run_is_skipped():

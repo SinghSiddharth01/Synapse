@@ -81,15 +81,20 @@ def triage(segment: Segment) -> TriageDecision:
         return TriageDecision(True, "error-signal")
 
     # ── skip-signatures — only reachable with zero keep-signals above ───────
-    # `all`, not `any`, over a non-empty tool_results: one clean lint result
-    # sitting next to a real Edit's tool_result (or any other non-lint output)
-    # must not veto the whole segment — the segment has to be NOTHING BUT a
-    # clean report for this to fire. The prose-length gate mirrors the
-    # readonly-run rule below so a lint-clean phrase embedded in unrelated
-    # content (a CI log that happens to contain "all checks passed") doesn't
-    # silently swallow substantial analysis sitting next to it.
+    # `any`, not `all`, over tool_results: seg-004 (the corpus's canonical
+    # lint-clean case) also has an `ls` and a `git diff --stat` tool_result
+    # alongside the clean lint report -- neither of those reads as a
+    # clean-report phrase, so requiring ALL tool_results to match means this
+    # rule can only ever fire on a segment whose tool_results are exclusively
+    # clean-report text, a shape that does not occur on real multi-tool-call
+    # turns. A clean phrase anywhere still cannot veto a real error: the
+    # error-signal keep-signal above already runs `_has_uncleared_error` over
+    # every tool_result first. The prose-length gate is what stops a
+    # lint-clean phrase embedded in unrelated content (a CI log that happens
+    # to contain "all checks passed") from silently swallowing substantial
+    # analysis sitting next to it.
     if (tool_results
-            and all(LINT_CLEAN_RE.search(e.content) for e in tool_results)
+            and any(LINT_CLEAN_RE.search(e.content) for e in tool_results)
             and len(prose) < SUBSTANTIAL_PROSE_CHARS):
         return TriageDecision(False, "lint-clean")
     tool_uses = [e for e in segment.events if e.kind == "tool_use"]
