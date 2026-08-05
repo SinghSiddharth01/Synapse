@@ -34,6 +34,7 @@ scripts/                run_npu_eval · trace_one · calibrate_prompt · dump_pr
 
 ## What remains
 
+- [x] **Demo fallback pinned 2026-08-05: `demo-fallback` = `174592c094b40193c1ffb3bff5f0b3cc838faefd`** — plain `main` (exec/e5's fork point), 387 green, before the Plan E storage seam. Rollback is `git switch demo-fallback && uv sync`. Its demo script is `docs/demo-script.md` §A. Go/no-go: 09:00 Aug 7, Siddsing.
 - [ ] **Golden co-review sign-off:** all 8 fixture goldens (`fixtures/findings`, expectation notes in `fixtures/triage.json`) are still PROVISIONAL and solo-authored — a second human must co-sign per `fixtures/README.md` and the E1 co-author gate before any recall/quality number is quoted.
 - [ ] **Live Cirrascale flip (E3 Task 6):** point `AIC100Provider` at the real hosted endpoint with `INFERENCE_CLOUD_API_KEY`, re-verify both probed gotchas (`response_format` silently ignored; `/chat/completions` eating JSON into `tool_calls`) against the live service, and watch the shared credit pool — everything here was verified against transport fakes only.
 - [ ] **Live NPU eval + power measurement:** run `scripts/run_npu_eval.py` over the full 8-fixture corpus on the real GenieX NPU (`geniex serve`) and record recall + `LEAKED IDENTIFIERS` output; the power half of the NPU rationale still has no measured number — do not claim efficiency until it does. `prefill_toks_per_sec=250.0` also remains a PROVISIONAL guess feeding the segment budget.
