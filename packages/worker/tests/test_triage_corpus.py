@@ -9,6 +9,7 @@ import json
 import pytest
 
 from synapse_distiller.fixtures import available_fixtures, fixtures_root, load_segment
+from synapse_worker.compaction import compact
 from synapse_worker.triage import triage
 
 EXPECTATIONS = json.loads((fixtures_root() / "triage.json").read_text(encoding="utf-8"))
@@ -30,3 +31,19 @@ def test_no_fixture_is_skipped_without_a_named_reason():
         decision = triage(load_segment(fixture_id))
         if not decision.keep:
             assert decision.reason in {"lint-clean", "readonly-run"}
+
+
+@pytest.mark.parametrize("fixture_id", available_fixtures())
+def test_triage_still_matches_the_expectation_map_after_compaction(fixture_id):
+    """`WorkerLoop.tick` runs compaction BEFORE triage (compaction.py's module
+    docstring) precisely so triage keeps seeing what it needs to. This is
+    that ordering, pinned at the expectation-map level rather than only unit
+    by unit: every fixture's keep/skip verdict must survive compact() first,
+    or compaction silently broke the signal triage keys on."""
+    decision = triage(compact(load_segment(fixture_id)))
+    expected_keep = EXPECTATIONS[fixture_id]["expected"] == "keep"
+    assert decision.keep == expected_keep, (
+        f"{fixture_id}: triage(compact(segment)) said "
+        f"{'keep' if decision.keep else 'skip'} ({decision.reason}), map says "
+        f"{EXPECTATIONS[fixture_id]['expected']} — compaction changed the verdict"
+    )

@@ -45,6 +45,7 @@ _PAGE = """<!doctype html>
     --amber: #d6b45c;
     --red: #e38c80;
     --tag-tick: #7a7067;
+    --tag-compaction: #a68bc4;
     --tag-triage: #d6b45c;
     --tag-render: #93a8c4;
     --tag-llm: #e19256;
@@ -168,6 +169,7 @@ _PAGE = """<!doctype html>
     vertical-align: 0;
   }
   .chip[data-tag="tick"]   { --c: var(--tag-tick); }
+  .chip[data-tag="compaction"] { --c: var(--tag-compaction); }
   .chip[data-tag="triage"] { --c: var(--tag-triage); }
   .chip[data-tag="render"] { --c: var(--tag-render); }
   .chip[data-tag="llm"]    { --c: var(--tag-llm); }
@@ -193,6 +195,7 @@ _PAGE = """<!doctype html>
   }
   .entry:last-child { border-bottom: none; }
   .entry[data-tag="tick"]   { --c: transparent; }
+  .entry[data-tag="compaction"] { --c: var(--tag-compaction); }
   .entry[data-tag="triage"] { --c: var(--tag-triage); }
   .entry[data-tag="render"] { --c: var(--tag-render); }
   .entry[data-tag="llm"]    { --c: var(--tag-llm); }
@@ -255,6 +258,7 @@ _PAGE = """<!doctype html>
 
   <div class="chips" id="chips">
     <span class="chip" data-tag="tick" data-active="true" tabindex="0">tick</span>
+    <span class="chip" data-tag="compaction" data-active="true" tabindex="0">compaction</span>
     <span class="chip" data-tag="triage" data-active="true" tabindex="0">triage</span>
     <span class="chip" data-tag="render" data-active="true" tabindex="0">render</span>
     <span class="chip" data-tag="llm" data-active="true" tabindex="0">llm</span>
@@ -269,7 +273,7 @@ _PAGE = """<!doctype html>
 (function () {
   "use strict";
 
-  var activeTags = new Set(["tick", "triage", "render", "llm", "push", "error"]);
+  var activeTags = new Set(["tick", "compaction", "triage", "render", "llm", "push", "error"]);
   var heldSince = null; // client-side clock: when pending_events last became > 0
   // Keys of currently-expanded llm entries, surviving the 1s poll's full
   // innerHTML rebuild -- without this, clicking an entry open only lasts

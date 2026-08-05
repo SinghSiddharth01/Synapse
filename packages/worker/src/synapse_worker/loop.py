@@ -31,10 +31,11 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from synapse_contracts import AgentEvent, LocalBinding
+from synapse_contracts import AgentEvent, LocalBinding, Segment
 from synapse_distiller import Distiller
 from synapse_distiller.guards import PromptDropError
 
+from synapse_worker.compaction import compact
 from synapse_worker.follower import TranscriptFollower
 from synapse_worker.producer import Producer
 from synapse_worker.segmenter import Segmenter
@@ -160,6 +161,29 @@ class WorkerLoop:
         self.follower.start_at_end(self.transcript)
         self.follower.save()
 
+    def _compact(self, segment: Segment) -> Segment:
+        """Compaction (Plan A.5) — BEFORE triage, always, in both `tick()`
+        and `shutdown()`. See compaction.py's module docstring for why the
+        order matters: triage keys on kinds/content this must not erase.
+        Unconditional (no `_enabled` toggle like triage) — it is
+        deterministic and cheap, and there is no false-negative risk
+        symmetrical to triage's skip to gate it behind one."""
+        original_events = len(segment.events)
+        original_chars = sum(len(e.content) for e in segment.events)
+        compacted = compact(segment)
+        if self.stats:
+            kept = len(compacted.events)
+            saved = original_chars - sum(len(e.content) for e in compacted.events)
+            self.stats.event(
+                "compaction",
+                f"{segment.id}: {kept}/{original_events} events kept · {saved} chars saved",
+                segment=segment.id,
+                events_kept=kept,
+                events_total=original_events,
+                chars_saved=saved,
+            )
+        return compacted
+
     async def tick(self) -> TickResult:
         result = TickResult()
 
@@ -199,6 +223,7 @@ class WorkerLoop:
         result.segments = len(segments)
 
         for segment in segments:
+            segment = self._compact(segment)
             if self.triage_enabled:
                 decision = triage(segment)
                 if not decision.keep:
@@ -304,6 +329,7 @@ class WorkerLoop:
         segments = self.segmenter.drain(flush_incomplete=True)
         result.segments = len(segments)
         for segment in segments:
+            segment = self._compact(segment)
             if self.triage_enabled:
                 decision = triage(segment)
                 if not decision.keep:

@@ -83,14 +83,23 @@ def test_seg003_buried_error_reaches_the_model_only_via_prose_under_shipped_conf
     """The test above pins that seg-003's tool_result *file* is oversized with
     a buried error, but asserted nothing about system behaviour on it. Under
     the shipped config (config/synapse.toml: distil_kinds = ("text",)),
-    tool_result events never reach the model at all — so the buried
-    ConnectionResetError line is not truncated or split by a budget, it is
-    simply absent, and the dead_end golden is only reachable because the
-    assistant's own prose (event 5) restates the failure in words. That means
-    seg-003 exercises the same code path as seg-002 today; no compaction or
-    budget-splitting behaviour is pinned by this fixture until distil_kinds
-    is widened and/or A.5 (compaction) lands. This test pins the current,
-    honest state so that claim cannot silently go stale in either direction.
+    tool_result events never reach the model at all under the SHIPPED
+    distil_kinds — so the buried ConnectionResetError line, here, is simply
+    absent from what render_segment produces, and the dead_end golden is only
+    reachable because the assistant's own prose (event 5) restates the
+    failure in words. That means seg-003 exercises the same render_segment
+    code path as seg-002 today, unaffected by A.5 landing (E7 Chain B2,
+    packages/worker/src/synapse_worker/compaction.py) — compaction runs on
+    the Segment upstream of triage/distillation, but distil_kinds = ("text",)
+    still filters tool_result out at RENDER time regardless of whether its
+    content was compacted first. distil_kinds stays ("text",) deliberately
+    (widening it is a measured decision for the NPU eval, not a side effect
+    of compaction landing) — see compaction.py's own module docstring and
+    test_compaction.py's test_seg003_oversized_tool_result_compacts_within_
+    budget_and_the_buried_error_survives for what IS now pinned: that
+    compact() itself keeps the buried error line and respects budget. This
+    test pins the current, honest state of render_segment under shipped
+    config so that claim cannot silently go stale in either direction.
 
     Uses the module-level _SHIPPED_* constants rather than load_config():
     load_config() deliberately layers SYNAPSE_* environment variables over
@@ -114,14 +123,17 @@ def test_seg003_buried_error_reaches_the_model_only_via_prose_under_shipped_conf
         "the dead_end must still be recoverable via the assistant's own "
         "prose even though the raw tool_result is excluded by default"
     )
-    # Even widening to every kind, this fixture does not reach the derived
-    # budget, so no truncation/compaction path exists for it to pin yet.
+    # Even widening to every kind and rendering it UNCOMPACTED, this fixture
+    # does not reach the derived budget -- compaction (A.5) exists now (see
+    # above), but this assertion is deliberately about render_segment alone,
+    # with no compact() call in front of it, so it stays a true statement
+    # about the raw fixture regardless of what compaction later does to it.
     full = render_segment(segment, kinds=None, style=_SHIPPED_RENDER_STYLE)
     estimated_tokens = len(full) / 3.5
     assert estimated_tokens < _shipped_segment_budget(), (
         "seg-003 now exceeds the derived budget even including every event "
-        "kind; if that's intentional, wire compaction (A.5) rather than "
-        "relying on distil_kinds filtering to avoid truncation, and flip "
+        "kind, uncompacted; if that's intentional, widening distil_kinds now "
+        "needs compact() in front of render_segment to stay under budget — "
         "this assertion to pin the new boundary deliberately"
     )
 

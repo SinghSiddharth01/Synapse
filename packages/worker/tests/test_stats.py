@@ -180,3 +180,61 @@ async def test_render_event_retained_count_excludes_kinds_the_distiller_drops(tm
     assert detail["events_in"] == 4
     assert detail["retained"] == 2
     assert detail["retained"] < detail["events_in"]
+
+
+async def test_compaction_runs_before_triage_and_the_render_event_sees_its_output(
+    tmp_path,
+) -> None:
+    """Compaction runs BEFORE triage in WorkerLoop.tick (compaction.py's
+    module docstring) — this pins the ordering by observation, not just by
+    reading the source: a trivial read-only tool call (Read, tiny clean
+    result) must be gone by the time triage AND the distiller see the
+    segment, so the render event's events_in reflects the COMPACTED count,
+    not the four raw events the transcript actually contains. A "compaction"
+    feed event, the render tag's sibling, reports the same n/m plus chars
+    saved."""
+    transcript = tmp_path / "t.jsonl"
+    transcript.touch()
+    producer = Producer(tmp_path / "wal", FileSink(tmp_path / "upstream.jsonl"))
+    call_log = CallLog()
+    stats = StatsBuffer(call_log)
+    provider = RecordingProvider(
+        FakeProvider(scripts=[condensed("debug mode is on")]), "distiller", call_log
+    )
+    loop = WorkerLoop(
+        transcript=transcript,
+        distiller=Distiller(provider, BINDING, PACK, ["text"], "labelled"),
+        producer=producer,
+        binding=BINDING,
+        state_dir=tmp_path / "state",
+        budget_tokens=5000,
+        stats=stats,
+    )
+    transcript.write_text(
+        user("what's in config.py")
+        + assistant_tool_use("Read", "config.py")
+        + tool_result("Read", "DEBUG = True")
+        + assistant("Debug mode is on.")
+        + user("thanks, next question"),  # closes the turn above
+        encoding="utf-8",
+    )
+
+    await loop.tick()
+
+    snapshot = stats.snapshot()
+
+    compaction_events = [e for e in snapshot["events"] if e["tag"] == "compaction"]
+    assert len(compaction_events) == 1
+    detail = compaction_events[0]["detail"]
+    assert detail["events_total"] == 4
+    assert detail["events_kept"] == 2          # Read + its tiny clean result dropped
+    assert detail["chars_saved"] > 0
+    assert "2/4" in compaction_events[0]["summary"]
+    assert "kept" in compaction_events[0]["summary"]
+    assert "chars saved" in compaction_events[0]["summary"]
+
+    render_events = [e for e in snapshot["events"] if e["tag"] == "render"]
+    assert len(render_events) >= 1
+    # events_in must reflect the COMPACTED segment (2), not the raw
+    # transcript's 4 events -- the whole point of running compaction first.
+    assert render_events[0]["detail"]["events_in"] == 2
