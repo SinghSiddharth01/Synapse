@@ -30,8 +30,14 @@ import logging
 import sys
 from pathlib import Path
 
-from synapse_contracts import LocalBinding
-from synapse_distiller import Distiller, check_canary, load_config, load_pack_by_name
+from synapse_contracts import LocalBinding, Segment, read_binding
+from synapse_distiller import (
+    Distiller,
+    PromptDropError,
+    check_canary,
+    load_config,
+    load_pack_by_name,
+)
 from synapse_providers import NPUProvider
 
 from synapse_worker.discovery import (
@@ -43,6 +49,8 @@ from synapse_worker.discovery import (
 from synapse_worker.loop import WorkerLoop
 from synapse_worker.producer import FileSink, HttpSink, Producer
 from synapse_worker.triage_log import TriageLog
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_AGENT = "claude-code"  # the only Source adapter that exists (Plan A.3)
 
@@ -249,27 +257,95 @@ async def cmd_replay(args: argparse.Namespace) -> int:
         if not skipped:
             print("No triage-skipped segments to replay.")
             return 0
-        # One binding for the whole batch, same shape as `_build`'s but with no
-        # transcript to resolve one from — the original per-segment
-        # agent_session_id is not preserved here, only the segment content.
-        binding = LocalBinding(
-            agent_session_id="replay",
-            shared_id=args.shared_id,
-            contributor=args.contributor,
-            agent=DEFAULT_AGENT,
-        )
-        distiller = build_distiller(config, binding)
-        replayed = 0
+
+        # A joined binding carries its own contributor/shared_id/agent — the
+        # same preference `_build` applies for `run`. --contributor and
+        # --shared-id are the un-joined fallback, not something that should
+        # silently override a `synapse-worker join` a user already ran.
+        joined = read_binding(binding_path_for_agent(state_dir, DEFAULT_AGENT))
+        if joined is not None:
+            contributor, shared_id, agent = joined.contributor, joined.shared_id, joined.agent
+        else:
+            contributor, shared_id, agent = args.contributor, args.shared_id, DEFAULT_AGENT
+
+        # Group by the segment's OWN agent_session_id — it round-trips through
+        # the skip log exactly (TriageLog serializes the whole Segment), so
+        # replay must not overwrite it with a sentinel: Attribution.agent_session
+        # is what awareness suppression keys on, and a finding stamped with a
+        # value that matches no real Agent Session can never be suppressed for
+        # the agent that produced it. One Distiller per group, since Attribution
+        # is stamped from the binding at construction time.
+        groups: dict[str, list[tuple[Segment, str]]] = {}
         for segment, reason in skipped:
-            findings, stats = await distiller.distil(segment)
-            if not stats.skipped_empty and findings:
-                producer.record(findings)
-                replayed += len(findings)
+            groups.setdefault(segment.agent_session_id, []).append((segment, reason))
+
+        distillers = {
+            agent_session_id: build_distiller(
+                config,
+                LocalBinding(
+                    agent_session_id=agent_session_id,
+                    shared_id=shared_id,
+                    contributor=contributor,
+                    agent=agent,
+                ),
+            )
+            for agent_session_id in groups
+        }
+
+        # The prompt-drop guard, once, before any segment is distilled — the
+        # same refusal `cmd_run` applies and for the same reason: a model that
+        # has stopped reading its prompt would otherwise write invented
+        # findings straight into the write-ahead log. Every group shares one
+        # NPU endpoint, so one check covers the whole batch.
+        canary = await check_canary(next(iter(distillers.values())).provider)
+        if not canary:
+            print(f"CANARY FAILED: {canary.detail}", file=sys.stderr)
+            print("Refusing to distil — findings from this model would be invented.",
+                  file=sys.stderr)
+            return 1
+
+        replayed = 0
+        failed: list[tuple[Segment, str]] = []
+        for agent_session_id, group in groups.items():
+            distiller = distillers[agent_session_id]
+            for segment, reason in group:
+                try:
+                    findings, stats = await distiller.distil(segment)
+                except PromptDropError as exc:
+                    logger.error(
+                        "Prompt-drop guard tripped replaying %s: %s", segment.id, exc
+                    )
+                    failed.append((segment, reason))
+                    continue
+                except Exception:  # noqa: BLE001 - one bad segment must not sink the batch
+                    logger.exception("Replay distillation failed for %s", segment.id)
+                    failed.append((segment, reason))
+                    continue
+                if not stats.skipped_empty and findings:
+                    # Write-ahead, same as tick(): on disk before any send.
+                    producer.record(findings)
+                    replayed += len(findings)
+
         sent, pending = await producer.flush()
         archived = log.archive()
-        print(f"Replayed {len(skipped)} skipped segments -> {replayed} findings "
-              f"({sent} sent, {pending} queued). Log archived to {archived.name}.")
-        return 0
+        if failed:
+            # Idempotent retry: only what failed goes back to the (now fresh,
+            # post-archive) skip log, so re-running `replay --skipped` does not
+            # re-distil — and re-count — segments that already succeeded.
+            for segment, reason in failed:
+                log.record_skip(segment, reason)
+
+        succeeded = len(skipped) - len(failed)
+        message = (
+            f"Replayed {succeeded} skipped segments -> {replayed} findings "
+            f"({sent} sent, {pending} queued)."
+        )
+        if failed:
+            message += f" {len(failed)} segment(s) failed and were re-queued."
+        if archived is not None:
+            message += f" Log archived to {archived.name}."
+        print(message)
+        return 0 if not failed else 1
 
     sent, still_pending = await producer.flush()
     print(f"sent {sent}, still pending {still_pending}")
