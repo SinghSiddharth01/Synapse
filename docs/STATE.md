@@ -57,7 +57,7 @@ Everything is configurable from `config/synapse.toml` or the environment: model,
 
 ## Open, unchanged
 
-**Q3 — who builds the orchestrator.** Still open as a staffing decision, though it now has a real (if minimal) starting point: a tested MCP transport shell over `streamable-http`, verified live, with zero tools registered. Plan D.1's producer endpoint, D.3's `query`/`contribute`, and D.4's service client are all still unbuilt — `FileSink` still stands in for the whole egress path. `HttpSink` exists but has never talked to a real endpoint.
+**Q3 — who builds the orchestrator.** Still open as a staffing decision, though the code has moved past the transport shell: Plan D.1's producer endpoint, D.3's `query`/`contribute` plus the watermark-driven briefing, and D.4's write-ahead `Relay` are all implemented on branch `exec/e4`, pending merge to `main` — verifier verdict **clean**. See the status banner on `docs/plans/2026-08-03-plan-d-orchestrator.md`. Until the merge lands, `main` still has the transport shell only: `FileSink` still stands in for the whole egress path, and `HttpSink` has never talked to a real endpoint from `main`.
 
 ## Traps worth re-reading
 
@@ -72,6 +72,7 @@ Three from 2026-08-03 still stand. Six more earned today:
 
 ## Not done
 
-- No Codex adapter, no compaction, no producer endpoint, no `query`/`contribute`.
+- No Codex adapter, no compaction.
 - **Synthesis, retrieval, and the ingest API are implemented on branch `exec/e3`, pending merge to `main`.** A fix-and-verify round is complete — verifier verdict **clean**, with three residual **major** findings: the API-level half of the `CANDIDATE_WINDOW` starvation fix is untested at the route (a mutant reverting it survives the full suite); the Task 5 plan amendment is self-contradictory and omits two shipped deviations (`_satisfies_schema` gating, the repair-prompt retry); and Finding #11's resync story is half-built — a failed push reports `synthesized: false` but nothing can re-run synthesis without a later push. See the status banner on `docs/plans/2026-08-03-plan-c-service.md`. Until the merge lands, `main` still has none of it.
+- **The producer endpoint, `Relay`, and `query`/`contribute` are implemented on branch `exec/e4`, pending merge to `main`.** A fix-and-verify round is complete — verifier verdict **clean**, no residual findings, nothing refuted. Three plan amendments recorded post-review, round 3: `Relay.record()` gained a `shared_id` override backing per-agent routing, with an explicit note that a Finding queued in the *worker's own* write-ahead log across a same-product re-join is still not covered — that needs a Task 5 (worker) change; `build_app` gained `resolve_binding_for_agent`, routing each Finding in a POST to its own Agent's Shared Session and closing a cross-Shared-Session leak; `register_tools` now re-resolves the binding on every `query`/`contribute` call instead of once at boot, and registers unconditionally so an unbound orchestrator still serves the tools. See the status banner on `docs/plans/2026-08-03-plan-d-orchestrator.md`. Until the merge lands, `main` still has the transport shell only.
 - The A/B demo measurement (Plan B.8) has not started.
