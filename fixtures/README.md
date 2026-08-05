@@ -34,3 +34,19 @@ eval never compares those: `Finding.id` is a UUID stamped at distil time and
 `ts` is wall-clock. Comparison is on `type` and on the *meaning* of `text`.
 Verbatim-copy rate is measured against the source Segment, not against the
 golden — it is a privacy metric, not a quality one.
+
+## Rule: eval targets are never edited to satisfy the metric
+
+A golden is the target a run is measured against. If a golden trips a guard
+(the identifier-leak detector, the six-gram contamination check, anything
+else), the fix is to reword the golden to abstract rather than quote — or,
+if the flagged token is genuinely public engineering vocabulary rather than
+a private identifier, to add it to `evaluation.DEFAULT_ALLOWLIST` with a
+comment explaining why. What must never happen is quietly rewording a golden
+*away from* the plan's specified text so the metric reads clean while the
+target itself drifts undocumented — that inverts the point of having a
+frozen target at all. (Post-review amendment, 2026-08-04: an earlier pass on
+this branch reworded seg-002's `f-002-01` and seg-003's `f-003-01` to dodge
+the identifier-leak detector's `refresh-on-401` / `mid-stream` matches
+instead of allowlisting them. Both goldens are restored to the plan's
+original text; both tokens are now reviewed, allowlisted public vocabulary.)
