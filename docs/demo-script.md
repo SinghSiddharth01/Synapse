@@ -196,10 +196,21 @@ findings (**Task 10**).
 ```bash
 curl -s -X POST localhost:8899/v1/sessions/$SID/findings \
      -H 'content-type: application/json' -d @.measurements/demo-push3.json | python3 -m json.tool
+curl -s "localhost:8899/v1/sessions/$SID/watermark?agent_session=as-observer" | python3 -m json.tool
 ```
-Expected: `HTTP 200`, `accepted` `2` (running total 26), and `synthesized: true` — `seg-005b`
-merged into `seg-005a`'s lineage despite being 24 findings apart (**Task 8**: the symbol/lexical
-lanes, not recency, surface the pair).
+Expected: `HTTP 200`, `accepted` `2` (running total 26), and `synthesized: true`.
+
+`synthesized: true` on its own is **not** the evidence the merge happened — `api.py` computes it
+as `memory_version > version_before`, and `synthesis.merge` bumps `memory_version` unconditionally
+on every structurally-valid verdict, merges or not (`adr/0004`'s Amendment, 2026-08-05: it counts
+**verdict rounds applied**, not merges — see the Amendment for the corrected gloss). A verdict with
+`"merges": []` renders the exact same `synthesized: true` as the flagship merge. The `/watermark`
+call above is the actual observation: sum its `by_type` counts and compare against §A's — **25**
+here (26 pushed findings minus 2 merge sources plus 1 synthesized result), against **26** in §A,
+where `seg-005a`/`seg-005b` never merge. If the sum reads 26 here too, the merge did not happen —
+say so, do not claim it off `synthesized: true` alone. `seg-005b` merged into `seg-005a`'s lineage
+despite being 24 findings apart (**Task 8**: the symbol/lexical lanes, not recency, surface the
+pair).
 
 **Beat 6 — re-query, compare candidate count.**
 
