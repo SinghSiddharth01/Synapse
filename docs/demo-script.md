@@ -28,10 +28,10 @@ Build the payloads (idempotent — re-run any time; `.measurements/` is gitignor
 
 ```bash
 export PATH="/opt/homebrew/bin:$PATH"
-cd /Users/siddharthsingh/Dev/synapse-exec/e5
+cd /Users/siddharthsingh/Dev/synapse
 python3 - <<'PY'
 import json, pathlib
-ROOT = pathlib.Path("/Users/siddharthsingh/Dev/synapse-exec/e5")
+ROOT = pathlib.Path("/Users/siddharthsingh/Dev/synapse")
 FIX  = ROOT / "fixtures" / "findings"
 OUT  = ROOT / ".measurements"; OUT.mkdir(exist_ok=True)
 
@@ -88,7 +88,7 @@ it does show: one shared memory, two agents, semantic retrieval over the whole l
 
 ```bash
 export PATH="/opt/homebrew/bin:$PATH"
-cd /Users/siddharthsingh/Dev/synapse-exec/e5
+cd /Users/siddharthsingh/Dev/synapse
 git switch demo-fallback && uv sync
 uv run synapse-service &
 sleep 2
@@ -172,8 +172,8 @@ Identical beats, plus the three the integration buys, each named against the tas
 
 ```bash
 export PATH="/opt/homebrew/bin:$PATH"
-cd /Users/siddharthsingh/Dev/synapse-exec/e5
-git switch feat/brain-integration && uv sync
+cd /Users/siddharthsingh/Dev/synapse
+uv sync   # §B runs on main — the brain merged 2026-08-05
 uv run synapse-service &
 SVC_PID=$!
 uv run synapse-orchestrator --port 8787 --service-url http://127.0.0.1:8899 --state-dir .synapse &

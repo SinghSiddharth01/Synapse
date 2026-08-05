@@ -192,3 +192,18 @@ async def test_the_retry_is_not_a_byte_identical_resend():
     assert len(bodies) == 2
     assert bodies[0] != bodies[1]
     assert result.schema_valid is False and result.data is None
+
+async def test_schema_prompt_shows_an_example_instance_never_the_schema():
+    """Probed live: an 8B shown the schema parrots the schema. The prompt must
+    carry a concrete example instance instead."""
+    seen = {}
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={
+            "choices": [{"text": '{"ok": true}'}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 3}})
+    await _provider(handler).complete([{"role": "user", "content": "u"}],
+                                      response_schema=SCHEMA)
+    prompt = seen["body"]["prompt"]
+    assert '"properties"' not in prompt and '"required"' not in prompt
+    assert '"ok": true' in prompt  # the example instance, filled in

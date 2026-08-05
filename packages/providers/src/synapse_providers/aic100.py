@@ -111,6 +111,26 @@ def _satisfies_schema(data: Any, schema: dict[str, Any]) -> bool:
     return True
 
 
+def _example_from_schema(schema: dict[str, Any]) -> Any:
+    """A minimal concrete instance of `schema` — what the prompt shows the model.
+
+    An 8B shown a JSON *schema* copies the schema (probed live 2026-08-05: the
+    synthesis call returned the schema literal with values mashed in, failing
+    verdict validation every round). Shown an *example instance*, it fills one
+    in. So the prompt never contains the schema itself.
+    """
+    stype = schema.get("type")
+    if stype == "object":
+        return {k: _example_from_schema(v) for k, v in schema.get("properties", {}).items()}
+    if stype == "array":
+        return [_example_from_schema(schema.get("items", {"type": "string"}))]
+    if stype == "boolean":
+        return True
+    if stype in ("integer", "number"):
+        return 0
+    return "..."
+
+
 class AIC100Provider(ModelProvider):
     provider_id = "aic100"
 
@@ -149,8 +169,9 @@ class AIC100Provider(ModelProvider):
                                     payload, started, schema_valid=True)
 
             base_prompt = "\n\n".join(f"{m['role'].upper()}:\n{m['content']}" for m in messages)
-            base_prompt += ("\n\nReturn ONLY a JSON object of this shape:\n"
-                            + json.dumps(response_schema) + "\nJSON:")
+            base_prompt += ("\n\nReturn ONLY a JSON object shaped exactly like this example, "
+                            "with your real values in place of the example values:\n"
+                            + json.dumps(_example_from_schema(response_schema)) + "\nJSON:")
             prompt = base_prompt
             payload: dict[str, Any] = {}
             for attempt in range(2):                        # one retry, exactly
