@@ -1,10 +1,10 @@
-"""The Orchestrator's MCP surface — currently just the transport shell.
+"""The Orchestrator's MCP surface — Plan D Task D.3, implemented.
 
-Plan D Task D.3 specifies two tools: `query(nl)` and `contribute(text)`, plus
-an arrival briefing riding the `instructions` field of the initialize
-response. Neither tool is implemented here yet — `query` needs the Synapse
-Service's retrieval endpoint and `contribute` needs the producer endpoint
-(Plan D.1) both of which require Plan C, and none of that exists yet.
+Two tools, registered via `register_tools`: `query(nl)` (retrieval through the
+Synapse Service, suppression-aware) and `contribute(text)` (round-trips through
+the same local distiller as the passive path, provenance CONTRIBUTED). The
+arrival briefing rides the `instructions` field of the initialize response,
+composed per connection by `briefing.build_briefing` — fail-open, hard-capped.
 
 WHAT USED TO BE HERE. An earlier version of this file exposed a `start` MCP
 prompt that let a user type something like `/mcp__synapse__start <id>` inside

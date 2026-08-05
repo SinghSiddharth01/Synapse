@@ -93,8 +93,8 @@ def _satisfies_schema(data: Any, schema: dict[str, Any]) -> bool:
     proves nothing was enforced).
 
     Deliberately requires only ONE of the schema's declared `required` keys
-    to be present, not all of them. synapse_service.synthesis reads every
-    key of SYNTH_SCHEMA with verdicts.get(key, default) specifically so an
+    to be present, not all of them. synapse_service.synthesis validates the
+    verdict via its _SynthesisVerdicts model with every field defaulted, so an
     8B dropping one key (e.g. omitting "conflicts" on a round with nothing
     to report) doesn't cost the rest of an otherwise-usable verdict; an
     all-required gate here would silently discard that whole round before

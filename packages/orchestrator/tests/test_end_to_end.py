@@ -1,7 +1,11 @@
 """worker sink -> orchestrator -> relay -> REAL service -> teammate's query.
 
-Every hop is the production code path; only the HTTP transports are swapped
-for in-process ASGI. This is the walking skeleton, grown up (Plan 0 Task 0.6)."""
+Every hop is real product code with only the HTTP transports swapped for
+in-process ASGI — with one named exception: build_orchestrator_app is wired
+without resolve_binding_for_agent here, so the producer endpoint takes its
+legacy no-resolver branch; the per-agent routing branch cli.main uses in
+production is covered separately in test_producer_endpoint.py/test_cli.py.
+This is the walking skeleton, grown up (Plan 0 Task 0.6)."""
 from datetime import datetime, timezone
 
 import httpx
