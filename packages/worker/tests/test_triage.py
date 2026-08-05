@@ -83,6 +83,40 @@ def test_readonly_run_with_short_prose_is_skipped():
     assert not d.keep and d.reason == "readonly-run"
 
 
+def test_decision_language_in_user_text_is_kept_even_during_a_readonly_run():
+    # Recall inversion: DECISION_RE was only ever searched over assistant
+    # prose, but the human stating the decision -- then having the assistant
+    # go read the one call site to confirm it -- is a completely ordinary
+    # shape, and the skip-signatures below apply to the WHOLE segment
+    # (including the user's text) even though the keep-signals above did not.
+    events = [
+        _ev(role="user", kind="text",
+            content="We're dropping Redis and switching to in-process "
+                    "memoization instead — the cache never survived a deploy."),
+        _ev(kind="tool_use", tool_name="Read", content="cache.py"),
+        _ev(role="user", kind="tool_result", tool_name="Read", content="…file contents…"),
+        _ev(content="Right, that is the only call site."),
+    ]
+    d = triage(_seg(events))
+    assert d.keep and d.reason == "decision-language"
+
+
+def test_error_reported_in_user_text_is_kept_even_during_a_readonly_run():
+    # Recall inversion: the error keep-signal only ever looked at
+    # tool_results, so a human reporting a failure in their own words (rather
+    # than pasting a traceback) while the assistant reads code to investigate
+    # it was reachable by the readonly-run skip-signature.
+    events = [
+        _ev(role="user", kind="text",
+            content="prod is throwing a Traceback on every login since the token change"),
+        _ev(kind="tool_use", tool_name="Read", content="auth.py"),
+        _ev(role="user", kind="tool_result", tool_name="Read", content="…file contents…"),
+        _ev(content="I see it."),
+    ]
+    d = triage(_seg(events))
+    assert d.keep and d.reason == "error-signal"
+
+
 def test_plain_conversation_defaults_to_keep():
     # seg-002's shape: no error, no tool, no decision keyword. Recall says keep.
     d = triage(_seg([_ev(role="user", kind="text", content="should we cache tokens?"),

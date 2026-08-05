@@ -64,21 +64,33 @@ def _has_uncleared_error(content: str) -> bool:
 def triage(segment: Segment) -> TriageDecision:
     prose = " ".join(e.content for e in segment.events
                      if e.kind == "text" and e.role == "assistant")
+    # Every line of dialogue, either role. Decision language and error reports
+    # are just as durable when the HUMAN states them -- a user typing "we're
+    # switching to X instead" or "prod is throwing a Traceback" is, in
+    # practice, one of the two most common ways this knowledge enters a
+    # transcript at all, and the skip-signatures below are evaluated over the
+    # WHOLE segment. A keep-signal that only looked at assistant prose /
+    # tool_results would be narrower than the skip rules it exists to
+    # outrank, letting a human-stated decision or a human-reported error slip
+    # through as readonly-run or lint-clean.
+    all_text = " ".join(e.content for e in segment.events if e.kind == "text")
 
     # ── keep-signals, in order of confidence ────────────────────────────────
     if any(e.kind == "thinking" for e in segment.events):
         return TriageDecision(True, "thinking-present")
     if any(e.role == "system" and e.kind == "text" for e in segment.events):
         return TriageDecision(True, "system-note")  # compaction summaries etc.
-    if DECISION_RE.search(prose) or any(
+    if DECISION_RE.search(all_text) or any(
         e.kind == "thinking" and DECISION_RE.search(e.content) for e in segment.events
     ):
         return TriageDecision(True, "decision-language")
 
-    tool_results = [e for e in segment.events if e.kind == "tool_result"]
-    real_errors = [e for e in tool_results if _has_uncleared_error(e.content)]
+    error_sources = [e for e in segment.events if e.kind in ("tool_result", "text")]
+    real_errors = [e for e in error_sources if _has_uncleared_error(e.content)]
     if real_errors:
         return TriageDecision(True, "error-signal")
+
+    tool_results = [e for e in segment.events if e.kind == "tool_result"]
 
     # ── skip-signatures — only reachable with zero keep-signals above ───────
     # `any`, not `all`, over tool_results: seg-004 (the corpus's canonical
