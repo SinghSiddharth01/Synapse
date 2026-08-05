@@ -6,13 +6,17 @@ from __future__ import annotations
 
 import json
 
-from synapse_contracts import LocalBinding
+from datetime import datetime, timezone
+
+from synapse_contracts import AgentEvent, LocalBinding, Segment
 from synapse_distiller import Distiller, load_pack_by_name
 from synapse_providers import CallLog, FakeProvider, RecordingProvider
 
+from synapse_worker.compaction import compact
 from synapse_worker.loop import WorkerLoop
 from synapse_worker.producer import FileSink, Producer
 from synapse_worker.stats import StatsBuffer
+from synapse_worker.triage import triage
 
 PACK = load_pack_by_name("v4-condense")
 BINDING = LocalBinding(
@@ -182,24 +186,92 @@ async def test_render_event_retained_count_excludes_kinds_the_distiller_drops(tm
     assert detail["retained"] < detail["events_in"]
 
 
+def _build_log_content() -> str:
+    """40 benign lines with one genuinely lint-clean report buried at index
+    20 -- inside `_truncate_tool_result_lines`'s dropped middle window
+    (`HEAD_TAIL_LINES = 15`, so line 20 of 40 falls in `lines[15:25]`, not
+    the kept head or tail) and NOT matching compaction's own broad
+    "might be an error" survivor regex, so compaction's truncation removes
+    it. See `test_compaction_runs_before_triage_and_the_render_event_sees_its_output`
+    for why that removal is exactly what makes this scenario order-sensitive."""
+    lines = []
+    for i in range(40):
+        if i == 20:
+            lines.append("eslint: 15 problems (15 fixed, 0 remaining)")
+        else:
+            lines.append(f"checking module {i}... ok, nothing notable here")
+    return "\n".join(lines)
+
+
+def _ev(role="assistant", kind="text", content="", tool_name=None) -> AgentEvent:
+    return AgentEvent(
+        role=role, kind=kind, content=content, tool_name=tool_name,
+        ts=datetime(2026, 8, 4, tzinfo=timezone.utc), agent_session_id="sess-1",
+    )
+
+
 async def test_compaction_runs_before_triage_and_the_render_event_sees_its_output(
     tmp_path,
 ) -> None:
     """Compaction runs BEFORE triage in WorkerLoop.tick (compaction.py's
     module docstring) — this pins the ordering by observation, not just by
-    reading the source: a trivial read-only tool call (Read, tiny clean
-    result) must be gone by the time triage AND the distiller see the
-    segment, so the render event's events_in reflects the COMPACTED count,
-    not the four raw events the transcript actually contains. A "compaction"
-    feed event, the render tag's sibling, reports the same n/m plus chars
-    saved."""
+    reading the source.
+
+    Fixer amendment: the original scenario here was a trivial read-only
+    Read call, which the FIRST version of compaction dropped outright
+    (tool_use + tool_result both vanish). That version's bug (a blocker,
+    fixed separately -- see compaction.py's AMENDMENT and test_compaction.py)
+    is exactly what this test's old assertions relied on: `events_kept == 2`
+    assumed dropping, which the corrected compaction never does again (it
+    only ever collapses `tool_result` CONTENT, never removes a `tool_use`/
+    `tool_result` event -- see compaction.py's module docstring). Worse, the
+    corrected compaction+triage pipeline now triages that exact old scenario
+    OUT as `readonly-run` (unaffected by the fix -- both `tool_use` events
+    survive compaction, so the skip-signature still fires), so no `render`
+    event was ever reachable through the old scenario at all.
+
+    The new scenario is chosen to still discriminate order, not just avoid
+    crashing: a Bash (non-read-only) tool_result, long enough to actually
+    truncate, with ONE genuinely lint-clean report buried in the dropped
+    middle. Evaluated on the RAW segment, triage reads that report and skips
+    (`lint-clean`) -- asserted directly below as the counterfactual. Evaluated
+    on the segment `WorkerLoop.tick()` ACTUALLY triages -- the compacted one
+    -- that report is gone (truncated away, `chars_saved > 0`) and the
+    segment falls through to `default-keep`, reaching a real `render` event.
+    A reordering bug (triage seeing the pre-compaction segment) would flip
+    this test's tick() back to the skipped branch and fail it."""
+    content = _build_log_content()
+
+    # The counterfactual: triage(), called directly on the RAW segment (as
+    # it would be if compaction ran AFTER triage, or not at all), skips.
+    raw_segment = Segment(
+        id="sess-1-00001",
+        agent_session_id="sess-1",
+        started_at=datetime(2026, 8, 4, tzinfo=timezone.utc),
+        ended_at=datetime(2026, 8, 4, tzinfo=timezone.utc),
+        events=[
+            _ev(role="user", content="can you check the whole build log for anything odd"),
+            _ev(kind="tool_use", tool_name="Bash", content="run full lint+build"),
+            _ev(role="user", kind="tool_result", tool_name="Bash", content=content),
+            _ev(content="Looked through it, nothing stood out."),
+        ],
+    )
+    raw_decision = triage(raw_segment)
+    assert (raw_decision.keep, raw_decision.reason) == (False, "lint-clean")
+    # And the compacted segment -- what the real pipeline below triages --
+    # reverses that verdict, because compaction truncated the buried report
+    # away before triage ever ran.
+    compacted_decision = triage(compact(raw_segment))
+    assert (compacted_decision.keep, compacted_decision.reason) == (True, "default-keep")
+
     transcript = tmp_path / "t.jsonl"
     transcript.touch()
     producer = Producer(tmp_path / "wal", FileSink(tmp_path / "upstream.jsonl"))
     call_log = CallLog()
     stats = StatsBuffer(call_log)
     provider = RecordingProvider(
-        FakeProvider(scripts=[condensed("debug mode is on")]), "distiller", call_log
+        FakeProvider(scripts=[condensed("nothing notable in the build log")]),
+        "distiller", call_log,
     )
     loop = WorkerLoop(
         transcript=transcript,
@@ -211,15 +283,19 @@ async def test_compaction_runs_before_triage_and_the_render_event_sees_its_outpu
         stats=stats,
     )
     transcript.write_text(
-        user("what's in config.py")
-        + assistant_tool_use("Read", "config.py")
-        + tool_result("Read", "DEBUG = True")
-        + assistant("Debug mode is on.")
-        + user("thanks, next question"),  # closes the turn above
+        user("can you check the whole build log for anything odd")
+        + assistant_tool_use("Bash", "run full lint+build")
+        + tool_result("Bash", content)
+        + assistant("Looked through it, nothing stood out.")
+        + user("thanks, that's helpful"),  # closes the turn above
         encoding="utf-8",
     )
 
-    await loop.tick()
+    result = await loop.tick()
+
+    # The real pipeline reached keep, not skip -- the ordering-sensitive
+    # half of the proof above, now observed through a real tick().
+    assert result.skipped_triage == 0
 
     snapshot = stats.snapshot()
 
@@ -227,14 +303,22 @@ async def test_compaction_runs_before_triage_and_the_render_event_sees_its_outpu
     assert len(compaction_events) == 1
     detail = compaction_events[0]["detail"]
     assert detail["events_total"] == 4
-    assert detail["events_kept"] == 2          # Read + its tiny clean result dropped
+    # Compaction never removes events post-fix (see the docstring above) --
+    # only the trivial/lint-clean CONTENT inside them shrinks.
+    assert detail["events_kept"] == 4
     assert detail["chars_saved"] > 0
-    assert "2/4" in compaction_events[0]["summary"]
+    assert "4/4" in compaction_events[0]["summary"]
     assert "kept" in compaction_events[0]["summary"]
     assert "chars saved" in compaction_events[0]["summary"]
 
+    triage_events = [e for e in snapshot["events"] if e["tag"] == "triage"]
+    assert len(triage_events) == 1
+    assert triage_events[0]["detail"]["reason"] == "default-keep"
+
     render_events = [e for e in snapshot["events"] if e["tag"] == "render"]
     assert len(render_events) >= 1
-    # events_in must reflect the COMPACTED segment (2), not the raw
-    # transcript's 4 events -- the whole point of running compaction first.
-    assert render_events[0]["detail"]["events_in"] == 2
+    # events_in reflects the segment triage/render actually saw -- the
+    # compacted one, same event count as raw (compaction only ever shrinks
+    # content, per the fix), but only reachable at all because that
+    # compacted content is what triage evaluated.
+    assert render_events[0]["detail"]["events_in"] == 4
