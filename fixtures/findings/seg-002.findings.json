@@ -1,7 +1,7 @@
 [
   {
     "id": "f-002-01", "type": "decision",
-    "text": "Chose refresh-on-401 over caching auth tokens: the tokens expire so quickly that a cache would be stale almost immediately and would add invalidation complexity for no benefit.",
+    "text": "Chose to only refresh an auth token after a request comes back unauthorized, rather than caching tokens ahead of time: the tokens expire so quickly that a cache would be stale almost immediately and would add invalidation complexity for no benefit.",
     "attributions": [{"contributor": "aditya", "agent_session": "as-fixture-002", "agent": "claude-code"}],
     "ts": "2026-08-04T09:00:20Z", "refs": [],
     "provenance": "distilled", "status": "kept",

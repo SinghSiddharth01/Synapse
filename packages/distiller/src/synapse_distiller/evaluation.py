@@ -119,24 +119,36 @@ DEFAULT_ALLOWLIST: frozenset[str] = frozenset({
     "claude-code", "codex", "tool_use", "tool_result", "dead_end", "open_question",
 })
 
+# The trailing boundary intentionally excludes "." (unlike the leading
+# boundary below, which still excludes it). An identifier is very often the
+# last token before a full stop — "We raised default_pool_size." — and a
+# lookahead that forbids a following "." made every sentence-final identifier
+# invisible, which is exactly where a leak is most likely to sit. Path-shaped
+# alternatives below still *consume* a trailing "." greedily (it is a valid
+# path character), so `_identifier_tokens` strips it back off after matching
+# rather than trying to exclude it via the lookahead.
 _IDENTIFIER_RE = re.compile(
     r"""(?x)
     (?<![\w./\\-])(
-        (?:/|[A-Za-z]:\\)[\w.\\/-]+           # absolute path (unix or windows)
+        \\\\[\w.$-]+(?:\\[\w.$-]+)+           # Windows UNC path (\\server\share\...)
+      | (?:/|[A-Za-z]:\\)[\w.\\/-]+           # absolute path (unix or windows)
       | [\w-]+(?:/[\w.-]+)+                   # relative path with a slash
+      | \d{1,3}(?:\.\d{1,3}){3}               # IPv4 address
       | \w+=[^\s,;]+                          # key=value
       | [A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+       # dotted.name (incl. file.ext, host)
-      | [a-z0-9]+(?:_[a-z0-9]+)+              # snake_case
-      | [a-z0-9]+(?:-[a-z0-9]+)+              # kebab-case
+      | [A-Za-z0-9]+(?:_[A-Za-z0-9]+)+        # snake_case (either letter case)
+      | [A-Za-z0-9]+(?:-[A-Za-z0-9]+)+        # kebab-case (either letter case)
       | [a-z]+(?:[A-Z][a-z0-9]*)+             # camelCase
       | [A-Z][a-z0-9]+(?:[A-Z][a-z0-9]*)+     # CamelCase
-    )(?![\w./\\-])
+    )(?![\w/\\-])
     """
 )
 
 
 def _identifier_tokens(text: str) -> set[str]:
-    return {m.group(1) for m in _IDENTIFIER_RE.finditer(text)}
+    tokens = {m.group(1).rstrip(".") for m in _IDENTIFIER_RE.finditer(text)}
+    tokens.discard("")
+    return tokens
 
 
 def identifier_leaks(
@@ -146,10 +158,24 @@ def identifier_leaks(
 ) -> list[str]:
     """Identifier-shaped tokens copied from the segment into the finding.
 
+    Comparison is case-insensitive: "TokenValidator" in the segment and
+    "tokenvalidator" in the finding is still the same copied token wearing a
+    trivially different case, and matching case-sensitively would let that
+    evade detection for free. The token reported is spelled as it appears in
+    `finding_text`.
+
     Sorted for stable output. Empty list == no detected leak — which is
     evidence, not proof; the allowlist is a judgment call and reviewed with
-    the corpus.
+    the corpus. Known gaps, because the heuristic keys on visible structure
+    (separators, case-humps) rather than meaning or entropy: bare secrets/API
+    keys and IDs with no internal structure, single-word codenames or proper
+    nouns, partial copies of a longer dotted/path token, and any identifier
+    whose case-shape is flattened to one unstructured run (camelCase folded
+    to all-lowercase has no separator left to key on). A clean run is "no
+    leak this heuristic knows how to detect," never a privacy guarantee.
     """
     source = " ".join(e.content for e in segment.events)
-    in_both = _identifier_tokens(finding_text) & _identifier_tokens(source)
-    return sorted(t for t in in_both if t.lower() not in allowlist)
+    finding_tokens = _identifier_tokens(finding_text)
+    source_tokens_lower = {t.lower() for t in _identifier_tokens(source)}
+    leaked = {t for t in finding_tokens if t.lower() in source_tokens_lower}
+    return sorted(t for t in leaked if t.lower() not in allowlist)
