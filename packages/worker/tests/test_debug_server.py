@@ -21,18 +21,41 @@ def _get(url: str):
         return resp.status, resp.headers.get("Content-Type", ""), resp.read().decode("utf-8")
 
 
-def test_stats_json_matches_a_fresh_snapshot() -> None:
+def test_stats_json_matches_a_fresh_snapshot_and_stays_read_only_across_gets() -> None:
+    """`/debug/stats.json` must be a pure read of `StatsBuffer.snapshot()` --
+    the docstring's "pinned by test, not by intention" claim, actually pinned.
+
+    A snapshot taken BEFORE any GET (`before`) is compared against the
+    response of each of several GETs (`now` stripped out, since that field
+    is wall-clock and expected to differ). Comparing against a PRE-request
+    snapshot, repeated across N requests, is what makes this bite: a do_GET
+    branch that sneaks in `stats.event(...)` or `stats.distil_finished()`
+    before serializing would grow `events` or clear `current` on the very
+    first GET, and every GET after that would drift further -- either way
+    `got == before` fails. (The previous version of this test only checked
+    `payload["events"][0]["tag"]` and the key set, which a GET that mutates
+    the buffer still satisfies -- confirmed by mutation: inserting exactly
+    those two calls into the do_GET handler left it green.)
+    """
     stats = StatsBuffer(CallLog())
     stats.event("tick", "5 lines")
+    stats.distil_started("seg-1", 3)
     server = DebugServer(stats, port=0)
     try:
         port = server.start()
-        status, content_type, body = _get(f"http://127.0.0.1:{port}/debug/stats.json")
-        assert status == 200
-        assert "json" in content_type
-        payload = json.loads(body)
-        assert payload["events"][0]["tag"] == "tick"
-        assert set(payload) == {"now", "current", "ticks", "events", "llm"}
+        before = stats.snapshot()
+        before.pop("now")
+
+        for _ in range(3):
+            status, content_type, body = _get(f"http://127.0.0.1:{port}/debug/stats.json")
+            assert status == 200
+            assert "json" in content_type
+            payload = json.loads(body)
+            assert payload["events"][0]["tag"] == "tick"
+            assert set(payload) == {"now", "current", "ticks", "events", "llm"}
+            got = dict(payload)
+            got.pop("now")
+            assert got == before
     finally:
         server.stop()
 
