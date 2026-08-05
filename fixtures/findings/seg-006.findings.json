@@ -1,1 +1,9 @@
-[]
+[
+  {
+    "id": "f-006-01", "type": "learning",
+    "text": "An undefined-variable typo in a config name caused one test failure; correcting the name brought the suite back to all 42 tests passing.",
+    "attributions": [{"contributor": "aditya", "agent_session": "as-fixture-006", "agent": "claude-code"}],
+    "ts": "2026-08-04T12:00:55Z", "refs": [],
+    "provenance": "distilled", "status": "kept", "merged_from": [], "merged_into": null
+  }
+]

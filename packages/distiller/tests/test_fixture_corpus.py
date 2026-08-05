@@ -59,9 +59,25 @@ def test_seg005_pair_is_a_merge_candidate():
     assert "load" in b[0].text.lower() and "load" not in a[0].text.lower()
 
 
-def test_adversarial_fixtures_have_empty_goldens():
-    assert load_goldens("seg-006") == []
-    assert load_goldens("seg-007") == []
+def test_seg006_seg007_have_faithful_compression_goldens():
+    """seg-006 and seg-007 reach the distiller: fixtures/triage.json marks
+    both 'keep' (recall-tuned ACCEPTED FALSE POSITIVE entries). ADR 0003 says
+    the on-device distiller compresses whatever reaches it and does not judge
+    durability — that judgment is triage's job upstream, which has already
+    run by the time these segments get here. An empty golden on a kept
+    segment encodes exactly the durability judgment ADR 0003 relieves the
+    distiller of (this is the same bug the ADR names for seg-004: 'the
+    distiller should judge this worthless' — which is why seg-004 is `skip`,
+    not `keep`, and keeps its empty golden). Both segments contain real
+    content to compress: a genuine NameError and three real call sites."""
+    for fixture_id in ("seg-006", "seg-007"):
+        goldens = load_goldens(fixture_id)
+        assert goldens, (
+            f"{fixture_id} is marked 'keep' in fixtures/triage.json, so under "
+            f"ADR 0003 the distiller must faithfully compress its content — "
+            f"an empty golden would encode a durability judgment the "
+            f"distiller was explicitly relieved of"
+        )
 
 
 def test_triage_expectation_map_covers_the_whole_corpus():
