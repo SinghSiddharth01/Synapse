@@ -163,11 +163,22 @@ async def test_conflict_on_a_finding_merged_in_the_same_round_resolves_forward()
 
 
 async def test_unknown_ids_from_the_model_are_ignored_not_fatal():
+    """An unknown id in a verdict must not crash the merge -- but a verdict
+    that resolves to a single live source must not mint a Synthesized
+    Finding either. ADR 0002 defines a Synthesized Finding as capturing
+    "two or more Findings it judged semantically the same"; a merge of one
+    is applied from a verdict the code has just proven corrupt (it named a
+    nonexistent id), so it must be skipped, not honored with one source."""
     store = InMemoryStore()
     sid = store.create_session(purpose="p", created_by="s").shared_id
     script = {"working_memory": "wm",
               "merges": [{"source_ids": ["f-005a-01", "f-GHOST"], "text": "x", "type": "learning"}],
               "trivial_ids": ["f-ALSO-GHOST"], "conflicts": []}
-    await Synthesizer(FakeProvider(scripts=[script])).merge(store, sid, _pair())
+    ctx = await Synthesizer(FakeProvider(scripts=[script])).merge(store, sid, _pair())
+
     merged = [f for f in store.all_findings(sid) if f.provenance == Provenance.SYNTHESIZED]
-    assert len(merged) == 1 and merged[0].merged_from == ["f-005a-01"]
+    assert merged == []                                          # skipped, not merged-of-one
+    original = store.get(sid, "f-005a-01")
+    assert original.merged_into is None                          # author's finding survives
+    assert original in store.retrievable(sid)
+    assert ctx.memory_version == 1                                # merge() still completed

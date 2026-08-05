@@ -118,10 +118,16 @@ class Synthesizer:
             sources = [store.get(shared_id, fid) for fid in merge["source_ids"]
                        if fid in known]
             sources = [s for s in sources if s is not None and s.merged_into is None]
-            if len(sources) < 2 and len(merge["source_ids"]) >= 2:
-                logger.warning("Merge verdict referenced unknown/merged ids %s; applying "
-                               "to the %d valid source(s)", merge["source_ids"], len(sources))
-            if not sources:
+            if len(sources) < 2:
+                # A Synthesized Finding captures "two or more Findings it
+                # judged semantically the same" (ADR 0002). A verdict that
+                # resolves to zero or one live source named an unknown or
+                # already-merged id -- applying it would tombstone the
+                # author's original on a verdict the code has just proven
+                # corrupt. Skip it entirely rather than merge-of-one.
+                logger.warning("Merge verdict referenced source_ids %s but only %d "
+                               "resolved to a live finding; skipping (need >= 2)",
+                               merge["source_ids"], len(sources))
                 continue
             attributions: list[Attribution] = []
             for s in sources:
