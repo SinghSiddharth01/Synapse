@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **⟨REVISION 1 — 2026-08-05⟩** Two adversarial reviews were run against revision 0. Six blockers and eleven majors were raised; **fifteen were verified against the working tree and are fixed here**, and four are argued back in the prose of the task they concern (Task 3, Task 4, Task 9's `coverage_line` scope, and the demo cut's treatment of Task 10). The single largest change is structural: **the two steps that prove the demo works are now Task 0 and run TODAY against `main`**, before a line of this integration is written. The full disposition is in [What revision 1 changed](#what-revision-1-changed).
+
 **Executes:** [`docs/plans/2026-08-05-plan-e-brain.md`](../2026-08-05-plan-e-brain.md) (tasks E.1–E.10). Its reasoning lives in [`docs/brainstorming/2026-08-05-brain-integration-design.md`](../../brainstorming/2026-08-05-brain-integration-design.md). This document adds no decisions; it adds the failing tests, the run commands, the expected output, and the commit boundaries.
 
 **Goal:** keep every externally visible property `main` has proven — six routes, synthesis semantics, suppression, watermark, self-heal, producer contracts, all six invariants — and replace the *mechanism* underneath with `feat/shared-memory-store`'s append-only log, pure fold, and five-lane candidate selection.
@@ -18,9 +20,76 @@
           └─► synthesis.py / retrieval.py  ── neither imports fold, log, or lanes
 ```
 
-**Tech Stack:** unchanged. Python 3.12, Starlette, uvicorn, httpx (ASGITransport in tests — no sockets), pytest, Pydantic v2, `uv`. `synapse_service` still needs no model, no key and no network for any test in this plan.
+**Tech Stack:** unchanged. Python 3.12, Starlette, uvicorn, httpx (ASGITransport in tests — no sockets), pytest, Pydantic v2, `uv`. `synapse_service` still needs no model, no key and no network for any test in Tasks 1–12.
 
-**Deadline reality:** the demo is **Aug 7**; today is **Aug 5**. The demo loop is untouched until Task 6. Every task is independently revertable.
+---
+
+## Deadline reality: the schedule, the cut, and the abort clock
+
+The demo is **Aug 7**. Today is **Aug 5**. Revision 0 said "every task is independently revertable," and that is **false in the middle of the chain** — Task 6 depends on Task 5's `MarkedTrivial`, Tasks 8/9/10 depend on Task 6's `store.candidates`, Task 12 depends on Task 7's measurement files. Reverting Task 8 alone is easy; reverting Task 6 alone is not. What follows replaces that claim with something operable.
+
+### The fallback, pinned now
+
+```bash
+export PATH="/opt/homebrew/bin:$PATH"
+cd /Users/siddharthsingh/Dev/synapse
+git tag demo-fallback main
+git tag -n1 demo-fallback
+```
+
+`demo-fallback` is the commit the demo runs from if this integration is not finished, not green, or not rehearsed. It is `main` at `174592c` + Task 1 (Task 1 lands on `main` and is a pure refactor guarded by 387 tests — see its exit gate). **The real rollback is `git switch main`.** Nothing else in this plan touches `main` until every Done-when is true, which is why the rollback costs nothing and is worth writing down rather than discovering.
+
+### Pencils down: 18:00, Aug 6
+
+Whatever is green on `feat/brain-integration` at **18:00 on Aug 6** is the cut. Nothing merges after it. The evening of Aug 6 is for rehearsal on the demo machine, not for landing tasks. A task half-done at 18:00 is reverted (`git reset --hard` to its parent commit), not finished at 22:00.
+
+### The minimum demo cut, and the drop order
+
+| Tier | Tasks | Why |
+|---|---|---|
+| **Cut** (must land) | 0, 1, 2, 5, 6, 7, 8, 9, 10, 11 Step 2 | Everything the audience sees or that keeps the loop alive |
+| **Droppable, in this order** | 12 → 4 → 3 → 14 → 11 Step 3 → 10 | Measurement, vocabulary, ADR prose, spec sync, the relay/resync hardening, then topics |
+
+> **⟨ARGUING BACK⟩ One review put Task 10 outside the minimum cut. It belongs inside it.** Task 10 is one of exactly two audience-visible deliverables in the whole plan: a teammate connects and the arrival briefing tells them *what the team is working on*, in the team's own words, with no model call. The other is Task 8/9's retrieval. Tasks 3, 4, 12 and 14 are invisible to the audience; Task 10 is the demo. It is last in the drop order, not absent from the cut.
+
+Dropping a task means **reverting its commit**, not leaving it half-applied:
+
+```bash
+cd /Users/siddharthsingh/Dev/synapse
+git log --oneline feat/brain-integration | head -14      # find the task's commit
+git revert --no-edit <sha>
+uv run pytest -q                                          # must be green after the revert
+```
+
+Task 12 and Task 4 revert cleanly in isolation (measurement + docs). Task 3 reverts cleanly (docs only). **Task 11 Step 3 must be reverted as a unit with its tests.** Tasks 5→6 and 6→7→8→9 revert only in reverse order; if you need to go back past Task 6, go back to `demo-fallback`.
+
+### The rehearsal, which is not optional
+
+Two checkpoints inside the plan (**Task 9 Step R** and **Task 11 Step R**) boot both real processes and drive one query and one contribute by hand. They are the only steps in Tasks 1–12 that exercise what the audience will actually see; every other step is pytest. Then, **evening of Aug 6, on the demo machine, from the cut**: run the whole demo start to finish, twice.
+
+### Time boxes and running total
+
+Wall-clock boxes, so the last three tasks do not get done at 3am. If a task blows its box by more than 50%, stop and take the drop decision.
+
+| Task | What | Box | Cumulative (coding) |
+|---|---|---|---|
+| **0** | **De-risk the demo (MANUAL, today, against `main`)** | **90 min** | — |
+| 1 | Storage seam | 45 min | 0:45 |
+| 2 | The merge | 60 min | 1:45 |
+| 3 | ADR 0004 amendment | 15 min | 2:00 |
+| 4 | `CONTEXT.md` vocabulary | 20 min | 2:20 |
+| 5 | `MarkedTrivial` | 30 min | 2:50 |
+| 6 | **The swap** (most likely to overrun) | 90 min | 4:20 |
+| 7 | Back-fill + topic-lane flag + harness knobs | 45 min | 5:05 |
+| 8 | Lanes at the synthesis call site | 35 min | 5:40 |
+| 9 | Lanes at `/query` + invariant 3 (+10 min rehearsal) | 55 min | 6:35 |
+| 10 | Topics in the watermark and briefing | 50 min | 7:25 |
+| 11 | Recovery path (+10 min rehearsal) | 70 min | 8:35 |
+| 12 | Recall gate + the numbers | 25 min | 9:00 |
+| **13** | **Live re-flip on the branch (MANUAL)** | **45 min** | — |
+| 14 | Spec doc sync (**post-demo**) | 20 min | — |
+
+**Nine hours of coding across two days, plus 2h15 of manual work needing a second human.** That is the honest budget. It is why Task 0 is today and why 18:00 Aug 6 is a hard stop.
 
 ---
 
@@ -30,31 +99,94 @@
 - **Absolute paths everywhere.** Repo root is `/Users/siddharthsingh/Dev/synapse`.
 - **`/Users/siddharthsingh/Dev/synapse-exec/brain` is READ-ONLY** for the duration. It is a worktree of this same repo (shared object store), which is why Task 2 can merge `d491956` without a remote. Never edit it, never commit in it, never `git push` from anywhere, ever.
 - **The regression floor is `main`'s 387 tests** (verified: `uv run pytest -q` → `387 passed` at `174592c`). Run `uv run pytest -q` at the end of every task. Only the tests named in [Tests expected to change](#tests-expected-to-change) may go red on the way to green in their new form. **Anything else red is a defect, not an adaptation.** Do not edit a test to make it pass without an entry in that table.
-- **Every task states an expected total AND the delta that produced it.** The totals below were computed, not observed (`387 → 392 → 467 → 471 → 474 → 476 → 479 → 481 → 485 → 496 → 501 → 504`). **The delta is the contract; the total is a convenience.** If a total is off by N, find the N tests before continuing — do not adjust the number and move on. The commonest honest cause is a `parametrize` expanding to more cases than the source lines suggest.
+- **The delta is the contract; the total is a convenience.** Every task states the tests it adds and removes. The cumulative totals in the [count chain](#the-count-chain) were computed, not observed.
+  - For **Tasks 1, 2 and 6** the total is binding: a drift there means a test was lost in a refactor, a merge, or the swap, which is exactly the failure this plan is defending against. Find the missing tests before continuing.
+  - For **every other task**, the contract is: full suite green, and any delta from the predicted total **explained in one line of the commit message**. Do not spend forty minutes reconciling arithmetic against a hard deadline; the commonest honest cause is a `parametrize` expanding to more cases than the source lines suggest, and that is a one-line note, not an investigation.
 - **`packages/orchestrator/tests/test_end_to_end.py` must be green, unedited, at the end of every task.** It is the strongest single signal in the repo. If it needs editing, the surface moved and something is wrong.
 - **Contracts come from `synapse_contracts`** — import, never redefine. `RETRIEVABLE` is defined in exactly one place: `store.is_retrievable` today, `fold.py` from Task 5 on.
 - **`upsert` returns ids NOT PREVIOUSLY SEEN**, never "entries appended". `api.py:74`'s `if accepted:` is the only thing keeping a replayed POST off the provider.
-- **Two version counters, never the same number.** `SessionContext.memory_version` = merges completed, bumped once per fully-applied verdict, read by `/findings`, `/synthesize`, `/watermark`, `last_seen`. `Log.version` = entry count, used only for fold-cache invalidation inside `SharedMemory`. **`Log.version` never leaves the store.**
+- **Two version counters, never the same number.**
+  - `SessionContext.memory_version` = **verdict rounds applied**, bumped once per structurally-valid verdict — *whether or not that verdict contained a merge*. Read by `/findings`, `/synthesize`, `/watermark`, `last_seen`.
+  - `Log.version` = entry count, used only for fold-cache invalidation inside `SharedMemory`.
+
+  > **⟨CORRECTION vs. revision 0, verified 2026-08-05⟩ `memory_version` does not mean "merges completed", and revision 0 hardened that wrong gloss into the ADR, `CONTEXT.md` and `STATE.md`.** `synthesis.merge` calls `store.bump_version(shared_id)` unconditionally at the end of every validated verdict (`synthesis.py:273`), merges or not. `test_full_flow_push_watermark_query` pushes one finding under `MERGE_NOOP` (`"merges": []`) and asserts `memory_version == 1`; `test_full_log_replay_into_a_fresh_store_converges_with_the_original_stream` does the same. So `/findings`'s and `/synthesize`'s `synthesized: true` means **"a verdict round was applied"**, not "a merge happened." The gloss is corrected everywhere it appears in this plan (Task 3's amendment, Task 5's `Log.version` docstring, Task 11's convergence evidence). Making `bump_version` literally count merges is a *behaviour* change with those two tests as its pins — **explicitly out of scope for Aug 7**, and named in [Not in scope](#not-in-scope-each-for-a-stated-reason) rather than left as a docs/code disagreement.
+
+  > **`Log.version` is not the watermark and must never be reported as one.** It rides out of `SharedMemory` on `Appended.version`, which `append()` and `merge()` return and which **nothing consumes** — which is exactly the condition under which someone wires it to a watermark six weeks from now. Task 5 Step 3 gives `Appended.version` a docstring saying so, and Task 5 Step 6 greps `api.py` for any `.version` read that is not `memory_version`.
 - **No partial application of a synthesis verdict, ever.** `_SynthesisVerdicts` validation stays exactly where it is, before any mutation.
-- **Live NPU / Cirrascale steps are MANUAL** and are all in Task 13. Nothing in Tasks 1–12 touches a network, a key, or a model.
-- **Commit per task**, on `main` for Task 1 and on `feat/brain-integration` from Task 2 on. Nothing is pushed.
+- **Live NPU / Cirrascale steps are MANUAL** and live in **Task 0** (against `main`, today) and **Task 13** (against the branch). Nothing in Tasks 1–12 touches a network, a key, or a model.
+- **Commit per task**, on `main` for Task 0 and Task 1, on `feat/brain-integration` from Task 2 on. Nothing is pushed.
+
+### The count chain
+
+| After | Task | Delta | Total |
+|---|---|---|---|
+| baseline | — | — | **387** |
+| 1 | storage seam | +5 | **392** |
+| 2 | the merge | +75 | **467** |
+| 3 | ADR amendment | 0 | **467** |
+| 4 | vocabulary | +6 | **473** |
+| 5 | `MarkedTrivial` | +4 −1 | **476** |
+| 6 | the swap | +7 −2 | **481** |
+| 7 | back-fill + flag | +7 | **488** |
+| 8 | synthesis lanes | +3 | **491** |
+| 9 | `/query` lanes | +6 | **497** |
+| 10 | topics | +11 | **508** |
+| 11 | recovery | +8 | **516** |
+| 12 | recall gate | 0 | **516** |
+
+> Revision 0's chain said `467 → 471` for Task 4 (`+4`). Its own test file listed **five** test functions, and revision 1 adds a sixth. Every downstream total moved with it — which is the argument for the delta being the contract and the total a convenience.
 
 ---
 
 ## Corrections against the spec, made while writing this
 
-Plan E was written from a design memo; this document was written from the working tree. Six of its claims did not survive that, and each is corrected **in place at the task that uses it** — listed here so a reviewer can find them without reading the whole plan. In every case the spec's *intent* is preserved; only a fact it asserted was wrong.
+Plan E was written from a design memo; this document was written from the working tree. Each correction is applied **in place at the task that uses it** — listed here so a reviewer can find them without reading the whole plan. In every case the spec's *intent* is preserved; only a fact it asserted was wrong.
 
 | # | Spec says | Verified | Where it is fixed |
 |---|---|---|---|
 | 1 | "Nine files collide" | **Seven conflict.** `CONTEXT.md` and root `pyproject.toml` auto-merge cleanly (`git merge-tree --write-tree main d491956`). The spec's `git checkout --ours CONTEXT.md` would **error** on an unconflicted path. | Task 2 Steps 1–2 |
 | 2 | Task E.4 must re-add the branch's vocabulary section and revert deletions of Triage/Distiller | The auto-merge **already** keeps Triage/Distiller/"triages" and adds View/Lane/Candidate/Lane yield and both Notes bullets. Task 4 verifies that and spends its edits on Fold/Topic, the Tombstone entry, and one stale sentence. | Task 4 |
-| 3 | The merge brings the branch's 266 tests (`387 + 266 = 658`) | **75.** 191 of the branch's 266 are files identical to merge-base `8695eed`, an ancestor of `main`. Every downstream total was recomputed. | Task 2 Step 5, and every "Expected: N passed" |
-| 4 | Three `test_cli.py` resync tests change | **One.** The `if pushed and shared_id:` guard keeps the other two (and two more) offline and green unedited. | Tests-expected-to-change, Task 11 Step 1 |
+| 3 | The merge brings the branch's 266 tests (`387 + 266 = 658`) | **75.** 191 of the branch's 266 are files identical to merge-base `8695eed`, an ancestor of `main`. Every downstream total was recomputed. | Task 2 Step 5 |
+| 4 | Three `test_cli.py` resync tests change | **One.** `resync_sessions()` counting only successful pushes keeps the other five green unedited. | Tests-expected-to-change, Task 11 |
 | 5 | (draft) assert suppression via `provider.seen` | **Vacuous.** `seen` parses bracketed tokens: finding **ids** in a synthesis prompt, enumeration **indices** in a retrieval one. Invariant 3's test must read the raw prompt. | Task 9 Step 1 |
 | 6 | (draft) `test_vocabulary` greps one phrase; asserts "derived condition" anywhere in `CONTEXT.md` | Both **vacuous**: the ADR and `CONTEXT.md` word the open question differently, and the auto-merged Notes bullet already contains "derived condition". Scoped to the Tombstone entry, both phrases checked. | Task 4 Step 1 |
+| 7 | `memory_version` = "merges completed" (design §4.4, Plan E.6, revision 0) | **"Verdict rounds applied."** `bump_version` fires on every validated verdict including `"merges": []`. Pinned by two existing tests. | Global Constraints; Tasks 3, 5, 11 |
+| 8 | (revision 0) `Relay._post` becomes tri-state; `flush()` is rewired | **`resync()` is a second caller** (`relay.py:241`) and both new non-`ok` strings are truthy. Left alone, every resync reports every finding as pushed against a dead service. | Task 11 Step 3 |
+| 9 | (revision 0) the `docs/plans/README.md` conflict resolves as "ours — six invariants" | True of the content, **false of its own header**: `README.md:63` reads "**Five invariants every plan must preserve:**" above a list of six. | Task 2 Step 2 |
+| 10 | (revision 0) "a projected copy **is** a copy" | True for scalars only. `model_copy(update=...)` is **shallow** — verified: the copy's `attributions` list *is* the original's, and `.append()` through it writes into the record inside the fold. | Task 6 Step 6 |
 
-Two spec line-citations were also off by one or imprecise and are corrected silently where used: `lanes.py:262` → **`:261`** (`searched=len(visible)`), and `test_api.py:202` names the test whose function-local `CANDIDATE_WINDOW` import is at **`:212`**. Everything else the spec cites was checked against the tree and is correct: `synthesis.py:228/236/241/269/272`, `store.py:58`, `api.py:74` and `:173`, `synthesis.py:149`, `fold.py:113`, `lanes.py:226-244`, `relay.py:192`, `semantic.py:183`, `test_store.py:32`/`:40`, `test_synthesis.py:326`/`:352`, `test_api.py:268`, `test_fold.py:113`, `test_recall.py:52`/`:67`.
+Two spec line-citations were also off by one or imprecise and are corrected silently where used: `lanes.py:262` → **`:261`** (`searched=len(visible)`), and `test_api.py:202` names the test whose function-local `CANDIDATE_WINDOW` import is at **`:212`**. Everything else the spec cites was checked against the tree and is correct: `synthesis.py:228/236/241/269/272/273`, `store.py:58`, `api.py:74` and `:173`, `synthesis.py:149`, `fold.py:113`, `lanes.py:226-244`, `relay.py:192`, `semantic.py:183`, `test_store.py:32`/`:40`, `test_synthesis.py:326`/`:352`, `test_api.py:268`, `test_fold.py:113`, `test_recall.py:52`/`:67`.
+
+---
+
+## What revision 1 changed
+
+Every blocker and major from the two reviews, and its disposition. "Verified" means run or read against the working tree, not reasoned about.
+
+| # | Raised | Verified? | Disposition |
+|---|---|---|---|
+| B1 | The only two steps proving the demo works are scheduled last, are manual, and need a second human | yes — `docs/STATE.md:45` has carried the real-socket run as open since before this plan | **Fixed.** New **Task 0**, run today against `main`, which is green and needs none of this integration. Spec sync split out as Task 14, post-demo. |
+| B2 | No abort clock, no demo cut, no pinned known-good commit; "every task is independently revertable" is false mid-chain | yes | **Fixed.** [Deadline reality](#deadline-reality-the-schedule-the-cut-and-the-abort-clock): `demo-fallback` tag, 18:00 Aug 6 pencils-down, the cut, the drop order with revert commands, the rehearsal, time boxes. |
+| B3 | `_post` returning `'ok'\|'retry'\|'terminal'` breaks `resync()`, whose truthiness test now always passes | yes — `relay.py:241` | **Fixed.** Task 11 Step 3 updates the second call site, greps for callers first, and the `:343` "stays green" reasoning is corrected. |
+| B4 | Task 10 breaks `test_full_flow_push_watermark_query` — exact dict equality on the watermark body | yes — `test_api.py:61-62` | **Fixed.** Listed in Tests-expected-to-change; new expected dict shown inline in Task 10 Step 1; kept as exact equality. |
+| B5 | Task 12's topic-lane default breaks `test_every_lane_runs_even_when_it_contributes_nothing`, and silently changes `coverage_line()` | yes — `test_lanes.py:134`, `lanes.py:127` | **Fixed.** Listed; `lanes_run` is explicitly defined as *lanes that ran this call*; `coverage_line()` pinned literally for both flag states. Scope argued in Task 7. |
+| B6 | Task 11's `cmd_resync` guard makes the one changed CLI test unpassable, and hides a multi-session gap | yes — `cli.py:155`, `test_cli.py:379` creates no bindings dir | **Fixed.** `Relay.resync_sessions() -> dict[str, int]`; `cmd_resync` recreates and re-synthesizes **per session pushed**, not per binding. |
+| M1 | Terminal 4xx converts the self-healing restart case into one needing a human mid-demo | yes | **Fixed by narrowing.** **404 stays retryable** (create-or-return makes it recoverable); only 400/422 are terminal. Logging improvement kept. |
+| M2 | Task 9 changes what the marquee interaction returns and nothing measures whether it got better | yes | **Fixed.** Small-session bypass (`len(allowed) <= TOP_K` → byte-identical to `main`), pinned by two tests; plus a real-8B A/B in Task 13. |
+| M3 | The topic-lane flag lands in Task 12, after the call sites it affects are wired and measured | yes — `lanes.py:180` runs `Lane.TOPIC` unconditionally | **Fixed.** Flag, harness knobs and the default all move to **Task 7**. Task 12 keeps only the table. |
+| M4 | ~25% of the plan is invisible to the audience and sits in the critical path with no time estimates | yes | **Partly fixed, partly argued.** Time boxes on every task; Tasks 3/4/12/14 moved into the drop tier; Task 3 compressed from ~110 lines of prose to ~45. Task 4 is defended in its own preamble. |
+| M5 | No rehearsal between Task 9 and Task 13; Task 10 changes a process-boot path with no boot smoke | yes — `cli.py:211` `build_briefing`, `:227` `uvicorn.run` | **Fixed.** Task 9 Step R and Task 11 Step R boot both processes; Task 10 Step 6 adds `timeout 3 uv run synapse-orchestrator`. |
+| M6 | Task 8 caps `others` by dict-insertion order, so pushed findings 3..N contribute no partners | yes | **Fixed.** The union is ranked by fused score before truncation; a five-finding push test pins the **last** one's partner. |
+| M7 | Create-or-return has no caller in the product | yes — `POST /v1/sessions` is reachable from no component | **Fixed.** `cmd_resync` recreates each backlog session before pushing; one API-level recovery round-trip test. |
+| M8 | Two supersession resolvers coexist and nothing pins them to agree; first-wins vs last-wins undocumented | yes — `synthesis._resolve_forward` has no depth cap; `fold._apply` is last-merge-wins | **Fixed.** `_resolve_forward` deleted and routed through `View.resolve()` via `store.resolve_forward`; three new tests state the log's semantics and the registry's. |
+| M9 | `_project`'s `model_copy(update=...)` is shallow, so `attributions`/`refs`/`merged_from` are shared | yes — reproduced | **Fixed.** `model_copy(deep=True)`; `test_get_returns_a_copy_…` mutates `attributions` too. |
+| N1 | Total-reconciliation rule is an unbounded time sink | fair | **Fixed.** Binding for Tasks 1/2/6; one-line commit-message explanation elsewhere. |
+| N2 | `/tmp/recall-*.txt` crosses tasks and terminal sessions | fair | **Fixed.** `.measurements/` under the repo, gitignored; Task 12 fails loudly if the baseline is absent. |
+| N3 | `append` re-folding per finding is O(N²) over a push | yes | **Fixed.** `upsert` passes its already-computed answer down as `is_new=`; one fold per batch. |
+| N4 | "`Log.version` never leaves the store" is untrue of `Appended.version` | yes | **Fixed by softening + a grep.** The claim is restated accurately and Task 5 Step 6 greps for it. |
+| N5 | `docs/plans/README.md:63` says "Five invariants" above six; the **Topic** entry describes a capability the ship disables | yes | **Fixed.** Header corrected in Task 2 Step 2; the **Topic** entry gains a clause in Task 4 Step 3. |
+
+**Argued back, not changed** — each in the prose of its own task: Task 3's A3 and Option A closure survive compression (Task 3 preamble); Task 4 is kept in the plan rather than deferred (Task 4 preamble); `coverage_line()` is pinned but is **not** model-facing in the shipped system (Task 7 Step 2); Task 10 is inside the minimum demo cut (Deadline reality).
 
 ---
 
@@ -67,26 +199,137 @@ This is the complete list. A red test not on this list is a defect.
 | `test_replayed_original_never_clobbers_a_tombstone` | `packages/service/tests/test_store.py:32` | 6 | Sets `merged_into` through a returned reference. Rewritten through `supersede`. **Stop-gate: if it cannot be made green through the new write path, the swap stops and `main` is untouched.** |
 | `test_retrievable_excludes_tombstones_and_trivia` | `packages/service/tests/test_store.py:40` | 6 | Same shape — sets `merged_into`/`status` through returned references. Rewritten through `supersede` + `mark_trivial`. |
 | `test_trivial_findings_are_stored_but_not_visible` | `packages/service/tests/test_fold.py:113` (branch) | 5 | Asserts a producer-supplied `status=TRIVIAL` is invisible. **The fold deliberately stops reading `Finding.status`** — that finding is now visible, and a `MarkedTrivial` entry is what hides it. Inverted and renamed. |
-| `test_the_window_still_bounds_established_candidates_not_in_this_push` | `packages/service/tests/test_synthesis.py:352` | 8 | Asserts `len(seen) == CANDIDATE_WINDOW + 1` exactly. Under lanes, `others` is capped by `DEFAULT_TOP_K` (14) *and* `CANDIDATE_WINDOW` (20), so the exact equality no longer holds. The **property** (still bounded, still not the whole log) is what the rewrite asserts. |
-| `test_a_larger_corpus_does_not_change_the_prompt_size` | `packages/service/tests/test_recall.py:67` (branch) | 6 | **Retired as vacuous.** Asserts `small.top_k == large.top_k` where both are the literal it passed in, and does arithmetic on its own build parameters. A mutation removing `[:budget]` from `lanes.select` entirely leaves it green. |
+| `test_every_lane_runs_even_when_it_contributes_nothing` | `packages/service/tests/test_lanes.py:134` (branch) | **7** | Asserts `lanes_run == frozenset(Lane)`. With the topic lane behind a flag, `lanes_run` means **lanes that ran this call** and `Lane.TOPIC` is absent when the flag is off. Rewritten to assert both states explicitly, plus `coverage_line()`'s literal text. |
+| `test_the_window_still_bounds_established_candidates_not_in_this_push` | `packages/service/tests/test_synthesis.py:352` | 8 | Asserts `len(seen) == CANDIDATE_WINDOW + 1` exactly. Under lanes, `others` is capped by `DEFAULT_TOP_K` (14) *and* `CANDIDATE_WINDOW` (20), so the exact equality no longer holds. The **property** (still bounded, still not the whole log, still not empty) is what the rewrite asserts. |
+| `test_a_larger_corpus_does_not_change_the_prompt_size` | `packages/service/tests/test_recall.py:67` (branch) | 6 | **Retired as vacuous.** Asserts `small.top_k == large.top_k` where both are the literal it passed in. A mutation removing `[:budget]` from `lanes.select` entirely leaves it green. |
 | `test_recall_is_reported_per_band_and_per_lane` | `packages/service/tests/test_recall.py:52` (branch) | 6 | **Retired as vacuous.** Asserts `set(report.by_lane()) == set(Lane)`, which `by_lane()` guarantees by construction (`{lane: 0 for lane in Lane}`). |
-| `test_resync_pushes_a_previously_recorded_session_even_when_now_unbound` | `packages/orchestrator/tests/test_cli.py:379` | 11 | Asserts `hit == ["http://127.0.0.1:8899/v1/sessions/sh-old/findings"]` exactly. A second URL (`.../synthesize`) now appears. **This is the only CLI test that changes.** |
+| `test_full_flow_push_watermark_query` | `packages/service/tests/test_api.py:61` | **10** | Asserts **exact dict equality** on the watermark body, which gains `topics`, `purpose` and `members`. Stays exact equality — it is the only thing pinning the route contract `briefing.py` consumes. New dict shown inline in Task 10 Step 1. |
+| `test_resync_pushes_a_previously_recorded_session_even_when_now_unbound` | `packages/orchestrator/tests/test_cli.py:379` | 11 | Asserts `hit == ["http://127.0.0.1:8899/v1/sessions/sh-old/findings"]` exactly. Two more URLs now appear (`.../sessions` recreate, `.../synthesize`). **This is the only CLI test that changes.** |
 
 **Explicitly NOT expected to change**, and each is a load-bearing signal if it goes red:
 
-- **The other five `resync` tests in `test_cli.py` (`:286`, `:298`, `:317`, `:328`, `:343`).** Verified against the source: `:298` and `:328` write a binding but record *no* findings, so `relay.resync()` returns `pushed == 0`; `:286` and `:317` have neither. Task 11's new call is guarded by `if pushed and shared_id:`, so all four stay fully offline and green **unedited** — which is precisely why that guard is written that way and not as `if shared_id:`. `:343` returns `1` from the failure branch before ever reaching the new call. **If any of these five goes red, the guard is wrong, not the test.**
+- **The other five `resync` tests in `test_cli.py` (`:286`, `:298`, `:317`, `:328`, `:343`).** Verified against the source: `:298` and `:328` write a binding but record *no* findings, so `resync_sessions()` returns `{}`; `:286` and `:317` have neither. Task 11's new calls iterate `resync_sessions()`'s keys, so all four stay fully offline and green **unedited**.
+  > **⟨CORRECTION vs. revision 0⟩** Revision 0 claimed `:343` stays green because it "returns 1 from the failure branch before ever reaching the new call." **That reasoning is wrong and would have misdirected the fix.** With a `down` transport, `_post` returns the string `"retry"`, which is *truthy* — under revision 0's `if await self._post(...)` at `relay.py:241` the finding would have been counted as pushed, `pushed == total`, and the FAILED branch would never fire. `:343` stays green in revision 1 for a different reason: **`resync_sessions()` counts only `"ok"`**, so a 503 yields `{}`, `pushed == 0 < total == 1`, and the loud failure path is reached exactly as before. If `:343` goes red, the tri-state comparison is wrong, not the test.
 - `test_upsert_is_first_write_wins` — still true; the mechanism becomes `fold._record`.
 - Every `test_synthesis.py` assertion of the form `f.merged_into == syn.id` / `f.status == TRIVIAL` — the Option A projection is what keeps them green, and that is the regression guard for the whole swap.
-- All of `test_api.py`, all of `test_retrieval.py`, `test_full_log_replay_into_a_fresh_store_converges_with_the_original_stream`, `test_synthesize_self_heals_a_session_whose_last_push_failed`.
+- All of `test_retrieval.py`, `test_full_log_replay_into_a_fresh_store_converges_with_the_original_stream`, `test_synthesize_self_heals_a_session_whose_last_push_failed`, and **all of `test_api.py` except `test_full_flow_push_watermark_query`**.
 - `test_a_push_larger_than_the_candidate_window_is_not_starved` and `test_push_larger_than_candidate_window_reaches_the_merge_prompt_via_the_route` — `pushed` stays unconditional, so both stay green **unedited**.
 - `test_superseded_findings_are_never_candidates`, `test_coverage_line_reports_what_was_searched`, `test_select_is_usable_without_a_store` (branch).
 - Both tests in `packages/orchestrator/tests/test_end_to_end.py`.
 
 ---
 
+### Task 0: de-risk the demo — TODAY, MANUAL, against `main`
+
+**Box: 90 min. Needs a second human, the shared credit pool, and a second machine. Do this before Task 1.**
+
+> **Why this is first and not last.** Everything in Tasks 1–12 is a refactor of code that already passes 387 tests offline. **None of it reduces the probability that the demo fails on Aug 7 for a reason nobody has looked at yet** — a wrong host binding, the `mcp==1.9.4` pin on an ARM64 Windows teammate, a live 8B returning a schema `FakeProvider` never produced, an exhausted credit pool. Revision 0 scheduled those two steps last, manual, with no time estimate, on a clock with no slack. That is the classic inversion: certain work first, uncertain work last.
+>
+> `main` is green, it runs the whole loop, and it needs none of this integration. Boot it once against the real 8B; run it once over real sockets. **If either surfaces a problem you have two days to fix it. If you find it on Aug 7 you have none.**
+
+**Files:**
+- Create: `.measurements/` + one line in `.gitignore`
+- Modify: `docs/STATE.md`
+
+**Interfaces:** none. This task changes no code.
+
+- [ ] **Step 1: Pin the fallback and make room for the measurement files**
+
+```bash
+export PATH="/opt/homebrew/bin:$PATH"
+cd /Users/siddharthsingh/Dev/synapse
+git switch main
+git status --short                                   # must be clean
+uv run pytest -q                                     # must be 387 passed
+git tag demo-fallback main
+mkdir -p /Users/siddharthsingh/Dev/synapse/.measurements
+```
+
+Add to `/Users/siddharthsingh/Dev/synapse/.gitignore`, under the `# Worker runtime state` block:
+
+```
+# Recall-harness output. Cross-task baselines (Task 7 → Task 12) live here
+# rather than in /tmp, which does not survive a reboot between Aug 5 and Aug 6.
+.measurements/
+```
+
+- [ ] **Step 2 (MANUAL — Cirrascale): boot `main` against the real 8B, once**
+
+```bash
+export PATH="/opt/homebrew/bin:$PATH"
+cd /Users/siddharthsingh/Dev/synapse
+SYNAPSE_SYNTHESIZER=aic100 INFERENCE_CLOUD_API_KEY=... uv run synapse-service &
+sleep 2
+curl -s -X POST localhost:8899/v1/sessions \
+     -H 'content-type: application/json' \
+     -d '{"purpose":"live smoke","created_by":"siddsing"}'
+```
+
+Take the `shared_id` from that response, push the `seg-005` pair (the one fixture pair that *should* merge), then read the watermark and run the three demo queries:
+
+```bash
+SID=sh-XXXXXXXX
+curl -s -X POST localhost:8899/v1/sessions/$SID/findings \
+     -H 'content-type: application/json' \
+     -d @/Users/siddharthsingh/Dev/synapse/fixtures/findings/seg-005a.json
+curl -s -X POST localhost:8899/v1/sessions/$SID/findings \
+     -H 'content-type: application/json' \
+     -d @/Users/siddharthsingh/Dev/synapse/fixtures/findings/seg-005b.json
+curl -s "localhost:8899/v1/sessions/$SID/watermark?agent_session=as-live"
+for Q in "what do we know about timing" \
+         "why does the decode fail" \
+         "what should I avoid touching"; do
+  curl -s -X POST localhost:8899/v1/sessions/$SID/query \
+       -H 'content-type: application/json' \
+       -d "{\"query\":\"$Q\",\"agent_session\":\"as-live\"}"
+  echo
+done
+```
+
+**Write down, in `docs/STATE.md`:**
+1. HTTP status of every call. Anything that is not 200/201 is the finding.
+2. Whether the 8B's verdict validated. `AIC100Provider` gates `schema_valid=True` behind a structural check and retries once with a repair prompt at `temperature=0.2` — **if the repair fires, say so**, because that is the shape `FakeProvider` never produces.
+3. Whether `seg-005a`/`seg-005b` merged, and the synthesized text verbatim. **Merge quality is unvalidated either way** — this is the first look anyone has had at it.
+4. The three query answers, verbatim. **These are the `main` half of Task 13's A/B.** Without them, Task 9 ships with no evidence it did not make retrieval worse.
+5. Credits consumed. The pool is shared.
+
+- [ ] **Step 3 (MANUAL — two machines): the real-socket run**
+
+The closed-loop tests are in-process ASGI by design ("zero sockets"). Run worker → orchestrator → a **teammate-hosted** service over real HTTP, once, on `main`:
+
+```bash
+# machine A (teammate): the service, bound where machine B can reach it
+uv run synapse-service --host 0.0.0.0 --port 8899
+
+# machine B (you): orchestrator pointed at machine A, then a worker join + run
+uv run synapse-orchestrator --service-url http://<machine-A>:8899
+uv run synapse-worker join <shared_id>
+uv run synapse-worker run
+```
+
+**Write down:** whether `--host 0.0.0.0` was needed (the default binding is `127.0.0.1`, which is invisible from another machine — this is the single most likely demo failure and it costs one flag); whether the teammate's sync hit the **`mcp==1.9.4`** trap (trap #5, live, and it fires on the first ARM64 Windows teammate); and the wall-clock latency of one contribute → query round trip over the real link.
+
+- [ ] **Step 4: Record, then commit on `main`**
+
+Add the observations to `docs/STATE.md` under `## What remains`, converting the two open items into records of what was actually seen. Then:
+
+```bash
+export PATH="/opt/homebrew/bin:$PATH"
+cd /Users/siddharthsingh/Dev/synapse
+uv run pytest -q
+git add docs/STATE.md .gitignore
+git commit -m "docs: live 8B smoke + two-machine real-socket run against main, recorded (Plan E Task 0)"
+```
+
+Expected: `387 passed` — this task changes no code.
+
+**Exit gate:** `demo-fallback` exists; the real 8B has answered a real query on `main` and the answers are written down; the loop has crossed a real socket between two machines; every surprise found is either fixed or has an owner. **Only now does Task 1 start.**
+
+---
+
 ### Task 1: the storage seam, made real
 
-**Lands on `main`, before any merge, with the 387 green as the guard. Nothing else may start until this is done.**
+**Box: 45 min. Lands on `main`, before any merge, with the 387 green as the guard. Nothing else may start until this is done.**
 
 Plan C.2 promised "a narrow interface." What shipped is bypassed for every verdict write — synthesis applies verdicts by mutating objects the store handed back:
 
@@ -178,7 +421,12 @@ def test_supersede_tombstones_every_live_source_and_lands_the_result():
 def test_supersede_leaves_an_already_superseded_source_pointing_at_its_first_successor():
     """A merge is the only irreversible act in the system; re-superseding an
     already-merged source would silently rewrite lineage that a human may need
-    to read back."""
+    to read back.
+
+    Task 6 keeps this property through a DIFFERENT mechanism -- the registry
+    pre-filters `live` before calling `SharedMemory.merge`, because the fold
+    itself is last-merge-wins. That divergence is stated and pinned in Task 6
+    Step 2; this test is the reason it had to be."""
     store, sid = _store()
     store.upsert(sid, [_finding("f-1")])
     store.supersede(sid, ["f-1"], _synth("syn-1", ["f-1"]))
@@ -373,11 +621,13 @@ The forward-resolution loop then iterates `pending` instead of `ctx.conflicts`, 
             ...
         store.set_context(shared_id, working_memory=verdicts.working_memory,
                           conflicts=resolved)
-        store.bump_version(shared_id)                               # 4. exactly once
+        store.bump_version(shared_id)           # 4. exactly once per VERDICT ROUND
         return store.get_context(shared_id)
 ```
 
 > `verdicts.working_memory` is already `str | None`, and `set_context`'s `None`-means-leave-alone is exactly the `if verdicts.working_memory is not None:` guard it replaces. The `return store.get_context(shared_id)` re-read is deliberate: `ctx` was captured before the writes and callers assert on `ctx.conflicts` / `ctx.working_memory` after the call.
+>
+> **The `bump_version` comment says "verdict round", not "merge".** It fires whether or not `verdicts.merges` was empty — see Global Constraints. Do not "fix" it in this task.
 
 - [ ] **Step 5: Run, then commit**
 
@@ -386,7 +636,7 @@ export PATH="/opt/homebrew/bin:$PATH"
 cd /Users/siddharthsingh/Dev/synapse && uv run pytest -q
 ```
 
-Expected: **`392 passed`** (387 + the 5 new seam tests). The 387 are unchanged — if `test_synthesis.py` or `test_api.py` moved at all, the refactor was not lossless.
+Expected: **`392 passed`** (387 + the 5 new seam tests). **This total is binding** (Global Constraints): the 387 are unchanged, and if `test_synthesis.py` or `test_api.py` moved at all, the refactor was not lossless.
 
 ```bash
 cd /Users/siddharthsingh/Dev/synapse
@@ -399,6 +649,8 @@ git commit -m "refactor(service): explicit verdict write path — supersede/mark
 ---
 
 ### Task 2: the merge — seven conflicts, two clean auto-merges, two renames
+
+**Box: 60 min.**
 
 **Merge, do not cherry-pick.** The two checkouts share one object store (`synapse-exec/brain` is a worktree of this repo; merge-base `8695eed` = pre-E3 `main`, branch head `d491956`, two commits), so a real merge keeps the teammate's commits and authorship in history while git hands over the collisions as a checklist instead of us reconstructing them by hand.
 
@@ -473,7 +725,7 @@ uv.lock
 | `CONTEXT.md` | **Auto-merged; verify, do not re-resolve.** Task 4 owns the verification and the remaining edits. |
 | root `pyproject.toml` | **Auto-merged to `main`'s content.** Nothing to do. Task 4 edits `testpaths`. |
 | `docs/STATE.md` | **Ours**, plus the branch's `## The topic lane is on notice` section folded in verbatim as a new section before `## Traps worth re-reading`. That honesty is worth keeping and Task 12 writes into it. |
-| `docs/plans/README.md` | **Ours** — six invariants. The branch's copy predates E2 and has five. |
+| `docs/plans/README.md` | **Ours** — six invariants. The branch's copy predates E2 and has five. **Then fix the header** (below). |
 | `uv.lock` | **Ours**, then regenerate (Step 5). |
 | `packages/service/pyproject.toml` | **Ours, unconditionally.** Theirs declares only `synapse-contracts`, drops `starlette`/`uvicorn`/`httpx`, and — decisively — drops `[project.scripts] synapse-service = "synapse_service.cli:main"`. The imports keep working by accident (`mcp==1.9.4` pulls starlette/uvicorn/httpx into the shared workspace venv); **the vanished entry point breaks the demo launch immediately and silently.** |
 | `packages/service/src/synapse_service/store.py` | **Ours.** Theirs moves to the new path `memory.py` (Step 3). |
@@ -490,6 +742,15 @@ git checkout --ours docs/STATE.md docs/plans/README.md uv.lock \
 
 `packages/service/src/synapse_service/__init__.py` is left conflicted on purpose — Step 4 overwrites it wholesale.
 
+> **⟨REVISION 1⟩ Fix the header while you are in this file.** `docs/plans/README.md:63` reads `**Five invariants every plan must preserve:**` above a numbered list of **six** — invariant 6 (`⟨2026-08-04⟩ The on-device Distiller compresses; it does not judge`) was appended without moving the count. Resolving this file "ours — six invariants" is true of the content and false of its own header. One word:
+>
+> ```
+>   was:  **Five invariants every plan must preserve:**
+> becomes: **Six invariants every plan must preserve:**
+> ```
+>
+> This is the moment: the file is already open and already being resolved. Every plan in the repo is written against that list, and a reader who counts five stops at invariant 5.
+
 Then open `/Users/siddharthsingh/Dev/synapse/docs/STATE.md` and paste the branch's section verbatim (source: `/Users/siddharthsingh/Dev/synapse-exec/brain/docs/STATE.md`, the `## The topic lane is on notice` section, line 65), placed immediately before `## Traps worth re-reading`.
 
 Confirm the two auto-merges landed what this task claims they did:
@@ -498,9 +759,10 @@ Confirm the two auto-merges landed what this task claims they did:
 cd /Users/siddharthsingh/Dev/synapse
 grep -c '^\*\*Triage\*\*:\|^\*\*Distiller\*\*:\|^\*\*View\*\*:\|^\*\*Lane\*\*:\|^\*\*Candidate\*\*:\|^\*\*Lane yield\*\*:' CONTEXT.md
 git diff main -- pyproject.toml | head -1
+grep -n 'invariants every plan must preserve' docs/plans/README.md
 ```
 
-Expected: `6`, and **no output** from the second command. A `5` or lower means the auto-merge did not do what was verified here and Task 4's test will tell you which term is gone.
+Expected: `6`, **no output** from the second command, and `Six invariants every plan must preserve` from the third. A `5` or lower on the first means the auto-merge did not do what was verified here and Task 4's test will tell you which term is gone.
 
 - [ ] **Step 3: The two renames — so the collision stops being one**
 
@@ -570,6 +832,11 @@ Two layers, deliberately named apart (Plan E Task E.2):
                     Log, a View or an Entry.
 
 Together they are CONTEXT.md's **Shared Memory**.
+
+`Appended` is exported because it is the branch's public return type for
+`append`/`merge`. Nothing consumes it. Its `.version` field carries
+`Log.version`, which is NOT `SessionContext.memory_version` and must never be
+reported as a watermark -- see Task 5 Step 3.
 """
 
 from __future__ import annotations
@@ -647,7 +914,7 @@ uv run pytest -q
 Expected:
 - `imports ok`
 - collection reports **467 tests** with **no import error and no duplicate module basename**.
-- `467 passed`
+- `467 passed` — **this total is binding.**
 
 > **⟨CORRECTION vs. the spec⟩ The merge adds 75 tests, not 266.** The branch's suite *is* 266 tests, but 191 of those are files identical to the merge-base `8695eed`, which is an ancestor of `main` — merging them changes nothing. What the merge actually brings, verified from `git diff --name-status 8695eed d491956`, is eight new service test files: `test_fold.py` (10) + `test_lanes.py` (12) + `test_lexical.py` (8) + `test_log.py` (6) + `test_recall.py` (7) + `test_semantic.py` (14) + `test_symbols.py` (10) = 67, plus the branch's `test_store.py` (8) landing at the new path `test_memory.py`. **75.** No `parametrize` in any of them, so the source count is the collected count.
 >
@@ -675,15 +942,21 @@ git log --oneline -6 --format='%h %an %s' | head -6
 
 Expected: the merge commit, plus **the teammate's two commits with their authorship intact** (`d491956`, `78dd9a3`).
 
-**Exit gate:** one merge commit on `feat/brain-integration`, 467 collected and green, `uv run synapse-service` starts, teammate's authorship present. **Nothing pushed.**
+**Exit gate:** one merge commit on `feat/brain-integration`, 467 collected and green, `uv run synapse-service` starts, `docs/plans/README.md` says "Six invariants", teammate's authorship present. **Nothing pushed.**
 
 ---
 
 ### Task 3: ADR 0004 lands on `main`, with a dated amendment
 
+**Box: 15 min. Droppable (tier 3).**
+
+> **⟨ARGUING BACK, and then compressing⟩** One review asked for this task to be cut to a single paragraph — the "do not sell this as a bug fix" warning — with A1/A2/A3 deferred. **The warning alone is not enough, and here is the specific reason.** A3 is not commentary: it is the design decision that Task 5 *implements*, and the next person to read `fold.py` will find a fifth entry kind the ADR above it does not mention. An ADR that describes four kinds while the code has five is how the false Context got written in the first place. Likewise the Option A closure, which `CONTEXT.md`, `STATE.md` and `store.py`'s class docstring all cite by name.
+>
+> **What is deferred instead:** A2's full argument (the fold-order correction) drops to two lines, A1's three supporting arguments drop to their headlines, and the "One Consequence to record" section merges into A1. Revision 0's ~110 lines become ~45. The claims that survive are exactly the ones another file already references.
+
 ADR 0004 arrives through Task 2's merge as a theirs-only file, **text unedited**, status `Accepted (2026-08-05)` unchanged. The corrections go in an appended, dated, separately-attributed section — the teammate's argument stays theirs.
 
-**Why it is adopted at all, given that its motivating bug is false.** Both reviews ran the code rather than reading it and agree: the resync-resurrects-a-merged-finding scenario is true of a whole-object upsert (`table[f.id] = f`) and `main` never shipped one. `store.py:58` is `if finding.id not in table`; the module docstring names FIRST-WRITE-WINS and gives exactly that scenario as its reason; it is pinned three ways. Adopted anyway, for three reasons the ADR does not currently give — property beats discipline as we add write paths, it closes the producer-forged-verdict hole for free, and it is the enabling step for durability.
+**Why it is adopted at all, given that its motivating bug is false.** Both reviews ran the code rather than reading it and agree: the resync-resurrects-a-merged-finding scenario is true of a whole-object upsert (`table[f.id] = f`) and `main` never shipped one. `store.py:58` is `if finding.id not in table`; the module docstring names FIRST-WRITE-WINS and gives exactly that scenario as its reason; it is pinned three ways. Adopted anyway, for three reasons the ADR does not currently give.
 
 > **This must not be sold to the team as a bug fix.** Leaving the Context as written invites someone to merge a synthesis rewrite two days before the demo to close a hole that is not open.
 
@@ -691,7 +964,7 @@ ADR 0004 arrives through Task 2's merge as a theirs-only file, **text unedited**
 - Modify: `docs/adr/0004-the-log-is-append-only-and-state-is-a-fold.md` (append only — do not touch a word above the new heading)
 - Modify: `docs/STATE.md`
 
-**Interfaces:** none. Documentation. Its claims are pinned by tests in Tasks 5 and 6, named below — an ADR whose claims no test pins is how the false Context got written in the first place.
+**Interfaces:** none. Documentation. Its claims are pinned by tests in Tasks 5 and 6, named below — an ADR whose claims no test pins is how the false Context got written.
 
 - [ ] **Step 1: Append the amendment**
 
@@ -712,44 +985,39 @@ because the argument above is its author's and the corrections here are not.
 **The motivating bug is FALSE against `main`.** The Context's resync scenario
 ("#41 is written again with its verdict fields at their defaults ... the
 duplicate the merge removed is back") is true of a whole-object upsert
-(`table[f.id] = f`). `main` never shipped one. `packages/service/src/
-synapse_service/store.py:58` is `if finding.id not in table:` — FIRST-WRITE-WINS
-— and the module docstring names that rule and gives exactly this scenario as
-its reason. It is pinned three ways:
+(`table[f.id] = f`). `main` never shipped one:
+`packages/service/src/synapse_service/store.py:58` is `if finding.id not in
+table:` — FIRST-WRITE-WINS — and the module docstring names that rule and gives
+exactly this scenario as its reason. Pinned three ways:
+`test_upsert_is_first_write_wins`, `test_replayed_original_never_clobbers_a_tombstone`
+(both `packages/service/tests/test_store.py`), and
+`test_replayed_push_is_a_noop_and_skips_the_model` (`test_api.py`), which shows
+that at the route a replay never even reaches the model.
 
-- `test_upsert_is_first_write_wins` (`packages/service/tests/test_store.py`)
-- `test_replayed_original_never_clobbers_a_tombstone` (same file) — the
-  scenario, verbatim
-- `test_replayed_push_is_a_noop_and_skips_the_model`
-  (`packages/service/tests/test_api.py`) — at the route: `accepted == 0` means
-  `merge()` is never called, so a replay does not even reach the model
-
-Retarget the Context at the case that IS open: **restart** (Plan E Task E.9),
-plus the three arguments below. Read as written, the Context invites someone to
-rewrite synthesis two days before a demo to close a hole that is not open.
-
-The three arguments the ADR is actually carried by:
+**Read as written, the Context invites someone to rewrite synthesis two days
+before a demo to close a hole that is not open. Do not.** Retarget it at the
+case that IS open — **restart** — plus the three arguments the decision is
+actually carried by:
 
 1. **Property beats discipline, and we are about to add write paths.**
-   First-write-wins is a rule someone must re-apply at every future write path,
-   and its failure mode is silent. This week adds `supersede`, `mark_trivial`
-   and a projection; next week adds persistence.
+   First-write-wins must be re-applied at every future write path and fails
+   silently. This week adds `supersede`, `mark_trivial` and a projection.
 2. **It closes the producer-forged-verdict hole for free.** `api.push_findings`
    runs only `Finding.model_validate`, and the Relay POSTs to the service
-   directly. Today a FIRST push carrying `merged_into="x"` or `status=trivial`
-   lands, is excluded from retrieval forever, and cannot be corrected by any
-   later push because upsert ignores known ids. Under the fold, **visibility
-   stops reading producer-writable fields at all.** Neither review claimed
-   this; it is the strongest argument this ADR has and it was not in it.
+   directly, so today a FIRST push carrying `merged_into="x"` or
+   `status=trivial` lands and is excluded from retrieval forever, uncorrectable
+   because upsert ignores known ids. Under the fold, **visibility stops reading
+   producer-writable fields at all**, and the read accessors normalise them back
+   to `KEPT` / `None` on the way out. Neither review claimed this; it is the
+   strongest argument this ADR has and it was not in it. Pinned by
+   `test_a_forged_verdict_on_ingest_has_no_effect_on_visibility`.
 3. **It is the enabling step for durability.** A log is
    `for entry in entries: write(json)`. Mutable cross-referenced state is not.
-   `rebuild()` already proves replay is sufficient.
 
 ### A2 — the order argument is wrong; the property is stronger than claimed
 
-The Decision says the resync is inert because "entry #73 re-appends #41, but the
-`Merged` entry at #59 is still in the log and still earlier, so the fold still
-drops #41." **Order is irrelevant to that conclusion.** `fold`
+The Decision says the resync is inert because the `Merged` entry "is still
+earlier" in the log. **Order is irrelevant to that conclusion:** `fold`
 accumulates `superseded_by` across every entry and filters once at the end
 (`fold.py:107-114`), so a `Merged` entry appearing *after* the re-append
 suppresses just as well. The conclusion stands; the reasoning does not.
@@ -757,9 +1025,9 @@ suppresses just as well. The conclusion stands; the reasoning does not.
 ### A3 — a fifth entry kind, `MarkedTrivial`
 
 The four kinds cannot express synthesis's trivia verdict, yet `fold.py:113`
-reads `findings[fid].status is FindingStatus.KEPT` — a field nothing in this
-branch ever writes, and the same field this ADR tells readers to treat as
-undefined. A fifth kind is added:
+reads `findings[fid].status is FindingStatus.KEPT` — a producer-writable field
+nothing in this branch ever writes, and the same field this ADR tells readers to
+treat as undefined. A fifth kind is added:
 
 ```python
 @dataclass(frozen=True)
@@ -768,47 +1036,41 @@ class MarkedTrivial:
     kind: Literal["marked_trivial"] = "marked_trivial"
 ```
 
-and visibility becomes `fid not in superseded_by and fid not in trivial`. The
+Visibility becomes `fid not in superseded_by and fid not in trivial`, and the
 fold stops reading `Finding.status` entirely. **This is what preserves
 `adr/0003`:** durability judgment has exactly two homes — triage upstream (Plan
 A.5b) and synthesis's trivia verdict downstream — and adopting the four kinds
-as-is would have deleted one of them.
-
-Pinned by **`test_marked_trivial_round_trips_through_rebuild`**
-(`packages/service/tests/test_fold.py`).
+as-is would have deleted one of them. Pinned by
+**`test_marked_trivial_round_trips_through_rebuild`** (`test_fold.py`).
 
 ### Option A, closed
 
-The Consequences leave Option A (project on egress) vs Option B (drop the
-fields from the contract) open, calling it "a team decision, not a resolved
-one." **Decided: Option A, 2026-08-05.** Option B is a three-track contract
-break two days before the demo, for no gain.
+The Consequences leave Option A (project on egress) vs Option B (drop the fields
+from the contract) open, calling it "a team decision, not a resolved one."
+**Decided: Option A, 2026-08-05.** Option B is a three-track contract break two
+days before the demo, for no gain.
 
-The Follow-up asks for the projection "at the ingest boundary rather than
-inside the store." **We deviate, deliberately**, and put it in the store's read
-accessors (`get`, `all_findings`, `retrievable`, `candidates`):
+The Follow-up asks for the projection "at the ingest boundary rather than inside
+the store." **We deviate, deliberately**, and put it in the store's read
+accessors (`get`, `all_findings`, `retrievable`, `candidates`): the store is the
+only component holding the View, so it is the narrowest place the projection can
+live **where no caller can forget it** — and it is what lets ~380 existing tests
+keep passing unchanged, including every `test_synthesis.py` assertion of the
+form `f.merged_into == syn.id`. That is not a convenience; it is the regression
+guard for the whole swap. The projection is a **deep** copy
+(`model_copy(deep=True)`): a shallow one shares `attributions`/`refs`/
+`merged_from` with the record inside the fold, which is the same class of
+mutation-through-reference this whole change exists to remove.
 
-- The store is the only component holding the View, so it is the narrowest
-  place the projection can live **where no caller can forget it**.
-  `retrieval.py` never touches a store and must stay that way; `api.py`
-  serialises whatever it is handed.
-- It is what lets ~380 existing tests keep passing unchanged, including every
-  `test_synthesis.py` assertion of the form `f.merged_into == syn.id`. That is
-  not a convenience — it is the regression guard for the whole swap.
-- The store keeps exactly one internal representation of supersession, which is
-  what the Follow-up actually cares about.
+### One correction of vocabulary, so the next reader does not inherit it
 
-Pinned by **`test_a_forged_verdict_on_ingest_has_no_effect_on_visibility`**
-(`packages/service/tests/test_store.py`).
-
-### One Consequence to record that the ADR does not claim
-
-**Visibility no longer reads producer-writable fields, so a forged verdict on
-ingest is inert.** A first push carrying `status=trivial` and
-`merged_into="whatever"` is retrievable anyway, and the copy handed back to any
-consumer carries `status=KEPT`, `merged_into=None`. That is a security property
-this decision buys today, for free, and it is not a consequence of any argument
-the original text makes.
+`SessionContext.memory_version` counts **verdict rounds applied**, not merges
+completed: `synthesis.merge` calls `bump_version` once at the end of every
+structurally-valid verdict, `"merges": []` included. `/findings`'s
+`synthesized: true` therefore means "a verdict round was applied". This is
+stated here because a second counter (`Log.version`, the entry count, internal
+to `SharedMemory` and used only for fold-cache invalidation) is being carefully
+distinguished from it in the same week.
 ```
 
 - [ ] **Step 2: Record the closure in `docs/STATE.md`**
@@ -816,7 +1078,7 @@ the original text makes.
 `main`'s `docs/STATE.md` has no "Open, unchanged" section (E4's merge closed it); the branch's entry on `merged_into`/`status` therefore does not arrive. Add the closure explicitly under `## What remains`, as a **checked** item so it reads as closed rather than pending:
 
 ```markdown
-- [x] **`Finding.merged_into` / `Finding.status` on egress — DECIDED 2026-08-05: Option A.** The service derives supersession and trivia from the fold and never writes those fields; the store's read accessors project them back onto every Finding handed out, so the contract is unchanged and every existing consumer keeps working. `adr/0004`'s Amendment (2026-08-05) records the reasoning and the deliberate deviation from its own Follow-up (projection in the store's read accessors, not at the ingest boundary). Treating them as "undefined on anything the service returns" is no longer correct.
+- [x] **`Finding.merged_into` / `Finding.status` on egress — DECIDED 2026-08-05: Option A.** The service derives supersession and trivia from the fold and never writes those fields; the store's read accessors project them back onto every Finding handed out (as a deep copy), so the contract is unchanged and every existing consumer keeps working. `adr/0004`'s Amendment (2026-08-05) records the reasoning and the deliberate deviation from its own Follow-up. Treating them as "undefined on anything the service returns" is no longer correct.
 ```
 
 - [ ] **Step 3: Verify nothing above the amendment moved, then commit**
@@ -832,7 +1094,7 @@ Expected: **no output.** A single `-` line means the teammate's text was edited;
 ```bash
 uv run pytest -q
 git add docs/adr/0004-the-log-is-append-only-and-state-is-a-fold.md docs/STATE.md
-git commit -m "docs(adr): ADR 0004 amendment — false Context retargeted, order argument corrected, MarkedTrivial, Option A closed (Plan E.3)"
+git commit -m "docs(adr): ADR 0004 amendment — false Context retargeted, MarkedTrivial, Option A closed, memory_version glossed correctly (Plan E.3)"
 ```
 
 Expected: `467 passed` — unchanged from Task 2. This task is documentation; a moved count means a stray edit.
@@ -843,11 +1105,15 @@ Expected: `467 passed` — unchanged from Task 2. This task is documentation; a 
 
 ### Task 4: `CONTEXT.md` vocabulary
 
+**Box: 20 min. Droppable (tier 2).**
+
+> **⟨ARGUING BACK⟩ One review asked for this task to be cut to post-demo entirely, on the grounds that it "protects against a future bad merge, not against Aug 7."** That is true of the vocabulary *definitions* and false of the test. The bad merge this test defends against is **the one in Task 2, today** — the brain branch forked before E2, and taking its `CONTEXT.md` wholesale silently un-says `adr/0003` by deleting **Triage** and **Distiller**. Task 2 got the good auto-merge, but nobody will re-verify that by hand on Aug 6 when a conflict is re-resolved under time pressure. The test is 30 lines and 10 minutes.
+>
+> **The review's sharper point is conceded:** a `testpaths` change in the root `pyproject.toml` two days out is a pytest-runner change for a docs test. It is kept, but it is **purely additive** (`["packages"]` → `["packages", "tests"]`), Step 2 verifies collection moved by exactly the number of tests added, and the task is **droppable at tier 2** — one `git revert` and the runner config goes with it.
+
 The vocabulary is the one document every plan is written against, and this integration introduces three ideas it has no words for. This task both **adds** and **defends**.
 
 > **What Task 2's auto-merge already did, verified against the merge result.** `CONTEXT.md` three-way-merged cleanly and the outcome is the one this task wanted: `**Triage**`, `**Distiller**` and "triages" in the Edge Worker definition are all still there (the branch never touched that region), the branch's whole `### Storage and retrieval` section is inserted after `**Conflict**:` and before `## Notes`, and both of the branch's new Notes bullets are appended. **So steps (a) and the "revert what taking theirs would delete" half of Plan E.4 are already done by git.** What remains is the part git cannot do: two definitions that exist on neither side, one revised entry, and one stale sentence.
->
-> The test below is still written, and still first — it is what turns "verified once, by hand, on 2026-08-05" into something that stays true.
 
 **Files:**
 - Modify: `CONTEXT.md`
@@ -858,7 +1124,7 @@ The vocabulary is the one document every plan is written against, and this integ
 
 - [ ] **Step 1: Write the failing test**
 
-Root `pyproject.toml` currently has `testpaths = ["packages"]`, so a repo-root `tests/` directory is **not collected**. Change it first:
+Root `pyproject.toml` currently has `testpaths = ["packages"]`, so a repo-root `tests/` directory is **not collected**. Change it first — this is the whole config delta:
 
 ```toml
 [tool.pytest.ini_options]
@@ -976,23 +1242,37 @@ def test_the_tombstone_ENTRY_says_derived_condition_not_just_the_notes():
     assert "_Avoid_: deleted, dropped, duplicate" in entry   # kept as it stands
 
 
+def test_the_topic_entry_records_that_the_governing_lane_is_off():
+    """The definition must describe the system that ships. `select()` runs the
+    topic lane only behind a flag whose default was measured at zero yield
+    (Task 7), so a definition selling topics as the way a decision REACHES a
+    Finding it shares no vocabulary with describes a capability deliberately
+    disabled."""
+    entry = _entry(CONTEXT.read_text(encoding="utf-8"), "Topic")
+    assert "measured at zero yield" in entry
+
+
 def test_the_notes_state_option_a_as_closed():
     assert "Option A, closed 2026-08-05" in CONTEXT.read_text(encoding="utf-8")
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [ ] **Step 2: Run to verify it fails, and that the runner change did nothing else**
 
 ```bash
 export PATH="/opt/homebrew/bin:$PATH"
-cd /Users/siddharthsingh/Dev/synapse && uv run pytest tests/test_vocabulary.py -q
+cd /Users/siddharthsingh/Dev/synapse
+uv run pytest -q --collect-only 2>&1 | tail -3
+uv run pytest tests/test_vocabulary.py -q
 ```
 
-Expected: exactly two failures.
+Expected from `--collect-only`: **473 tests** (467 + the 6 in this file) and **no other new path**. If the number is anything else, `testpaths = ["packages", "tests"]` picked up a directory nobody expected — revert the `pyproject.toml` line before going further.
+
+Expected from the run: exactly three failures.
 - `test_every_term_the_plans_use_is_defined_in_context_md` fails with `missing ['Fold', 'Topic']` — **not** the six the spec predicted, because Task 2's auto-merge already delivered View / Lane / Candidate / Lane yield. If it reports those four as missing too, the auto-merge did not happen as verified and Task 2 needs re-checking before you edit a word.
 - `test_the_tombstone_ENTRY_says_derived_condition_not_just_the_notes` fails.
 - `test_the_notes_state_option_a_as_closed` fails.
 
-(The `Edge Worker` / stale-phrase tests: `test_the_edge_worker_still_triages` should already **pass** — that is the auto-merge being verified rather than trusted. `test_the_projection_question_is_no_longer_described_as_open` fails on `CONTEXT.md`'s Notes bullet.)
+Plus `test_the_topic_entry_records_that_the_governing_lane_is_off` fails (there is no **Topic** entry yet) and `test_the_projection_question_is_no_longer_described_as_open` fails on `CONTEXT.md`'s Notes bullet — five red in total. `test_the_edge_worker_still_triages` should already **pass**: that is the auto-merge being verified rather than trusted.
 
 - [ ] **Step 3: Edit `CONTEXT.md`**
 
@@ -1006,7 +1286,7 @@ The pure function that replays the Finding Log in order and produces the View. D
 _Avoid_: reduce, replay (the recovery path is a resync, not a fold), rebuild (that is re-deriving the indexes), projection
 
 **Topic**:
-A cluster of Findings grouped by cosine against a centroid — geometry decides membership, and a label only ever describes it. Topics exist to reach a decision that *governs* a Finding it shares no vocabulary with. A Topic is never an input to what is durable.
+A cluster of Findings grouped by cosine against a centroid — geometry decides membership, and a label only ever describes it. Topics exist to reach a decision that *governs* a Finding it shares no vocabulary with. A Topic is never an input to what is durable. **As shipped, the governing lane is off**: it was measured at zero yield (0 partners, 0 uniquely, at 422 findings and at 2,022), so topics currently earn their place as *labels* in the arrival briefing, not as a retrieval lane.
 _Avoid_: cluster, category, tag, label (a label is a Topic's name, not the Topic), theme
 ```
 
@@ -1032,7 +1312,7 @@ _Avoid_: deleted, dropped, duplicate, superseded, archived
 
 That single sentence is what `test_the_projection_question_is_no_longer_described_as_open` and `test_the_notes_state_option_a_as_closed` are both pinning.
 
-**(e)** Confirm the E2-era entries are still present and untouched: **Triage**, **Distiller**, and "triages" in the **Edge Worker** definition. Verified present in the auto-merge result — this step is a read, not an edit, and `test_every_term_the_plans_use_is_defined_in_context_md` plus `test_the_edge_worker_still_triages` keep it that way permanently.
+**(e)** Confirm the E2-era entries are still present and untouched: **Triage**, **Distiller**, and "triages" in the **Edge Worker** definition. Verified present in the auto-merge result — this step is a read, not an edit, and the two tests above keep it that way permanently.
 
 - [ ] **Step 4: Run, then commit**
 
@@ -1041,7 +1321,7 @@ export PATH="/opt/homebrew/bin:$PATH"
 cd /Users/siddharthsingh/Dev/synapse && uv run pytest -q
 ```
 
-Expected: **`471 passed`** (467 + 4 vocabulary tests). The count moving by anything other than +4 means `testpaths = ["packages", "tests"]` picked up something unexpected — check that no other repo-root `tests/` directory exists.
+Expected: **`473 passed`** (467 + 6). All six test functions in the file collect and pass — including `test_the_topic_entry_records_that_the_governing_lane_is_off`, which pins a clause added in this same task. Revision 0's chain said +4 here; it was wrong, and every downstream total in the [count chain](#the-count-chain) moved with the correction.
 
 ```bash
 cd /Users/siddharthsingh/Dev/synapse
@@ -1049,11 +1329,13 @@ git add CONTEXT.md pyproject.toml tests/test_vocabulary.py
 git commit -m "docs(context): Fold/Topic added, Tombstone entry now derived, Option A closure recorded — pinned by tests/test_vocabulary.py (Plan E.4)"
 ```
 
-**Exit gate:** `CONTEXT.md` carries the branch's section (from the merge), the two additions, the revised Tombstone entry, the amended Notes bullet, and every E2-era definition still present — with a test that fails if any of that is ever deleted again, and that is not vacuous on the two claims this task actually makes.
+**Exit gate:** `CONTEXT.md` carries the branch's section (from the merge), the two additions, the revised Tombstone entry, the amended Notes bullet, and every E2-era definition still present — with a test that fails if any of that is ever deleted again, and that is not vacuous on the claims this task actually makes.
 
 ---
 
 ### Task 5: the fold gains a fifth entry kind
+
+**Box: 30 min.**
 
 Pure package work: **no route, no registry, no model.** It is separated from the swap precisely so it can be proven against the branch's own 75 service tests before anything on the demo path moves.
 
@@ -1150,7 +1432,7 @@ cd /Users/siddharthsingh/Dev/synapse && uv run pytest packages/service/tests/tes
 
 Expected: `ImportError: cannot import name 'MarkedTrivial' from 'synapse_service.log'`.
 
-- [ ] **Step 3: Add the fifth entry kind**
+- [ ] **Step 3: Add the fifth entry kind, and fix two docstrings that name the wrong counter**
 
 In `packages/service/src/synapse_service/log.py`, after `Merged` and before `TopicAssigned`:
 
@@ -1179,7 +1461,7 @@ Extend the union:
 Entry = Union[FindingAppended, Merged, MarkedTrivial, TopicAssigned, TopicSplit]
 ```
 
-Change the module docstring's "Four entry kinds" paragraph to "Five entry kinds", and correct `Log.version`'s docstring — this is the counter that must never leave the store:
+Change the module docstring's "Four entry kinds" paragraph to "Five entry kinds", and correct `Log.version`'s docstring:
 
 ```python
     @property
@@ -1188,13 +1470,34 @@ Change the module docstring's "Four entry kinds" paragraph to "Five entry kinds"
 
         Its only job is invalidating the fold cache in `SharedMemory.view()`.
 
-        It is **not** `SessionContext.memory_version` and must never leave the
-        store. `memory_version` counts MERGES COMPLETED and is what the
-        watermark reports; taking this number instead would make `synthesized`
-        True on every push including a pure replay, and turn `new_since` into a
-        count of log entries (2+ per finding).
+        It is **not** `SessionContext.memory_version` and must never be reported
+        as a watermark. `memory_version` counts VERDICT ROUNDS APPLIED -- it is
+        bumped once at the end of every structurally-valid synthesis verdict,
+        merges or not -- and that is what `/findings`, `/synthesize` and
+        `/watermark` report. Taking this number instead would make
+        `synthesized` True on every push including a pure replay, and turn
+        `new_since` into a count of log entries (2+ per finding).
         """
         return len(self.entries)
+```
+
+> **⟨CORRECTION vs. revision 0⟩** Revision 0's version of this docstring said `memory_version` "counts MERGES COMPLETED". It does not — `synthesis.py:273` bumps unconditionally, and `test_full_flow_push_watermark_query` pushes under `MERGE_NOOP` and asserts `memory_version == 1`. See Global Constraints.
+
+And in `packages/service/src/synapse_service/memory.py`, give `Appended.version` the sentence that keeps it from being wired to a watermark later:
+
+```python
+@dataclass(frozen=True)
+class Appended:
+    """Result of appending. `topic_founded` is the only thing owing a model call."""
+
+    finding_id: FindingId
+    topic_id: TopicId
+    topic_founded: bool
+    version: int
+    """`Log.version` -- the ENTRY COUNT, internal. Nothing consumes this field
+    today, which is exactly the condition under which someone wires it to a
+    watermark later. It is not `SessionContext.memory_version`. If you need a
+    number for a client, `store.get_context(sid).memory_version` is the one."""
 ```
 
 - [ ] **Step 4: Teach the fold about it**
@@ -1268,7 +1571,7 @@ and in `rebuild()`, add the replay branch so the round-trip test can pass:
                 self.mark_trivial(entry.finding_ids)
 ```
 
-Import `MarkedTrivial` in `memory.py`, and export it from `packages/service/src/synapse_service/__init__.py` (import line and `__all__`).
+Import `MarkedTrivial` in `memory.py`, and export it from `packages/service/src/synapse_service/__init__.py` (import line and `__all__` — 29 names now).
 
 - [ ] **Step 6: Run, then commit**
 
@@ -1282,9 +1585,10 @@ import ast, pathlib, synapse_service
 src = (pathlib.Path(synapse_service.__file__).parent / 'fold.py').read_text()
 assert 'FindingStatus' not in src, 'fold.py still reads a producer-writable field'
 print('fold.py no longer imports FindingStatus')"
+grep -n '\.version' packages/service/src/synapse_service/api.py | grep -v memory_version
 ```
 
-Expected: `474 passed` overall (471 + 4 new − 1 deleted). `fold.py no longer imports FindingStatus`.
+Expected: `476 passed` overall (473 + 4 new − 1 deleted). `fold.py no longer imports FindingStatus`. **No output from the final `grep`** — the only version an HTTP client ever sees is `memory_version`. If that grep prints a line, `Log.version` has escaped and the two counters have started to merge.
 
 ```bash
 cd /Users/siddharthsingh/Dev/synapse
@@ -1292,11 +1596,13 @@ git add packages/service
 git commit -m "feat(service): MarkedTrivial — the fifth entry kind; the fold stops reading Finding.status (adr/0004 A3, Plan E.5)"
 ```
 
-**Exit gate:** the trivia verdict survives a `rebuild()`, a producer-supplied `status=TRIVIAL` no longer hides a finding, and `fold.py` does not import `FindingStatus`.
+**Exit gate:** the trivia verdict survives a `rebuild()`, a producer-supplied `status=TRIVIAL` no longer hides a finding, `fold.py` does not import `FindingStatus`, and no `.version` other than `memory_version` is readable from `api.py`.
 
 ---
 
 ### Task 6: `SharedMemory` under the registry, and the Option A projection
+
+**Box: 90 min — the one most likely to overrun. If it is not green by the box, take the drop decision rather than pushing into the evening.**
 
 **The swap.** This is the first task that touches the demo path, and it is guarded by the ~380 tests that must pass **unchanged**.
 
@@ -1304,8 +1610,10 @@ git commit -m "feat(service): MarkedTrivial — the fifth entry kind; the fold s
 
 **Files:**
 - Modify: `packages/service/src/synapse_service/store.py` (the registry, rewritten below the session half)
-- Modify: `packages/service/src/synapse_service/memory.py` (`append` reads the view, not an index)
-- Modify: `packages/service/tests/test_store.py` (two rewrites + four new)
+- Modify: `packages/service/src/synapse_service/memory.py` (`append` takes an `is_new` hint)
+- Modify: `packages/service/src/synapse_service/synthesis.py` (`_resolve_forward` deleted)
+- Modify: `packages/service/tests/test_store.py` (two rewrites + five new)
+- Modify: `packages/service/tests/test_fold.py`, `packages/service/tests/test_memory.py` (one new each)
 - Modify: `packages/service/tests/test_recall.py` (two retirements)
 
 **Interfaces:**
@@ -1314,7 +1622,7 @@ git commit -m "feat(service): MarkedTrivial — the fifth entry kind; the fold s
 # packages/service/src/synapse_service/memory.py
 SharedMemory(shared_id: str, purpose: str = "", embedder: Embedder = HashingEmbedder())
 
-  append(finding: Finding) -> Appended
+  append(finding: Finding, *, is_new: bool | None = None) -> Appended
   merge(result: Finding, sources: tuple[FindingId, ...]) -> Appended
   mark_trivial(finding_ids: tuple[FindingId, ...]) -> None      # Task 5
   view() -> View
@@ -1328,7 +1636,7 @@ SharedMemory(shared_id: str, purpose: str = "", embedder: Embedder = HashingEmbe
 ```python
 # packages/service/src/synapse_service/store.py — the registry, revised
 upsert(shared_id, findings: list[Finding]) -> int          # ids NOT PREVIOUSLY SEEN
-get(shared_id, finding_id) -> Finding | None               # projected
+get(shared_id, finding_id) -> Finding | None               # projected (deep copy)
 all_findings(shared_id) -> list[Finding]                   # projected
 retrievable(shared_id) -> list[Finding]                    # projected, view.visible()
 supersede(shared_id, sources: list[FindingId], result: Finding) -> None
@@ -1336,6 +1644,7 @@ mark_trivial(shared_id, finding_ids: list[FindingId]) -> None
 set_context(shared_id, *, working_memory=None, conflicts=None) -> None
 candidates(shared_id, text: str, *, top_k=DEFAULT_TOP_K,
            exclude: frozenset[FindingId] = frozenset()) -> CandidateSet   # projected
+resolve_forward(shared_id, finding_id: FindingId) -> FindingId            # NEW, Task 6
 ```
 
 `create_session`, `get_session`, `add_member`, `get_context`, `bump_version`, `last_seen`, `mark_seen` are unchanged and load-bearing.
@@ -1375,7 +1684,9 @@ def test_retrievable_excludes_tombstones_and_trivia():
     assert len(store.all_findings(sid)) == 4           # nothing was deleted
 ```
 
-- [ ] **Step 2: Write the four new tests**
+- [ ] **Step 2: Write the five new tests — including the two that pin which layer decides supersession**
+
+> **⟨REVISION 1 — the divergence a review found, and the tests that make it intentional.⟩** The fold is **last-merge-wins**: `fold._apply` runs `superseded_by[source] = entry.result.id` unconditionally (`fold.py:145-148`, verified). Task 1's `test_supersede_leaves_an_already_superseded_source_pointing_at_its_first_successor` demands **first-successor-wins**. Both stay true only because `InMemoryStore.supersede` pre-filters `live` before calling `SharedMemory.merge`, which means a re-supersede of an already-merged source calls **`memory.merge(result, ())` — a `Merged` entry with an empty sources tuple.** That is the load-bearing path and revision 0 documented it nowhere. Two of the tests below exist to say it out loud.
 
 Append to `packages/service/tests/test_store.py`:
 
@@ -1413,16 +1724,26 @@ def test_a_resend_is_accepted_zero_and_changes_no_topic_membership():
     assert len(store.all_findings(sid)) == 1
 
 
-def test_get_returns_a_copy_so_a_mutation_through_it_changes_nothing():
-    """The free consequence of Option A worth naming: a projected copy IS a
-    copy. Any surviving mutation-through-reference now fails LOUDLY instead of
-    silently losing a verdict."""
+def test_get_returns_a_deep_copy_so_no_mutation_through_it_reaches_the_log():
+    """Option A's free consequence, asserted for the fields it is actually
+    free for. `model_copy(update=...)` is SHALLOW: the copy's `attributions`
+    list IS the list inside the fold, so `.append()` through it writes into the
+    record the log holds -- exactly the class of mutation-through-reference
+    Task 1 exists to eliminate, and invisible to a test that only touches
+    scalars. `deep=True` is what makes the claim true."""
     store, sid = _store_with_session()
     store.upsert(sid, [_finding("f-1")])
 
-    store.get(sid, "f-1").merged_into = "syn-ghost"
+    handed_back = store.get(sid, "f-1")
+    handed_back.merged_into = "syn-ghost"                       # scalar
+    handed_back.attributions.append(
+        Attribution(contributor="mallory", agent_session="as-x", agent="claude-code"))
+    handed_back.merged_from.append("f-ghost")
 
-    assert store.get(sid, "f-1").merged_into is None
+    fresh = store.get(sid, "f-1")
+    assert fresh.merged_into is None
+    assert [a.contributor for a in fresh.attributions] == ["aditya"]
+    assert fresh.merged_from == []
     assert [f.id for f in store.retrievable(sid)] == ["f-1"]
 
 
@@ -1440,6 +1761,65 @@ def test_candidates_are_projected_like_every_other_read():
 
     [candidate] = [c for c in result.candidates if c.finding.id == "f-forged"]
     assert candidate.finding.status is FindingStatus.KEPT
+
+
+def test_conflicts_resolve_forward_through_the_view_not_a_second_walker():
+    """synthesis.py used to carry its own `_resolve_forward`, walking
+    `store.get(...).merged_into` with a `seen` set and NO depth cap, while
+    `View.resolve()` -- depth-capped at 64, raising SupersessionCycleError
+    'rather than a hung service' -- was called by nothing. Two resolvers, no
+    test pinning them to agree. There is one now, and it is the View's."""
+    store, sid = _store_with_session()
+    store.upsert(sid, [_finding("f-1"), _finding("f-2")])
+    store.supersede(sid, ["f-1"], _finding("syn-1", text="first merge"))
+    store.supersede(sid, ["syn-1"], _finding("syn-2", text="second merge"))
+
+    assert store.resolve_forward(sid, "f-1") == "syn-2"      # two hops
+    assert store.resolve_forward(sid, "f-2") == "f-2"        # live, unchanged
+    assert store.resolve_forward(sid, "f-UNKNOWN") == "f-UNKNOWN"
+```
+
+Append to `packages/service/tests/test_fold.py` — the log's own semantics, stated:
+
+```python
+def test_the_fold_is_last_merge_wins_when_a_source_is_claimed_twice():
+    """The LOG's semantics, said out loud. `_apply` writes
+    `superseded_by[source] = entry.result.id` unconditionally, so a second
+    Merged entry naming the same source re-points it.
+
+    The registry's `supersede` gives the OPPOSITE answer (first successor
+    wins) and does it by pre-filtering to live sources before it ever reaches
+    here -- see test_store.py's
+    test_supersede_leaves_an_already_superseded_source_pointing_at_its_first_successor.
+    Both are intentional; this test is what stops the next reader assuming the
+    fold enforces the registry's rule."""
+    log = Log(shared_id="s")
+    log.append(FindingAppended(finding=_finding("a")))
+    log.append(Merged(result=_finding("syn-1"), sources=("a",)))
+    log.append(Merged(result=_finding("syn-2"), sources=("a",)))
+
+    view = fold(log)
+
+    assert view.superseded_by["a"] == "syn-2"
+    assert view.resolve("a") == "syn-2"
+```
+
+Append to `packages/service/tests/test_memory.py`:
+
+```python
+def test_merging_with_no_live_sources_still_records_the_result():
+    """The path `InMemoryStore.supersede` takes when every named source is
+    already superseded: `merge(result, ())`. It must land the result and
+    supersede nothing -- undocumented and untested before Plan E Task E.6, and
+    load-bearing for the registry's first-successor-wins rule."""
+    memory = SharedMemory(shared_id="s")
+    memory.append(_finding("a"))
+
+    memory.merge(_finding("syn-1"), ())
+
+    view = memory.view()
+    assert set(view.visible_ids) == {"a", "syn-1"}
+    assert view.superseded_by == {}
 ```
 
 - [ ] **Step 3: Retire the two vacuous branch tests**
@@ -1450,22 +1830,44 @@ Delete `test_a_larger_corpus_does_not_change_the_prompt_size` and `test_recall_i
 
 ```bash
 export PATH="/opt/homebrew/bin:$PATH"
-cd /Users/siddharthsingh/Dev/synapse && uv run pytest packages/service/tests/test_store.py -q
+cd /Users/siddharthsingh/Dev/synapse
+uv run pytest packages/service/tests/test_store.py packages/service/tests/test_memory.py -q
 ```
 
-Expected: `test_a_resend_is_accepted_zero_and_changes_no_topic_membership` and `test_candidates_are_projected_like_every_other_read` fail with `AttributeError: 'InMemoryStore' object has no attribute '_memories'` / `'candidates'`; `test_get_returns_a_copy...` and `test_a_forged_verdict...` fail because today's store hands back the live object.
+Expected: `AttributeError: 'InMemoryStore' object has no attribute '_memories'` / `'candidates'` / `'resolve_forward'`; `test_get_returns_a_deep_copy...` failing on the live object; `test_merging_with_no_live_sources...` passing already if the branch's `merge` tolerates an empty tuple (verify that rather than assume it — if it raises, that is the bug this test was written to find).
 
-- [ ] **Step 5: `append` decides "new" from the view, not from a cache**
+- [ ] **Step 5: `append` takes the answer its caller already computed**
 
-One line in `packages/service/src/synapse_service/memory.py`. Today it reads `if finding.id in self.indexes.vectors.vectors` — an index, i.e. a cache, standing in for the authority:
+Two changes in `packages/service/src/synapse_service/memory.py`. Today `append` reads `if finding.id in self.indexes.vectors.vectors` — an index, i.e. a cache, standing in for the authority. The authority is the folded view. But **every append invalidates the fold cache**, so consulting the view once per finding makes an N-finding push do N folds over a growing log — O(N²) in entries, and Task 9's own test pushes 100 findings in one POST. The caller (`InMemoryStore.upsert`) already computes the answer for the whole batch, so let it say so:
 
 ```python
-        # The AUTHORITY on "have I seen this id" is the folded view, not an
-        # index. Reading an index here made the duplicate guard untestable:
-        # deleting the guard left 75 tests green, because the index and the
-        # log happened to agree. `accepted == 0` on a resend is the assertion
-        # that fails now.
-        if finding.id in self.view().findings:
+    def append(self, finding: Finding, *, is_new: bool | None = None) -> Appended:
+        """Add a finding. Idempotent by id, because the resend path demands it.
+
+        `is_new` lets a BATCHING caller pass the answer it already has.
+        `InMemoryStore.upsert` folds once for the whole push and then tells
+        each append; leaving it None makes this method ask `self.view()`
+        itself, and since every append invalidates the fold cache that is one
+        fold PER FINDING -- O(N**2) in log entries over a batch. Correct
+        either way, and the batch path is the one the route uses.
+
+        The authority is the folded view, never an index. Reading
+        `self.indexes.vectors.vectors` here made the duplicate guard
+        untestable: deleting the guard left 75 tests green, because the index
+        and the log happened to agree.
+        """
+        if is_new is None:
+            is_new = finding.id not in self.view().findings
+        if not is_new:
+            self.log.append(FindingAppended(finding=finding))
+            self._view = None
+            return Appended(finding_id=finding.id,
+                            topic_id=self.view().topic_of.get(finding.id, ""),
+                            topic_founded=False,
+                            version=self.log.version)
+
+        self.log.append(FindingAppended(finding=finding))
+        return self._index_and_assign(finding)
 ```
 
 - [ ] **Step 6: Rewrite the registry's findings half**
@@ -1482,7 +1884,7 @@ from dataclasses import replace
 from synapse_contracts import (Conflict, Finding, FindingId, FindingStatus,
                                SessionContext, SynapseSession)
 
-from synapse_service.fold import View
+from synapse_service.fold import SupersessionCycleError, View
 from synapse_service.lanes import DEFAULT_TOP_K, CandidateSet
 from synapse_service.memory import SharedMemory
 
@@ -1527,7 +1929,14 @@ class InMemoryStore:
     # ── the projection (adr/0004, Option A) ─────────────────────────────────
     @staticmethod
     def _project(view: View, finding: Finding) -> Finding:
-        return finding.model_copy(update={
+        """DEEP copy, deliberately. `model_copy(update=...)` alone is shallow:
+        the result shares `attributions`, `refs` and `merged_from` with the
+        record inside the fold, so `store.get(sid, x).attributions.append(...)`
+        writes through into the log -- the same mutation-through-reference
+        class Task 1 removed from synthesis, reintroduced one layer down.
+        Synthesis reads `s.attributions` when composing a Synthesized Finding,
+        so it is one line away from mattering."""
+        return finding.model_copy(deep=True, update={
             "merged_into": view.superseded_by.get(finding.id),
             "status": (FindingStatus.TRIVIAL if finding.id in view.trivial
                        else FindingStatus.KEPT),
@@ -1540,15 +1949,20 @@ class InMemoryStore:
         Not "entries appended". The log records a resend because it happened;
         `accepted` stays 0 because nothing new arrived, and api.py's
         `if accepted:` is the only thing keeping a replayed POST off the
-        provider."""
+        provider.
+
+        ONE fold for the whole batch: `seen` is computed once here and handed
+        to each `append` as `is_new=`, rather than each append re-folding a
+        log that the previous append just invalidated."""
         memory = self._memories[shared_id]
         seen = set(memory.view().findings)
         new = 0
         for finding in findings:
-            if finding.id not in seen:
+            is_new = finding.id not in seen
+            if is_new:
                 seen.add(finding.id)
                 new += 1
-            memory.append(finding)
+            memory.append(finding, is_new=is_new)
         return new
 
     def get(self, shared_id: str, finding_id: str) -> Finding | None:
@@ -1577,9 +1991,34 @@ class InMemoryStore:
             replace(c, finding=self._project(view, c.finding))
             for c in result.candidates))
 
+    def resolve_forward(self, shared_id: str, finding_id: FindingId) -> FindingId:
+        """Follow supersession forward to the live id a Conflict should name.
+
+        The ONE resolver. synthesis.py carried its own copy with no depth cap
+        while `View.resolve()` -- capped at MAX_SUPERSESSION_DEPTH=64 and
+        raising rather than hanging -- was called by nothing. A malformed chain
+        degrades to 'leave the conflict where it is', which is strictly better
+        than a hung request in front of an audience."""
+        view = self._memories[shared_id].view()
+        try:
+            return view.resolve(finding_id)
+        except SupersessionCycleError:
+            logger.warning("Supersession chain from %s is malformed; leaving the "
+                           "conflict unresolved", finding_id)
+            return finding_id
+
     # ── verdicts ────────────────────────────────────────────────────────────
     def supersede(self, shared_id: str, sources: list[FindingId],
                   result: Finding) -> None:
+        """Land `result` and supersede every LIVE source.
+
+        The `live` filter is what makes first-successor-wins true at this
+        layer while the fold underneath is last-merge-wins (test_fold.py's
+        test_the_fold_is_last_merge_wins_when_a_source_is_claimed_twice). When
+        every named source is already superseded this becomes
+        `merge(result, ())` -- an empty-sources Merged entry, which lands the
+        result and supersedes nothing. That is intentional and pinned by
+        test_memory.py's test_merging_with_no_live_sources_still_records_the_result."""
         memory = self._memories[shared_id]
         view = memory.view()
         live = tuple(fid for fid in sources
@@ -1600,9 +2039,25 @@ class InMemoryStore:
     # set_context / get_context / bump_version / last_seen / mark_seen unchanged
 ```
 
-> **`set_context` still writes `SessionContext`**, which is registry-owned mutable state and deliberately not in the log. `bump_version` stays exactly as `main` has it — `SessionContext.memory_version` counts **merges completed**, and `Log.version` never leaves the store.
+> **`set_context` still writes `SessionContext`**, which is registry-owned mutable state and deliberately not in the log. `bump_version` stays exactly as `main` has it — one bump per **verdict round**, and `Log.version` never leaves the store.
 
-- [ ] **Step 7: Run, then commit**
+- [ ] **Step 7: Delete synthesis's second resolver**
+
+In `packages/service/src/synapse_service/synthesis.py`, delete the module-level `_resolve_forward` function entirely and change its two call sites:
+
+```python
+            ra = store.resolve_forward(shared_id, conflict.finding_a)
+            rb = store.resolve_forward(shared_id, conflict.finding_b)
+```
+
+```bash
+cd /Users/siddharthsingh/Dev/synapse
+grep -rn "_resolve_forward" packages/service
+```
+
+Expected: **no output.** A remaining hit is a second resolver, which is the condition this step exists to end.
+
+- [ ] **Step 8: Run, then commit**
 
 ```bash
 export PATH="/opt/homebrew/bin:$PATH"
@@ -1610,39 +2065,63 @@ cd /Users/siddharthsingh/Dev/synapse
 uv run pytest packages/service/tests/test_store.py -q          # the stop-gate first
 uv run pytest packages/service -q
 uv run pytest packages/orchestrator/tests/test_end_to_end.py -q
+git diff main --stat -- packages/orchestrator/tests/test_end_to_end.py
 uv run pytest -q
 ```
 
 Expected:
-- `test_store.py`: `10 passed` — 6 originals (2 of them rewritten in place, so the count does not move) + 4 new.
-- `test_end_to_end.py`: `2 passed`, **file unedited**. `git diff --stat main -- packages/orchestrator/tests/test_end_to_end.py` must be empty. If it is not, the surface moved and something in this task is wrong.
-- overall: **`476 passed`** (474 + 4 new − 2 retired).
+- `test_store.py`: `11 passed` — 6 originals (2 of them rewritten in place, so the count does not move) + 5 new.
+- `test_end_to_end.py`: `2 passed`, and `git diff --stat` prints **nothing**. If it is not empty, the surface moved and something in this task is wrong.
+- overall: **`481 passed`** (476 + 7 new − 2 retired). **This total is binding.**
 
 ```bash
 cd /Users/siddharthsingh/Dev/synapse
 git add packages/service
-git commit -m "feat(service): SharedMemory under the registry + the Option A projection (adr/0004, Plan E.6)
+git commit -m "feat(service): SharedMemory under the registry + the Option A deep projection (adr/0004, Plan E.6)
 
-Retires two vacuous branch tests: test_a_larger_corpus_does_not_change_the_prompt_size
-asserted a literal against itself (removing lanes.select's [:budget] left it green) and
-test_recall_is_reported_per_band_and_per_lane asserted what by_lane() builds by construction."
+One resolver, not two: synthesis._resolve_forward (no depth cap) is deleted and
+routed through View.resolve() via store.resolve_forward. Retires two vacuous
+branch tests: test_a_larger_corpus_does_not_change_the_prompt_size asserted a
+literal against itself and test_recall_is_reported_per_band_and_per_lane asserted
+what by_lane() builds by construction."
 ```
 
-**Exit gate:** the stop-gate is green through `supersede`; `test_end_to_end.py` is green **unedited**; every `test_synthesis.py` assertion of the form `f.merged_into == syn.id` still passes untouched.
+**Exit gate:** the stop-gate is green through `supersede`; `test_end_to_end.py` is green **unedited**; every `test_synthesis.py` assertion of the form `f.merged_into == syn.id` still passes untouched; `grep -rn _resolve_forward packages/service` is empty.
 
 ---
 
-### Task 7: the reserved-floor under-fill (fix it before wiring anything to it)
+### Task 7: the reserved-floor under-fill, the topic-lane flag, and the harness knobs
+
+**Box: 45 min.**
 
 Fixed **before** the call sites are wired, not after — a lane fix landing after the wiring is indistinguishable from a wiring bug.
 
-In `lanes.select` (`lanes.py:226-244`), `budget` deducts a slot for each reserved id, but a reserved id already in `chosen` hits `continue` and **nothing takes its place**. Measured on the branch, 40 findings, symbol-bearing query: `top_k=14` returns **12** — in a module whose stated thesis is that every knob is set toward returning more, and precisely when the shared symbol is common and breadth matters most.
+> **⟨REVISION 1 — the topic-lane flag moved here from Task 12.⟩** A review pointed out that revision 0 violated this task's own stated rule. Verified: the branch's `select()` runs `Lane.TOPIC` **unconditionally** at `lanes.py:180`. Under revision 0, Task 7's recall baseline, Task 8's product-claim test and Task 9's `/query` tests were all written and measured with the topic lane ON, and **Task 12 — the last coding task, on the eve of the demo — then flipped the default at both wired call sites.** A 40-member cluster taking rank credit is exactly the mechanism this repo already documents as able to "outvote real matches"; discovering a Task 8 or Task 9 assertion was sensitive to it at 17:00 on Aug 6 is the worst available outcome. The flag, the harness knobs, the measurement and the default all land here. Task 12 keeps only the recorded table, and is droppable without touching behaviour.
+
+Two things are wrong in `lanes.select` (`lanes.py:226-244`):
+
+1. **The reserved floor under-fills.** `budget` deducts a slot for each reserved id, but a reserved id already in `chosen` hits `continue` and **nothing takes its place**. Measured on the branch, 40 findings, symbol-bearing query: `top_k=14` returns **12** — in a module whose stated thesis is that every knob is set toward returning more, and precisely when the shared symbol is common and breadth matters most.
+2. **`DEFAULT_RECENT`'s comment claims an effect the constant does not have.** Only `max(1, top_k // RESERVE_DIVISOR)` == 2 of the collected recent ids are ever used at `top_k=14`, so the constant is inert above 2.
 
 **Files:**
-- Modify: `packages/service/src/synapse_service/lanes.py`
+- Modify: `packages/service/src/synapse_service/lanes.py`, `memory.py`, `store.py`, `recall.py`
+- Modify: `scripts/measure_recall.py`
 - Modify: `packages/service/tests/test_lanes.py`
 
-**Interfaces:** none change. `select()`'s signature and `CandidateSet` are untouched.
+**Interfaces:**
+
+```python
+select(text, view, indexes, *, top_k=DEFAULT_TOP_K, recent=DEFAULT_RECENT,
+       exclude: frozenset[FindingId] = frozenset(), topic_lane: bool = False)
+SharedMemory.candidates(text, *, top_k=..., recent=..., exclude=..., topic_lane: bool = False)
+InMemoryStore.candidates(shared_id, text, *, top_k=..., exclude=..., topic_lane: bool = False)
+recall.measure(entries, *, top_k=DEFAULT_TOP_K, recent=DEFAULT_RECENT,
+               topic_lane: bool = False, shared_id="recall")
+```
+
+> **`lanes_run` means the lanes that RAN THIS CALL, not the lanes that exist.** That is the only reading `coverage_line()`'s stated job supports — it exists so "I found no match" is calibrated rather than confident, and a lane that did not run contributed no coverage. `frozenset(ranked_by_lane)` already implements that reading; what changes is that `Lane.TOPIC` stops being unconditionally present.
+>
+> **⟨ARGUING BACK, narrowly⟩** A review said this "silently changes the calibration line the model reads … from 5 lanes to 4 with no test noticing." The first half is right and is fixed below. The second half overstates the blast radius in *this* system: `coverage_line()` is **not rendered into any prompt today** — `api.query` builds its prompt in `retrieval.py`, which never sees a `CandidateSet`. So no model reads the string in the shipped integration. It is pinned literally anyway, in both flag states, precisely because that will stop being true the first time someone passes coverage into the prompt.
 
 - [ ] **Step 1: Take the recall baseline FIRST, before touching anything**
 
@@ -1651,12 +2130,16 @@ This is the first task that can move a recall number, and the only honest compar
 ```bash
 export PATH="/opt/homebrew/bin:$PATH"
 cd /Users/siddharthsingh/Dev/synapse
-uv run python scripts/measure_recall.py 2>&1 | tee /tmp/recall-before.txt | head -12
+mkdir -p /Users/siddharthsingh/Dev/synapse/.measurements
+uv run python scripts/measure_recall.py 2>&1 \
+  | tee /Users/siddharthsingh/Dev/synapse/.measurements/recall-00-as-merged.txt | head -12
 ```
 
-Keep `/tmp/recall-before.txt`. Task 7 Step 5 compares against it, and Task 12 uses the post-change number as *its* baseline. (For orientation, the design memo reports `overall 86.4% (19/22)` pre-integration. Treat that as an order-of-magnitude expectation; **your file is the assertion.**)
+> **⟨REVISION 1⟩ These files live under the repo, not in `/tmp`.** Task 12 reads the last of them as its baseline, plausibly in a different terminal session and possibly after a reboot between Aug 5 and Aug 6. `.measurements/` is gitignored (Task 0 Step 1). Revision 0 wrote them to `/tmp` and would have silently fallen back to a number quoted from a memo — the exact failure it spends two paragraphs warning against.
 
-- [ ] **Step 2: Write the failing test**
+This run is **as-merged**: topic lane on, no back-fill. For orientation, the design memo reports `overall 86.4% (19/22)` pre-integration; treat that as an order-of-magnitude expectation and **your file as the assertion.**
+
+- [ ] **Step 2: Write the failing tests**
 
 Append to `packages/service/tests/test_lanes.py`:
 
@@ -1687,20 +2170,103 @@ def test_backfill_cannot_invent_candidates_that_do_not_exist() -> None:
     memory = _store(("a", "The timing window is 40 ms."))
 
     assert len(memory.candidates("40 ms", top_k=14)) == 1
+
+
+def test_the_topic_lane_contributes_nothing_when_it_is_off() -> None:
+    """Measured at 0 partners and 0 uniquely, at 422 findings and at 2,022.
+    A lane that returns a whole 40-member cluster into an RRF fusion is not
+    free: those members take rank credit that can outvote real matches."""
+    memory = _store(*((f"f{i}", f"the pool exhausts under load, case {i}")
+                      for i in range(20)))
+
+    result = memory.candidates("pool exhaustion", topic_lane=False)
+
+    assert all(Lane.TOPIC not in c.lanes for c in result.candidates)
+    assert Lane.TOPIC not in result.lanes_run
+
+
+def test_the_topic_lane_runs_when_it_is_on() -> None:
+    memory = _store(*((f"f{i}", f"the pool exhausts under load, case {i}")
+                      for i in range(20)))
+
+    result = memory.candidates("pool exhaustion", topic_lane=True)
+
+    assert Lane.TOPIC in result.lanes_run
+
+
+def test_coverage_line_names_only_the_lanes_that_ran() -> None:
+    """`lanes_run` means LANES THAT RAN THIS CALL, not lanes that exist -- the
+    only reading coverage_line()'s job supports, since a lane that did not run
+    contributed no coverage. The literal string is pinned in both flag states
+    because it is a model-facing surface the moment anyone renders it into a
+    prompt, and a silent 5→4 is exactly the kind of change that reaches a
+    model with no test noticing."""
+    memory = _store(*((f"f{i}", f"finding {i} about pooling") for i in range(10)))
+
+    off = memory.candidates("pooling", top_k=14, topic_lane=False).coverage_line()
+    on = memory.candidates("pooling", top_k=14, topic_lane=True).coverage_line()
+
+    assert "· 4 lanes ·" in off
+    assert "· 5 lanes ·" in on
+
+
+def test_default_recent_above_the_reserved_floor_changes_nothing() -> None:
+    """DEFAULT_RECENT is inert above `max(1, top_k // RESERVE_DIVISOR)`:
+    only that many of the collected ids are ever used. Measured identical at
+    recent=2, 8 and 20 on a 422-finding corpus. The fix for the docstring's
+    claim is the docstring, not the number."""
+    memory = _store(*((f"f{i}", f"the pool exhausts under load, case {i}")
+                      for i in range(40)))
+
+    assert (memory.candidates("pool", top_k=14, recent=2).ids()
+            == memory.candidates("pool", top_k=14, recent=8).ids())
 ```
 
-- [ ] **Step 3: Run to verify it fails**
+**Rewrite in place** `test_every_lane_runs_even_when_it_contributes_nothing` (`test_lanes.py:134`) — it is in the [Tests expected to change](#tests-expected-to-change) table, and it is the test that goes red the instant the flag lands:
+
+```python
+def test_every_ENABLED_lane_runs_even_when_it_contributes_nothing() -> None:
+    """Was `test_every_lane_runs_even_when_it_contributes_nothing`, asserting
+    `lanes_run == frozenset(Lane)`. `lanes_run` now means the lanes that RAN,
+    and the topic lane is behind a flag measured at zero yield -- so the set
+    is Lane minus TOPIC by default, and all of Lane when the flag is on. The
+    original property (a lane that finds nothing still REPORTS that it ran) is
+    what both halves below assert."""
+    memory = _store(("a", "the pool is exhausted"))
+
+    assert (memory.candidates("unrelated query").lanes_run
+            == frozenset(Lane) - {Lane.TOPIC})
+    assert (memory.candidates("unrelated query", topic_lane=True).lanes_run
+            == frozenset(Lane))
+```
+
+- [ ] **Step 3: Run to verify they fail**
 
 ```bash
 export PATH="/opt/homebrew/bin:$PATH"
-cd /Users/siddharthsingh/Dev/synapse && uv run pytest packages/service/tests/test_lanes.py -q -k backfill
+cd /Users/siddharthsingh/Dev/synapse && uv run pytest packages/service/tests/test_lanes.py -q
 ```
 
-Expected: `assert 12 == 14`.
+Expected: `assert 12 == 14` on the back-fill test; `TypeError: candidates() got an unexpected keyword argument 'topic_lane'` on the four flag tests and the rewritten one.
 
-- [ ] **Step 4: Back-fill from the fusion remainder**
+- [ ] **Step 4: Back-fill from the fusion remainder, and gate the topic lane**
 
-In `lanes.select`, keep the full fused ordering around and refill after the reserved pass. Replace the block from `ordered = sorted(...)` through the reserved loop:
+In `lanes.select`, add `topic_lane: bool = False` to the signature and gate the lane:
+
+```python
+    # OFF by default: measured at 0 partners and 0 uniquely at 422 findings
+    # and at 2,022 (docs/STATE.md, "The topic lane is on notice"). A lane
+    # returning a whole 40-member cluster into an RRF fusion is not free --
+    # those members take rank credit that can outvote real matches. Kept
+    # behind a flag rather than deleted because lane yield on a REAL corpus is
+    # what decides, and that measurement is blocked on the fixture co-sign.
+    if topic_lane:
+        query_vector = indexes.vectors.embedder.embed(text)
+        ranked_by_lane[Lane.TOPIC] = eligible(
+            indexes.topics.search(query_vector, view.topic_of))
+```
+
+Then keep the full fused ordering around and refill after the reserved pass. Replace the block from `ordered = sorted(...)` through the reserved loop:
 
 ```python
     fused_ranked = sorted(fused.items(), key=lambda kv: (-kv[1], kv[0]))
@@ -1745,30 +2311,69 @@ DEFAULT_TOP_K = 14
 DEFAULT_RECENT = 8
 ```
 
-- [ ] **Step 5: Run, compare against the baseline, then commit**
+Thread `topic_lane` through `SharedMemory.candidates` and `InMemoryStore.candidates`, and give `recall.measure` **both** new knobs (Step 5 measures `--recent` through it too):
+
+```python
+def measure(entries: list[CorpusEntry], *, top_k: int = DEFAULT_TOP_K,
+            recent: int = DEFAULT_RECENT, topic_lane: bool = False,
+            shared_id: str = "recall") -> RecallReport:
+```
+
+and its one `store.candidates(...)` call at `recall.py:124` forwards both.
+
+- [ ] **Step 5: Add the harness knobs, then measure and set the default**
+
+`scripts/measure_recall.py` currently declares exactly two arguments, `--distractors` (default 400) and `--top-k` (default `DEFAULT_TOP_K`). Add `--topic-lane` (`action="store_true"`) and `--recent` (`type=int, default=DEFAULT_RECENT`), pass both into `measure`, and print the configuration on the header line so a pasted result is self-describing:
+
+```python
+    print(f"  config: topic_lane={'ON' if args.topic_lane else 'OFF'} "
+          f"recent={args.recent} top_k={args.top_k} distractors={args.distractors}")
+```
+
+**Do not touch** the `WHAT THESE NUMBERS ARE NOT` docstring or the three "reading these" labels.
+
+Then run the two that decide the default, into the same directory as the baseline:
+
+```bash
+export PATH="/opt/homebrew/bin:$PATH"
+cd /Users/siddharthsingh/Dev/synapse
+M=/Users/siddharthsingh/Dev/synapse/.measurements
+uv run python scripts/measure_recall.py --topic-lane 2>&1 | tee $M/recall-01-backfill-lane-ON.txt  | head -12
+uv run python scripts/measure_recall.py              2>&1 | tee $M/recall-02-backfill-lane-OFF.txt | head -12
+diff $M/recall-00-as-merged.txt $M/recall-01-backfill-lane-ON.txt || true
+```
+
+Two comparisons, each isolating one change:
+
+- **`00-as-merged` vs `01-backfill-lane-ON`** isolates the **back-fill**. The `overall` line must be **greater than or equal to**. The back-fill exists to return *more*; a fix that returns more while scoring worse is a fix that is surfacing worse candidates, and that is a stop.
+- **`01-lane-ON` vs `02-lane-OFF`** isolates the **topic lane**. **Keep whichever `overall` is higher and set `select`'s `topic_lane` default to match.** If they tie, ship OFF: a lane that costs rank credit and buys nothing measurable does not earn its slot. A two-second decision the harness was built to make, taken by measurement rather than opinion — and taken *here*, before Tasks 8 and 9 wire the call sites.
+
+`.measurements/recall-02-backfill-lane-OFF.txt` (or `-01-` if ON wins) is **the baseline Task 12 reads.** Do not delete it.
+
+- [ ] **Step 6: Run, then commit**
 
 ```bash
 export PATH="/opt/homebrew/bin:$PATH"
 cd /Users/siddharthsingh/Dev/synapse
 uv run pytest packages/service -q
-uv run python scripts/measure_recall.py 2>&1 | tee /tmp/recall-after.txt | head -12
-diff /tmp/recall-before.txt /tmp/recall-after.txt || true
 uv run pytest -q
 ```
 
-Expected: `479 passed` (476 + 3), and the `overall` line in `/tmp/recall-after.txt` is **greater than or equal to** the one in `/tmp/recall-before.txt` from Step 1. **The back-fill must not lower it** — it exists to return more, and a fix that returns more while scoring worse is a fix that is surfacing worse candidates. Keep `/tmp/recall-after.txt`; Task 12 uses it.
+Expected: `488 passed` (481 + 7). The rewritten `test_every_ENABLED_lane_runs...` replaces its predecessor in place, so it contributes 0 to the delta.
 
 ```bash
 cd /Users/siddharthsingh/Dev/synapse
-git add packages/service
-git commit -m "fix(service): reserved floor back-fills instead of shrinking the result — 12 of 14 became 14 of 14 (Plan E.7c)"
+git add packages/service scripts/measure_recall.py
+git commit -m "fix(service): reserved floor back-fills (12 of 14 → 14 of 14); topic lane behind a measured flag (Plan E.7c, E.10)"
 ```
 
-**Exit gate:** a symbol-bearing query at `top_k=14` returns 14, and the recall harness has not regressed.
+**Exit gate:** a symbol-bearing query at `top_k=14` returns 14; the recall harness has not regressed against `recall-00`; the topic-lane default came from a measurement and both files are on disk; `lanes_run` and `coverage_line()` are pinned in both flag states.
 
 ---
 
 ### Task 8: lanes replace recency at the synthesis call site
+
+**Box: 35 min.**
 
 The product claim, half one. `synthesis.py:149` is a pure recency slice over dict insertion order:
 
@@ -1783,9 +2388,13 @@ So in a 40-finding session, findings 1–20 are **permanently unmergeable** agai
 ```
 pushed     = every finding accepted in THIS call            (unconditional — the E3 starvation fix)
 others     = ⋃ over pushed f of  store.candidates(sid, f.text, exclude=new_ids)
-             deduped, capped at CANDIDATE_WINDOW
+             deduped, RANKED BY FUSED SCORE, capped at CANDIDATE_WINDOW
 candidates = pushed + others
 ```
+
+> **⟨REVISION 1 — the cap must not be dict-insertion order.⟩** A review found that revision 0 truncated with `list(gathered.values())[:CANDIDATE_WINDOW]`. Each `store.candidates()` returns up to `DEFAULT_TOP_K = 14`, so **the first two pushed findings fill all 20 slots and pushed findings 3..N contribute zero partners.** A WAL backlog flush after the worker was offline is, per `synthesis.py`'s own docstring and the E3 starvation fix, the *normal* case and routinely exceeds 20 findings — so the near-duplicate of the last finding in a 30-finding flush would be exactly as unmergeable as it was under the recency slice, just for a different reason. Every test in revision 0's Task 8 pushed a single finding in round 2, so nothing caught it. The union is now ranked by fused score before truncation, and a five-finding push test pins the **last** one's partner.
+
+> **Accepted cost, named rather than hidden.** This runs one `select()` sweep per pushed finding: **O(pushed × log)**, on top of the one fold `upsert` already does for the batch. At demo scale that is microseconds (the branch measures a `candidates()` call at 2.5 ms against 422 findings). It is a real change in the ingest path's cost profile and it belongs under "fixed cost" only in the sense that the **prompt** is fixed — the compute is not.
 
 **Files:**
 - Modify: `packages/service/src/synapse_service/synthesis.py`
@@ -1828,6 +2437,42 @@ async def test_an_old_near_duplicate_outside_the_last_twenty_is_a_merge_candidat
 
     assert "f-old" in provider.seen[1], (
         "the near-duplicate that arrived 30 findings ago never reached the merge prompt")
+
+
+async def test_the_last_finding_of_a_large_push_still_gets_its_own_partners():
+    """The failure a dict-insertion-order cap reintroduces. Each candidates()
+    call returns up to DEFAULT_TOP_K = 14, so under `list(gathered.values())
+    [:CANDIDATE_WINDOW]` the FIRST TWO pushed findings fill all 20 slots and
+    pushed findings 3..N contribute nothing -- and a WAL backlog flush after
+    the worker was offline routinely pushes more than 20 at once.
+
+    Here the old partner matches only the LAST pushed finding."""
+    store = InMemoryStore()
+    sid = store.create_session(purpose="p", created_by="s").shared_id
+    noop = {"working_memory": "wm", "merges": [], "trivial_ids": [], "conflicts": []}
+    provider = _RecordingProvider(scripts=[noop, noop])
+    synth = Synthesizer(provider)
+    attrs = [Attribution(contributor="a", agent_session="as-1", agent="claude-code")]
+
+    established = Finding(id="f-partner", type="learning",
+                          text="qairt refuses to allocate the context binary above 2 GB",
+                          attributions=attrs, ts=TS)
+    noise = [Finding(id=f"f-noise-{i:02d}", type="learning",
+                     text=f"the build script sets flag {i}", attributions=attrs, ts=TS)
+             for i in range(25)]
+    await synth.merge(store, sid, [established] + noise)
+
+    pushed = [Finding(id=f"f-new-{i:02d}", type="learning",
+                      text=f"the build script sets a different flag {i}",
+                      attributions=attrs, ts=TS) for i in range(4)]
+    pushed.append(Finding(id="f-new-LAST", type="learning",
+                          text="qairt will not allocate a context binary that large",
+                          attributions=attrs, ts=TS))
+    await synth.merge(store, sid, pushed)
+
+    assert "f-partner" in provider.seen[1], (
+        "the last pushed finding's only merge partner never reached the prompt — "
+        "the union was capped by insertion order, not by relevance")
 
 
 async def test_the_self_heal_path_still_gets_candidates_without_a_push():
@@ -1892,13 +2537,25 @@ In `packages/service/src/synapse_service/synthesis.py`, replace the `others = ..
             # A pure recency slice made an old near-duplicate permanently
             # unmergeable -- the ADR 0002 merge stopped happening as the
             # session grew, silently, with nothing reporting the loss.
-            gathered: dict[str, Finding] = {}
+            #
+            # COST, named: this is O(pushed x log) select() sweeps. ~2.5 ms per
+            # sweep at 422 findings, so microseconds-to-milliseconds at demo
+            # scale. The PROMPT is fixed-cost; the compute is not.
+            best: dict[str, tuple[float, Finding]] = {}
             for finding in pushed:
                 result = store.candidates(shared_id, finding.text,
                                           exclude=frozenset(new_ids))
                 for candidate in result.candidates:
-                    gathered.setdefault(candidate.finding.id, candidate.finding)
-            others = list(gathered.values())[:CANDIDATE_WINDOW]
+                    prior = best.get(candidate.finding.id)
+                    if prior is None or candidate.score > prior[0]:
+                        best[candidate.finding.id] = (candidate.score, candidate.finding)
+            # Rank the UNION before truncating. Truncating dict-insertion order
+            # instead lets the first two pushed findings fill all 20 slots, so
+            # findings 3..N of a backlog flush contribute no partners at all --
+            # the same starvation the recency slice caused, differently shaped.
+            others = [f for _, f in
+                      sorted(best.values(), key=lambda sf: (-sf[0], sf[1].id))
+                      ][:CANDIDATE_WINDOW]
         else:
             # The /synthesize self-heal path passes no new findings, so there
             # is no text to search WITH. Recency is the only rule available,
@@ -1920,23 +2577,29 @@ uv run pytest packages/orchestrator/tests/test_end_to_end.py -q
 uv run pytest -q
 ```
 
-Expected: `481 passed`. `test_a_push_larger_than_the_candidate_window_is_not_starved` and `test_push_larger_than_candidate_window_reaches_the_merge_prompt_via_the_route` are green **unedited** — `pushed` is still unconditional, and in a single over-window push every id is in `new_ids`, so every `candidates()` lookup excludes everything and `others` is empty. `test_end_to_end.py` green, unedited.
+Expected: `491 passed` (488 + 3). `test_a_push_larger_than_the_candidate_window_is_not_starved` and `test_push_larger_than_candidate_window_reaches_the_merge_prompt_via_the_route` are green **unedited** — `pushed` is still unconditional, and in a single over-window push every id is in `new_ids`, so every `candidates()` lookup excludes everything and `others` is empty. `test_end_to_end.py` green, unedited.
 
 > **Watch `test_full_log_replay_into_a_fresh_store_converges_with_the_original_stream` here.** Its second push carries a merge verdict naming `["f-1", "f-2"]` while only `f-2` is in that push. It stays green for a reason worth knowing: synthesis resolves `merge.source_ids` against `known = {f.id for f in store.all_findings(...)}`, **not** against the candidate list it just built — so a verdict can name a finding the prompt never showed. The lane change moves what the model *sees*; it does not move what a verdict is allowed to *name*. If this test goes red, the resolution set was narrowed to the candidates, which is a different (and wrong) change.
 
 ```bash
 cd /Users/siddharthsingh/Dev/synapse
 git add packages/service
-git commit -m "feat(service): synthesis selects merge candidates by lane, not by arrival order (Plan E.7a)"
+git commit -m "feat(service): synthesis selects merge candidates by lane, ranked union not arrival order (Plan E.7a)"
 ```
 
-**Exit gate:** an old near-duplicate outside the last twenty by arrival reaches the merge prompt, and the self-heal path still gets candidates without a push.
+**Exit gate:** an old near-duplicate outside the last twenty by arrival reaches the merge prompt; the **last** finding of a five-finding push gets its own partners; the self-heal path still gets candidates without a push.
 
 ---
 
-### Task 9: lanes at the retrieval call site, and invariant 3 at the new seam
+### Task 9: lanes at the retrieval call site, invariant 3 at the new seam, and the small-session bypass
+
+**Box: 45 min + 10 min rehearsal.**
 
 The product claim, half two. `api.py:173` passes `candidates=store.retrievable(sid)` — the **entire** visible log — into one model prompt, uncapped, growing linearly. Fourteen findings instead of the entire visible log is what keeps an 8B usable as the session grows.
+
+> **⟨REVISION 1 — the bypass both reviews asked for, and why it is the right hedge.⟩** Revision 0 framed this purely as a scaling win. It is also a **change to what the marquee demo interaction returns**, and revision 0 measured nothing about whether it returns something *better*. Today the 8B reads the whole visible log and ranks it semantically. After this task it sees 14 findings chosen by BM25 + symbol overlap + a `HashingEmbedder` that this plan itself says "has no paraphrase signal at all", with two reserved recency slots. Above 14 visible findings, a teammate asking a question in different words than the finding was written in can get a **worse** answer than `main` gives today — and the only quality signal in the repo is one this plan correctly labels "regression guard, not evidence."
+>
+> **The hedge is one branch:** when the number of findings the asker is allowed to see is at most `TOP_K`, pass them straight through in arrival order and skip `select()` entirely. Behaviour is then **byte-identical to `main`** at demo scale, and bounded above it — the scaling property for the story, with none of the retrieval risk on Aug 7. Task 13 A/Bs the real 8B against the Task 0 answers to check the above-bypass path too.
 
 > **Invariant 3 — suppress a Finding only when *every* Attribution is the asking agent's own Agent Session.** This is **the invariant most at risk in this integration**: the branch has no suppression anywhere, and `lanes.select`'s `exclude=` parameter is the right seam with nothing populating it.
 >
@@ -1952,13 +2615,13 @@ The product claim, half two. `api.py:173` passes `candidates=store.retrievable(s
 
 **Interfaces:** `TOP_K` is exported from `synapse_service.api` (`TOP_K = DEFAULT_TOP_K`, 14). No route shape changes.
 
-- [ ] **Step 1: Teach `_RecordingProvider` to keep the raw prompt**
+- [ ] **Step 1: Teach `_RecordingProvider` to keep the raw prompt, and `_finding_json` to take text**
 
 > **⟨Trap, and the reason this is its own step⟩ `_RecordingProvider.seen` cannot be used to assert that a finding is absent from a `/query` prompt.** It records `re.findall(r"\[([^\]]+)\]", listing)`, and the two prompts are built differently: `synthesis.py` lists `[{f.id}] (type) text` — ids — while `retrieval.py` lists `[{i}] (type) text` — **enumeration indices**. So on a query prompt `seen[-1]` is `['0', '1', ...]` and `assert "f-mine" not in provider.seen[-1]` **passes no matter what the route does.** A vacuous test on invariant 3 is worse than no test, because it reads like coverage of the invariant this integration puts most at risk.
 >
 > `len(seen[-1]) <= TOP_K` is still valid — counting indices is counting candidates. Only id-membership is broken.
 
-One additive change to the existing helper in `packages/service/tests/test_api.py` (no existing test reads `prompts`, so nothing else moves):
+Two additive changes to existing helpers in `packages/service/tests/test_api.py` (no existing test reads `prompts` or passes `text=`, so nothing else moves):
 
 ```python
     def __init__(self, scripts):
@@ -1977,9 +2640,15 @@ One additive change to the existing helper in `packages/service/tests/test_api.p
         return await super().complete(messages, response_schema)
 ```
 
+```python
+def _finding_json(fid: str, agent_session: str = "as-1", text: str | None = None) -> dict:
+    return {"id": fid, "type": "learning", "text": text or f"insight {fid}",
+            ...}
+```
+
 - [ ] **Step 2: Write the failing tests**
 
-Append to `packages/service/tests/test_api.py`. Note `_finding_json(fid)` gives every finding the text `f"insight {fid}"`, which is what makes the prompt assertion below exact rather than a substring accident:
+Append to `packages/service/tests/test_api.py`. Note the default text is `f"insight {fid}"`, which is what makes the prompt assertions exact rather than substring accidents:
 
 ```python
 async def test_query_sends_at_most_top_k_findings_into_one_prompt():
@@ -2003,10 +2672,67 @@ async def test_query_sends_at_most_top_k_findings_into_one_prompt():
     assert 0 < len(provider.seen[-1]) <= TOP_K
 
 
+async def test_a_small_session_sends_every_visible_finding_exactly_as_main_did():
+    """THE HEDGE. At or below TOP_K allowed findings the route skips select()
+    entirely and passes the visible log through in arrival order -- byte-
+    identical to what main does today, which is what makes this task a no-op
+    at demo scale and a scaling property above it.
+
+    Without this branch, a five-finding session's answer would depend on BM25
+    + symbol overlap + a HashingEmbedder with no paraphrase signal, for no
+    gain: everything fits in the prompt anyway."""
+    from synapse_service.api import TOP_K
+
+    provider = _RecordingProvider(scripts=[MERGE_NOOP, {"ranked": [0]}])
+    async with _client(provider) as client:
+        sid = (await client.post("/v1/sessions", json={"purpose": "p", "created_by": "s"})
+               ).json()["shared_id"]
+        findings = [_finding_json(f"f-{i}") for i in range(5)]
+        await client.post(f"/v1/sessions/{sid}/findings", json={"findings": findings})
+
+        await client.post(f"/v1/sessions/{sid}/query",
+                          json={"query": "totally unrelated words", "agent_session": "as-X"})
+
+    assert 5 <= TOP_K                                   # the branch under test is live
+    prompt = provider.prompts[-1]
+    for i in range(5):
+        assert f"insight f-{i}" in prompt               # every one of them, not 14 of 5
+    assert prompt.index("insight f-0") < prompt.index("insight f-4")   # arrival order
+
+
+async def test_a_relevant_finding_the_lanes_cannot_match_still_reaches_a_small_prompt():
+    """The paraphrase case, at the one scale where this system can promise it.
+    `HashingEmbedder` has NO paraphrase signal, so above the bypass a
+    lexically-disjoint but relevant finding is NOT guaranteed to be selected --
+    that is a known, recorded limitation (docs/STATE.md; the Embedder protocol
+    is the seam for a real embedding model). Below the bypass it is guaranteed,
+    because nothing is selected at all. If someone deletes the bypass, this
+    test is what says so."""
+    provider = _RecordingProvider(scripts=[MERGE_NOOP, {"ranked": [0]}])
+    async with _client(provider) as client:
+        sid = (await client.post("/v1/sessions", json={"purpose": "p", "created_by": "s"})
+               ).json()["shared_id"]
+        await client.post(f"/v1/sessions/{sid}/findings", json={"findings": [
+            _finding_json("f-para", text="the accelerator refuses work past 40 ms"),
+            _finding_json("f-other", text="the build script sets a stale flag"),
+        ]})
+
+        await client.post(f"/v1/sessions/{sid}/query",
+                          json={"query": "why is the NPU dropping requests under load",
+                                "agent_session": "as-X"})
+
+    assert "the accelerator refuses work past 40 ms" in provider.prompts[-1]
+
+
 async def test_a_finding_only_the_asker_produced_never_reaches_the_candidate_set():
     """Invariant 3 at the NEW seam. The branch has no suppression anywhere and
     `exclude=` is the seam with nothing populating it; `visible_to` stays the
     ONE definition and now feeds both the exclusion and query_findings.
+
+    Sized ABOVE the bypass (20 findings > TOP_K) on purpose -- below it the
+    route never calls select(), so a small-session version of this test would
+    pin query_findings' suppression and NOT the exclude= seam, which is the
+    thing this integration puts at risk.
 
     Asserted against the PROMPT TEXT, not against `provider.seen` -- see the
     helper's comment. `seen` holds indices for a retrieval prompt, so an id
@@ -2015,18 +2741,18 @@ async def test_a_finding_only_the_asker_produced_never_reaches_the_candidate_set
     async with _client(provider) as client:
         sid = (await client.post("/v1/sessions", json={"purpose": "p", "created_by": "s"})
                ).json()["shared_id"]
+        others = [_finding_json(f"f-them-{i:02d}", agent_session="as-them")
+                  for i in range(19)]
         await client.post(f"/v1/sessions/{sid}/findings", json={"findings": [
-            _finding_json("f-mine", agent_session="as-me"),
-            _finding_json("f-theirs", agent_session="as-them"),
-        ]})
+            _finding_json("f-mine", agent_session="as-me"), *others]})
 
         r = await client.post(f"/v1/sessions/{sid}/query",
                               json={"query": "insight", "agent_session": "as-me"})
 
     prompt = provider.prompts[-1]
     assert "insight f-mine" not in prompt          # never offered to the model
-    assert "insight f-theirs" in prompt            # ...and the teammate's was
-    assert [f["id"] for f in r.json()["findings"]] == ["f-theirs"]
+    assert "insight f-them" in prompt              # ...and the teammates' were
+    assert "f-mine" not in [f["id"] for f in r.json()["findings"]]
 ```
 
 Append to `packages/service/tests/test_lanes.py`:
@@ -2066,10 +2792,11 @@ def test_a_rare_term_outranks_a_common_one() -> None:
 
 ```bash
 export PATH="/opt/homebrew/bin:$PATH"
-cd /Users/siddharthsingh/Dev/synapse && uv run pytest packages/service -q -k "top_k_findings or candidate_set or counted_as_searched or rare_term"
+cd /Users/siddharthsingh/Dev/synapse
+uv run pytest packages/service -q -k "top_k_findings or small_session or lanes_cannot_match or candidate_set or counted_as_searched or rare_term"
 ```
 
-Expected: `ImportError: cannot import name 'TOP_K'` on the two API tests, `assert 'searched 7 findings' in 'searched 10 findings…'` on the lanes test, and the lexical test failing on rank order.
+Expected: `ImportError: cannot import name 'TOP_K'` on the four API tests, `assert 'searched 7 findings' in 'searched 10 findings…'` on the lanes test, and the lexical test failing on rank order.
 
 - [ ] **Step 4: Implement the query route**
 
@@ -2099,14 +2826,26 @@ and the handler body:
         # with no model and no prompt cost. What must be bounded is the
         # PROMPT, not the loop.
         visible = store.retrievable(sid)
-        allowed = {f.id for f in visible_to(visible, agent_session)}
-        suppressed = frozenset(f.id for f in visible if f.id not in allowed)
+        allowed = visible_to(visible, agent_session)
 
-        cands = store.candidates(sid, body["query"], top_k=TOP_K, exclude=suppressed)
+        if len(allowed) <= TOP_K:
+            # THE BYPASS. Everything the asker may see already fits in one
+            # prompt, so selecting a subset of it can only lose recall -- and
+            # the selectors available here (BM25, symbol overlap, a
+            # HashingEmbedder with no paraphrase signal) are weaker at this
+            # scale than the 8B reading all of it. Byte-identical to what this
+            # route did before lanes existed. Above TOP_K the lanes are the
+            # only way the prompt stays bounded, and they run.
+            candidates = allowed
+        else:
+            suppressed = frozenset(f.id for f in visible) - {f.id for f in allowed}
+            cands = store.candidates(sid, body["query"], top_k=TOP_K, exclude=suppressed)
+            candidates = [c.finding for c in cands.candidates]
+
         ranked = await query_findings(
             provider,
             context=store.get_context(sid),
-            candidates=[c.finding for c in cands.candidates],
+            candidates=candidates,
             query=body["query"],
             asking_agent_session=agent_session,
         )
@@ -2129,7 +2868,7 @@ with the comment:
     # suppression, and turns a calibrated statement into a confident one.
 ```
 
-- [ ] **Step 5: Run, then commit**
+- [ ] **Step 5: Run**
 
 ```bash
 export PATH="/opt/homebrew/bin:$PATH"
@@ -2139,30 +2878,57 @@ uv run pytest packages/orchestrator/tests/test_end_to_end.py -q
 uv run pytest -q
 ```
 
-Expected: `485 passed` (481 + 2 API + 1 lanes + 1 lexical). **`test_suppression_holds_across_the_full_chain` in `test_end_to_end.py` is green, unedited** — it scripts `FakeProvider(scripts=[MERGE_NOOP])`, so the producing agent's own query must still short-circuit without a model call; `store.candidates` needs no provider, and `query_findings` returns `[]` on empty candidates.
+Expected: `497 passed` (491 + 4 API + 1 lanes + 1 lexical). **`test_suppression_holds_across_the_full_chain` in `test_end_to_end.py` is green, unedited** — it scripts `FakeProvider(scripts=[MERGE_NOOP])`, so the producing agent's own query must still short-circuit without a model call; the bypass hands `query_findings` an empty `allowed`, and `query_findings` returns `[]` on empty candidates before touching the provider.
+
+- [ ] **Step R: REHEARSAL — boot both processes and drive one query by hand**
+
+**Ten minutes, and the first time in Tasks 1–12 that anything the audience will see actually runs.** Everything above this line is pytest.
+
+```bash
+export PATH="/opt/homebrew/bin:$PATH"
+cd /Users/siddharthsingh/Dev/synapse
+
+# terminal 1
+uv run synapse-service --port 8899
+
+# terminal 2
+SID=$(curl -s -X POST localhost:8899/v1/sessions -H 'content-type: application/json' \
+      -d '{"purpose":"rehearsal","created_by":"siddsing"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["shared_id"])')
+echo "$SID"
+curl -s -X POST localhost:8899/v1/sessions/$SID/findings -H 'content-type: application/json' \
+     -d @/Users/siddharthsingh/Dev/synapse/fixtures/findings/seg-005a.json
+curl -s -X POST localhost:8899/v1/sessions/$SID/query -H 'content-type: application/json' \
+     -d '{"query":"what do we know about timing","agent_session":"as-rehearsal"}'
+```
+
+**Pass condition:** a JSON body with a non-empty `findings` array, and the service log shows no traceback. **This is a smoke test, not an assertion** — if it returns `[]`, check that `SYNAPSE_SYNTHESIZER` is unset (FakeProvider) before assuming the bypass is wrong.
+
+- [ ] **Step 6: Commit**
 
 ```bash
 cd /Users/siddharthsingh/Dev/synapse
 git add packages/service
-git commit -m "feat(service): /query selects TOP_K candidates by lane with suppression at the exclude= seam (invariant 3, Plan E.7b)"
+git commit -m "feat(service): /query bounded at TOP_K by lane, with a small-session bypass; suppression at the exclude= seam (invariant 3, Plan E.7b)"
 ```
 
-**Exit gate:** both call sites bounded, invariant 3 pinned at the new seam and inside `query_findings`, closed-loop test green unchanged.
+**Exit gate:** both call sites bounded; a session at or below `TOP_K` behaves exactly as `main` does; invariant 3 pinned above the bypass at the `exclude=` seam and inside `query_findings`; closed-loop test green unchanged; **the route answered a real HTTP query from a real process.**
 
 ---
 
 ### Task 10: topics — index in, lane out, labels in the briefing
 
-The branch's own measurement: the topic lane surfaced **0 partners and 0 uniquely** at 422 findings and at 2,022. A lane that returns a whole 40-member cluster into an RRF fusion is not free — those members take rank credit that can outvote real matches — and it has never supplied one.
+**Box: 50 min. In the demo cut (last to drop).**
+
+The branch's own measurement: the topic lane surfaced **0 partners and 0 uniquely** at 422 findings and at 2,022. Task 7 already put that lane behind a flag. What survives is the part that earns its place: the arrival briefing telling a connecting teammate what the team is working on, in the team's own words, with **no model call**.
 
 | Piece | Call |
 |---|---|
 | `TopicIndex`, `TopicAssigned` | **Adopt.** Cheap, deterministic, no model in the decision path; recording the assignment is what lets a rebuild reproduce arrival-order-dependent centroids. |
-| Topic **lane** in `select()` | **Flag, default OFF.** Task 12 sets the default from a measurement. |
+| Topic **lane** in `select()` | **Flagged in Task 7**, default set by measurement. |
 | `unhealthy_topics()` / `split_topic()` | **Defer, never called.** Their entry condition is the un-pruned-membership bug: membership is never pruned on merge, so 70 findings in a topic with 69 merged away still reports `size=70, share=0.986` — "collapse looks like working", the exact shape `TopicHealth.is_collapsed` (`semantic.py:183`) exists to warn about. |
 | `TopicSplit` entry kind | Kept, unused, documented as unused. Removing it is churn on the teammate's code for no gain. |
 
-> **This routes AROUND the un-pruned-membership bug rather than fixing it — a deliberate two-days-out call.** Labels and sizes read **`View.members_of`**, which the fold already restricts to visible ids. The bug lives in `TopicIndex.topics[].members`, which only `health()` and `split()` read, and we call neither. **The bug itself has no owner and no post-demo task; it needs one.**
+> **This routes AROUND the un-pruned-membership bug rather than fixing it — a deliberate two-days-out call.** Labels and sizes read **`View.members_of`**, which the fold already restricts to visible ids. The bug lives in `TopicIndex.topics[].members`, which only `health()` and `split()` read, and we call neither. **The bug itself has no owner; Step 5 files it in `docs/STATE.md`.**
 
 **Files:**
 - Modify: `packages/service/src/synapse_service/memory.py` (`TopicSummary`, `SharedMemory.topic_summaries`)
@@ -2170,6 +2936,7 @@ The branch's own measurement: the topic lane surfaced **0 partners and 0 uniquel
 - Modify: `packages/service/src/synapse_service/api.py` (watermark response)
 - Modify: `packages/orchestrator/src/synapse_orchestrator/briefing.py`
 - Modify: `packages/service/tests/test_api.py`, `packages/orchestrator/tests/test_tools.py`
+- Modify: `docs/STATE.md`
 
 **Interfaces:**
 
@@ -2189,6 +2956,12 @@ InMemoryStore.topic_summaries(shared_id: str, *, limit: int = 3,
 `GET /v1/sessions/{sid}/watermark` response becomes
 `{version, new_since, by_type, conflicts, topics: [{id, size, label}], purpose, members}`.
 
+> **⟨REVISION 1 — BLOCKER, verified: this breaks `test_full_flow_push_watermark_query`.⟩** `packages/service/tests/test_api.py:61-62` asserts **full dict equality** on the watermark body:
+> ```python
+> assert r.json() == {"version": 1, "new_since": 1, "by_type": {"learning": 1}, "conflicts": 0}
+> ```
+> Three new keys make that red, and revision 0 both omitted it from Tests-expected-to-change *and* listed "all of `test_api.py`" as a load-bearing signal — so an executor following the Global Constraints would have been stopped mid-task with no sanctioned move. It is now [listed](#tests-expected-to-change), the new dict is given inline in Step 1, and **it stays exact equality**: an exact watermark body is the only thing pinning the route contract that `briefing.py` consumes.
+
 > **Deviation from Plan E.8, recorded.** E.8 says the label is "highest cosine to the centroid". The centroid on `TopicIndex` is the **un-pruned** one — the very structure this task exists to avoid reading. The medoid is therefore computed against the mean of the **visible** members' vectors (`semantic.mean`), tie-broken on finding id. Same idea, same determinism, and it keeps the whole feature on `View.members_of`, which is what makes the sizes honest.
 
 > **Deviation from Plan E.8, recorded.** E.8 asks `build_briefing` to fail open when `topics` is **missing**. Taking that literally turns three already-green orchestrator tests red — verified by name against `packages/orchestrator/tests/test_tools.py`:
@@ -2196,9 +2969,28 @@ InMemoryStore.topic_summaries(shared_id: str, *, limit: int = 3,
 > - `test_briefing_is_hard_capped_when_the_watermark_by_type_map_is_huge` (`:88`)
 > - `test_briefing_strips_control_characters_from_service_supplied_values` (`:105`)
 >
-> All three hand back a watermark body with no `topics` key and then assert a real briefing rendered. **Missing `topics` renders without the topics clause; a MALFORMED `topics` (not a list, holding a non-dict, or a non-string label) fails open.** The security-relevant half is kept; the regression floor wins over the wording. (`test_briefing_fails_open_on_a_malformed_watermark_body` and `test_briefing_fails_open_on_any_unexpected_exception` already expect `_DEFAULT_INSTRUCTIONS` and are unaffected either way.)
+> All three hand back a watermark body with no `topics` key and then assert a real briefing rendered. **Missing `topics` renders without the topics clause; a MALFORMED `topics` (not a list, holding a non-dict, or a non-string label) fails open.** The security-relevant half is kept; the regression floor wins over the wording.
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 1: Write the failing tests, and update the one that changes**
+
+**First**, the exact-equality assertion at `test_api.py:61-62`. New expected body, inline:
+
+```python
+        r = await client.get(f"/v1/sessions/{sid}/watermark", params={"agent_session": "as-9"})
+        # Exact equality on purpose: this is the ONLY thing pinning the route
+        # contract that briefing.py consumes. `topics`/`purpose`/`members`
+        # joined it in Plan E Task E.8. One finding lands in one topic, and
+        # `_finding_json` gives it the text "insight f-1", which is therefore
+        # its own medoid label.
+        assert r.json() == {
+            "version": 1, "new_since": 1, "by_type": {"learning": 1}, "conflicts": 0,
+            "topics": [{"id": "t0001", "size": 1, "label": "insight f-1"}],
+            "purpose": "fec decode",          # whatever this test created the session with
+            "members": ["aditya"],
+        }
+```
+
+> Run the test once before writing this in and take `topics[0]["id"]`, `purpose` and `members` from the actual response rather than from this snippet — the topic id format is `TopicIndex`'s, and the purpose/members are whatever the test above set. **Do not relax it to a key-subset check.**
 
 Append to `packages/service/tests/test_api.py`:
 
@@ -2351,10 +3143,11 @@ async def test_a_topic_label_containing_newlines_is_cleaned_before_interpolation
 
 ```bash
 export PATH="/opt/homebrew/bin:$PATH"
-cd /Users/siddharthsingh/Dev/synapse && uv run pytest packages/service/tests/test_api.py packages/orchestrator/tests/test_tools.py -q
+cd /Users/siddharthsingh/Dev/synapse
+uv run pytest packages/service/tests/test_api.py packages/orchestrator/tests/test_tools.py -q
 ```
 
-Expected: `KeyError: 'topics'` on the service side; `assert 'the 40 ms timing window' in text` on the orchestrator side.
+Expected: `KeyError: 'topics'` on the service side, `test_full_flow_push_watermark_query` failing on the dict comparison, and `assert 'the 40 ms timing window' in text` on the orchestrator side.
 
 - [ ] **Step 3: Implement `topic_summaries`**
 
@@ -2433,6 +3226,9 @@ In `api.py`'s `watermark` handler, after `visible_ids` is computed:
         # much the Shared Memory moved, not whether that movement is visible
         # to this asker. That split is deliberate (E3's round-2 adjudication)
         # and this task does not touch it.
+        #
+        # `version` is SessionContext.memory_version: VERDICT ROUNDS APPLIED,
+        # not merges completed and not Log.version.
         topics = store.topic_summaries(sid, only=frozenset(visible_ids))
 
         return JSONResponse({
@@ -2455,7 +3251,7 @@ In `api.py`'s `watermark` handler, after `visible_ids` is computed:
     return app
 ```
 
-- [ ] **Step 5: Render the labels in the briefing**
+- [ ] **Step 5: Render the labels in the briefing, and file the bug this routes around**
 
 In `packages/orchestrator/src/synapse_orchestrator/briefing.py`, inside the existing `try:` (so the whole thing still fails open as one unit), after the `by_type` validation:
 
@@ -2483,32 +3279,51 @@ In `packages/orchestrator/src/synapse_orchestrator/briefing.py`, inside the exis
 
 and interpolate `{topics_clause}` immediately after the `{new_since} new since you last looked.` sentence. **The `_MAX_BRIEFING_CHARS = 1200` cap and `_clean()` on every service-supplied value are non-negotiable**: headlines only (bodies grow with session length, headlines do not), and a label containing newlines could read like a new instruction block.
 
-- [ ] **Step 6: Run, then commit**
+Add to `docs/STATE.md`, under `## What remains`:
+
+```markdown
+- [ ] **Un-pruned topic membership has no owner.** Membership is never pruned when a finding is merged away, so `TopicIndex` sizes and `TopicHealth` lie (70 members with 69 merged away still reports `size=70, share=0.986` — "collapse looks like working"). E5 Task 10 routes around it: labels and sizes read `View.members_of`, and `health()`/`split()` are never called. That makes the shipped numbers honest and leaves the structure wrong. **Needs an owner post-demo**; it is the entry condition for `unhealthy_topics()`/`split_topic()`, which is why both stay uncalled.
+```
+
+- [ ] **Step 6: Run, boot the orchestrator, then commit**
 
 ```bash
 export PATH="/opt/homebrew/bin:$PATH"
 cd /Users/siddharthsingh/Dev/synapse
 uv run pytest packages/service packages/orchestrator -q
 uv run pytest -q
+timeout 3 uv run synapse-orchestrator || true
 ```
 
-Expected: `496 passed` (485 + 4 service + 7 orchestrator — the orchestrator seven being 3 plain tests plus `test_briefing_fails_open_on_a_malformed_topics_field` expanding to 4 parametrized cases). The three pre-existing briefing tests named in the deviation blockquote are green **unedited** — that is the point of the missing-`topics` deviation.
+Expected: `508 passed` (497 + 4 service + 7 orchestrator — the orchestrator seven being 3 plain tests plus `test_briefing_fails_open_on_a_malformed_topics_field` expanding to 4 parametrized cases). The three pre-existing briefing tests named in the deviation blockquote are green **unedited**.
+
+> **⟨REVISION 1⟩ The boot smoke is not optional here.** `build_briefing` is called at `cli.py:211` and `uvicorn.run` at `cli.py:227` — **an exception in the briefing takes the orchestrator down before it ever serves.** This task modifies `briefing.py` and adds a clause to it. Task 2 does exactly this for `synapse-service` (and it is what catches a vanished console script); the orchestrator has the same `[project.scripts]` entry point and had no equivalent. Expected: the startup banner and, with no service reachable, the fail-open default instructions — **not** a traceback.
 
 ```bash
 cd /Users/siddharthsingh/Dev/synapse
-git add packages/service packages/orchestrator
+git add packages/service packages/orchestrator docs/STATE.md
 git commit -m "feat: /watermark gains topics/purpose/members; briefing renders deterministic medoid labels (Plan E.8)"
 ```
 
-**Exit gate:** the briefing renders topic labels, `/watermark` still touches no provider, `briefing.py`'s fail-open guard is proven against the new shape, and sizes come from `View.members_of`.
+**Exit gate:** the briefing renders topic labels; `/watermark` still touches no provider; `briefing.py`'s fail-open guard is proven against the new shape; sizes come from `View.members_of`; **`synapse-orchestrator` boots**; the un-pruned-membership bug is filed.
 
 ---
 
 ### Task 11: the recovery path
 
+**Box: 60 min + 10 min rehearsal. Step 2 is in the demo cut; Step 3 is droppable.**
+
 > **The service-side log does NOT fix the restart case.** Both reviews measured it on both implementations. The branch's `Log` is in-memory and dies with the process, and `Merged` is a service-authored entry (`syn-<uuid4>`, `provenance=SYNTHESIZED`) that was never sent to any orchestrator and lives in no durable log anywhere. Verified: after resync into a fresh store, `main` gives back `['f-41','f-58']` with `working_memory=''`, `conflicts=[]`, `memory_version=0`. Append-only changes the *mechanism* of the replay-while-alive case (which `main` already handled correctly) and changes **nothing** about restart.
 
-**Invariant 4 — Findings are durable the moment they are produced, before any send, and retained after sending.** The producer side is unchanged and correct. The service side is honestly worse than the docs claimed. What ships for Aug 7 is the ~15 lines that make the *documented* recovery path possible for the first time.
+**Invariant 4 — Findings are durable the moment they are produced, before any send, and retained after sending.** The producer side is unchanged and correct. The service side is honestly worse than the docs claimed. What ships for Aug 7 is the ~25 lines that make the *documented* recovery path possible for the first time — **and reachable from the product**, which revision 0's version was not.
+
+> **⟨REVISION 1 — three verified defects in revision 0's version of this task.⟩**
+>
+> 1. **`_post`'s tri-state broke `resync()`.** `relay.py:241` is `if await self._post(shared_id, findings): pushed += len(findings)`. `"retry"` and `"terminal"` are both truthy, so **every resync would have reported every finding as pushed against a dead service** — and `test_resync_fails_loudly_when_the_push_does_not_succeed` (`test_cli.py:343`) would have gone red, a test revision 0 listed as "load-bearing signal if it goes red" with a diagnosis that pointed at the wrong line.
+> 2. **The `if pushed and shared_id:` guard made the one changed CLI test unpassable.** `cli.py:155` is `shared_id = binding.shared_id if binding is not None else None`, and `test_resync_pushes_a_previously_recorded_session_even_when_now_unbound` (`:379`) deliberately creates **no bindings dir at all** — so `shared_id is None` and the prescribed two-URL assertion could never be reached. Underneath that was a real gap: `Relay.resync()` pushes to **every** session in the backlog (that partitioning is relay.py's round-2 fix), while revision 0 re-synthesized only the currently-bound one. Every other session got its findings back and no Working Memory, no conflicts, no merges.
+> 3. **Terminal 4xx regressed the demo-failure path, and create-or-return had no product caller.** The overwhelmingly likely 4xx at a hackathon demo *is* "service restarted, session unknown" — a 404. Step 2 makes that case **self-healing**; revision 0's Step 3 converted it back into one requiring a human to type `resync` mid-demo. And `POST /v1/sessions` is reachable from **no component** in `packages/worker` or `packages/orchestrator` — the only caller was curl, in a runbook nobody had written.
+>
+> **Resolution:** `resync()` keeps its documented `-> int` and gains a sibling that returns the ids; `cmd_resync` recreates and re-synthesizes **per session it actually pushed to**; and **404 stays retryable** — only 400/422 are terminal. The logging improvement, which is the part that helps on stage, is kept in full.
 
 **Files:**
 - Modify: `packages/service/src/synapse_service/store.py`, `api.py`
@@ -2519,7 +3334,8 @@ git commit -m "feat: /watermark gains topics/purpose/members; briefing renders d
 **Interfaces:**
 - `create_session(self, purpose: str, created_by: str, *, shared_id: str | None = None) -> SynapseSession` — mint `sh-{uuid4().hex[:8]}` when absent, **return the existing session unchanged when the id is already known**, create with that exact id when it is not.
 - `POST /v1/sessions` accepts an optional `shared_id`. **201** on create (either form), **200** on return-existing.
-- `Relay._post` becomes tri-state; a 4xx is terminal.
+- `Relay.resync_sessions(self) -> dict[str, int]` — `{shared_id: count}` for every session whose push returned `ok`. `resync()` stays `-> int` and becomes `sum(...)` over it.
+- `Relay._post` returns `"ok" | "retry" | "terminal"`. **Terminal is 400–499 excluding 404.**
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2553,15 +3369,61 @@ async def test_create_session_with_an_unknown_shared_id_creates_it_with_that_id(
         assert r.json()["shared_id"] == "sh-restored"
         assert (await client.get("/v1/sessions/sh-restored/watermark",
                                  params={"agent_session": "as-1"})).status_code == 200
+
+
+async def test_the_documented_recovery_path_works_end_to_end_against_a_fresh_store():
+    """The whole runbook, as one test, against a SECOND app instance standing
+    in for the restarted process: recreate the known id, re-push the retained
+    findings, re-synthesize, query. Revision 0 shipped create-or-return with no
+    caller and no end-to-end pin, which is how a recovery path stays theoretical.
+
+    Evidence is `working_memory`, not `memory_version`: the counter bumps on
+    every verdict round including a no-op, so `> 0` proves a round ran, not
+    that anything was re-derived."""
+    findings = [_finding_json("f-1"), _finding_json("f-2")]
+
+    async with _client(FakeProvider(scripts=[MERGE_NOOP])) as before:
+        sid = (await before.post("/v1/sessions",
+                                 json={"purpose": "p", "created_by": "s"})
+               ).json()["shared_id"]
+        await before.post(f"/v1/sessions/{sid}/findings", json={"findings": findings})
+
+    # --- the service restarts: a brand-new app, empty store ---
+    async with _client(FakeProvider(scripts=[
+            {"working_memory": "the team is chasing a timing window",
+             "merges": [], "trivial_ids": [], "conflicts": []},
+            {"ranked": [0]}])) as after:
+        recreate = await after.post("/v1/sessions",
+                                    json={"purpose": "p", "created_by": "s",
+                                          "shared_id": sid})
+        assert recreate.status_code == 201                      # unknown id: created
+
+        pushed = await after.post(f"/v1/sessions/{sid}/findings",
+                                  json={"findings": findings})
+        assert pushed.json()["accepted"] == 2
+
+        syn = await after.post(f"/v1/sessions/{sid}/synthesize")
+        assert syn.status_code == 200
+
+        r = await after.post(f"/v1/sessions/{sid}/query",
+                             json={"query": "timing", "agent_session": "as-OTHER"})
+
+    assert r.status_code == 200
+    assert [f["id"] for f in r.json()["findings"]] == ["f-1"]
 ```
 
 Append to `packages/orchestrator/tests/test_relay.py`:
 
 ```python
-async def test_a_4xx_is_terminal_and_never_re_attempted(tmp_path, caplog):
-    """`except (httpx.HTTPError, OSError)` catches HTTPStatusError too, so a
-    permanent 404 was indistinguishable from a transient outage and looped
-    forever while logging 'Service unavailable'."""
+async def test_a_404_stays_queued_because_the_session_can_be_recreated(tmp_path, caplog):
+    """The likeliest 4xx at a demo is 'service restarted, session unknown'.
+    Create-or-return (Task 11 Step 2) makes that recoverable, and a resync
+    recreates the session -- so a 404 must stay in the retry queue and flush
+    ITSELF the moment the session exists again. Dropping it converts a
+    self-healing case into one that needs a human mid-demo.
+
+    The LOGGING is what changes: a named 404 with its URL, not
+    'Service unavailable'."""
     calls = []
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(str(request.url))
@@ -2575,9 +3437,34 @@ async def test_a_4xx_is_terminal_and_never_re_attempted(tmp_path, caplog):
         first = await relay.flush()
     second = await relay.flush()
 
-    assert len(calls) == 1                       # never re-attempted
-    assert first == (0, 0) and second == (0, 0)
+    assert first == (0, 1) and second == (0, 1)          # still pending, both times
+    assert len(calls) == 2                               # re-attempted, deliberately
     assert any("404" in r.message % r.args for r in caplog.records)
+    assert not (tmp_path / "dropped.jsonl").exists()
+
+
+async def test_a_422_is_terminal_and_never_re_attempted(tmp_path, caplog):
+    """`except (httpx.HTTPError, OSError)` catches HTTPStatusError too, so a
+    permanently malformed payload was indistinguishable from a transient
+    outage and looped forever logging 'Service unavailable'. A 422 is a
+    request that CANNOT succeed no matter how many times it is sent -- unlike
+    a 404, which stops being true the moment the session is recreated."""
+    calls = []
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        return httpx.Response(422, json={"error": "not a Finding"})
+
+    relay = Relay(tmp_path, "http://svc", "sh-1",
+                  transport=httpx.MockTransport(handler))
+    relay.record([_finding("f-1")])
+
+    with caplog.at_level(logging.WARNING):
+        first = await relay.flush()
+    second = await relay.flush()
+
+    assert len(calls) == 1                               # never re-attempted
+    assert first == (0, 0) and second == (0, 0)
+    assert any("422" in r.message % r.args for r in caplog.records)
 
 
 async def test_a_5xx_is_still_retried(tmp_path):
@@ -2593,16 +3480,40 @@ async def test_a_5xx_is_still_retried(tmp_path):
     assert await relay.flush() == (0, 1)
     assert await relay.flush() == (0, 1)
     assert len(calls) == 2
+
+
+async def test_resync_sessions_reports_only_the_sessions_it_actually_pushed_to(tmp_path):
+    """`resync()` returns a bare int, which cannot tell a caller WHICH sessions
+    converged -- so cmd_resync re-synthesized only whatever happened to be
+    bound, and every other session in the backlog got its findings back with no
+    Working Memory, no conflicts and no merges. The partitioning fix in
+    relay.py's round 2 is only half a recovery path without this."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "sh-bad" in str(request.url):
+            return httpx.Response(503)
+        return httpx.Response(200, json={"accepted": 1})
+
+    relay = Relay(tmp_path, "http://svc", "sh-good",
+                  transport=httpx.MockTransport(handler))
+    relay.record([_finding("f-1")])
+    relay.shared_id = "sh-bad"
+    relay.record([_finding("f-2")])
+
+    pushed = await relay.resync_sessions()
+
+    assert pushed == {"sh-good": 1}
+    assert await relay.resync() == 1          # the documented int, unchanged
 ```
 
 Append to `packages/orchestrator/tests/test_cli.py`:
 
 ```python
-def test_resync_calls_synthesize_after_a_successful_push(tmp_path, capsys) -> None:
+def test_resync_recreates_and_synthesizes_each_session_it_pushed(tmp_path, capsys) -> None:
     """push_findings gates the model on accepted > 0, so a full resync into a
-    store that already holds those findings never re-synthesizes. Without this
-    call the documented recovery path returns findings and no Working Memory,
-    no conflicts and no merges."""
+    store that already holds those findings never re-synthesizes. And after a
+    real restart the session does not exist at all, so the push 404s before it
+    can even fail usefully. Both halves of the documented recovery path, per
+    session in the backlog -- not per whatever binding happens to exist."""
     write_binding(
         tmp_path / "bindings" / "claude-code.json",
         SessionBinding(agent_session_id="as-1", shared_id="sh-joined",
@@ -2624,6 +3535,9 @@ def test_resync_calls_synthesize_after_a_successful_push(tmp_path, capsys) -> No
     hit = []
     def up(request: httpx.Request) -> httpx.Response:
         hit.append(request.url.path)
+        if request.url.path == "/v1/sessions":
+            return httpx.Response(201, json={"shared_id": "sh-joined", "purpose": "",
+                                             "members": [], "created_by": "resync"})
         if request.url.path.endswith("/synthesize"):
             return httpx.Response(200, json={"memory_version": 1, "synthesized": True})
         return httpx.Response(200, json={"accepted": 1, "memory_version": 0,
@@ -2633,20 +3547,23 @@ def test_resync_calls_synthesize_after_a_successful_push(tmp_path, capsys) -> No
                          transport=httpx.MockTransport(up))
 
     assert exit_code == 0
-    assert hit == ["/v1/sessions/sh-joined/findings", "/v1/sessions/sh-joined/synthesize"]
+    assert hit == ["/v1/sessions",
+                   "/v1/sessions/sh-joined/findings",
+                   "/v1/sessions/sh-joined/synthesize"]
     assert "synthesized" in capsys.readouterr().out
 ```
 
-Update the **one** CLI test named in [Tests expected to change](#tests-expected-to-change) — extend `test_resync_pushes_a_previously_recorded_session_even_when_now_unbound`'s expected `hit` list with the `/synthesize` URL (it asserts full URLs, not paths):
+Update the **one** CLI test named in [Tests expected to change](#tests-expected-to-change) — `test_resync_pushes_a_previously_recorded_session_even_when_now_unbound` now sees three URLs, and **its whole point survives**: there is still no bindings dir, and `sh-old` is still reached because the *log* names it, not a binding.
 
 ```python
-    assert hit == ["http://127.0.0.1:8899/v1/sessions/sh-old/findings",
+    assert hit == ["http://127.0.0.1:8899/v1/sessions",
+                   "http://127.0.0.1:8899/v1/sessions/sh-old/findings",
                    "http://127.0.0.1:8899/v1/sessions/sh-old/synthesize"]
 ```
 
-> **⟨CORRECTION vs. the spec-derived draft⟩ The other four `resync` tests do NOT need a transport and must NOT be given one.** `test_resync_reports_the_joined_session` (`:298`) and `test_resync_still_honours_state_dir_given_before_the_subcommand` (`:328`) write a binding but record no findings, so `relay.resync()` returns `0`; `:286` and `:317` have neither a binding nor findings. Step 3's `if pushed and shared_id:` guard keeps all four fully offline. Adding a `MockTransport` to them would hide a regression in that guard behind a mock that answers anyway — **if any of them goes red, fix the guard, not the test.** `:343` returns `1` from the failure branch before the new call is reached.
+> **⟨CORRECTION vs. revision 0⟩ The other four `resync` tests do NOT need a transport and must NOT be given one.** `:298` and `:328` write a binding but record no findings, so `resync_sessions()` returns `{}` and the recreate/synthesize loop never runs; `:286` and `:317` have neither. Adding a `MockTransport` would hide a regression behind a mock that answers anyway — **if any of them goes red, fix the loop, not the test.** `:343` seeds a finding and uses a `down` transport: `_post` returns `"retry"`, `resync_sessions()` returns `{}`, `pushed == 0 < total == 1`, and the loud failure branch fires exactly as it does today.
 
-- [ ] **Step 2: Create-or-return sessions**
+- [ ] **Step 2: Create-or-return sessions** *(demo cut — this is the ~10 lines that matter)*
 
 `store.py`:
 
@@ -2659,7 +3576,12 @@ Update the **one** CLI test named in [Tests expected to change](#tests-expected-
         old sh-... 404s and cannot be recreated by construction, so every
         teammate has to re-join a brand-new session mid-demo. The documented
         recovery path (every orchestrator resyncs its retained log into the
-        SAME shared_id) was not merely unbuilt -- it was impossible."""
+        SAME shared_id) was not merely unbuilt -- it was impossible.
+
+        Returning the existing session UNCHANGED is what makes this safe to
+        call unconditionally, which is what `cmd_resync` does: a recovering
+        client does not know whether the service still has the session, and
+        must not overwrite a live one's purpose if it does."""
         if shared_id is not None and shared_id in self._sessions:
             return self._sessions[shared_id]
         shared_id = shared_id or f"sh-{uuid.uuid4().hex[:8]}"
@@ -2678,7 +3600,16 @@ Update the **one** CLI test named in [Tests expected to change](#tests-expected-
                             status_code=200 if existed else 201)
 ```
 
-- [ ] **Step 3: Terminal 4xx in the Relay; `cmd_resync` calls `/synthesize`**
+- [ ] **Step 3: The relay's tri-state, and `cmd_resync` per session** *(droppable half)*
+
+**Grep for every caller before changing the return type.** This is the step revision 0 got wrong:
+
+```bash
+cd /Users/siddharthsingh/Dev/synapse
+grep -n "_post(" packages/orchestrator/src/synapse_orchestrator/relay.py
+```
+
+Expected: the definition plus **two** call sites — `flush()` at `:212` and `resync()` at `:241`. Both must change; a truthiness test against `"retry"` passes.
 
 `relay.py`: add `self.dropped_path = self.state_dir / "dropped.jsonl"`, make `_pending()` exclude `self._sent_ids() | self._dropped_ids()`, and split the handler:
 
@@ -2687,9 +3618,18 @@ Update the **one** CLI test named in [Tests expected to change](#tests-expected-
         """'ok' | 'retry' | 'terminal'.
 
         `httpx.HTTPError` includes `HTTPStatusError`, so the single except
-        below used to make a permanent 404 indistinguishable from a transient
+        below used to make a permanent 422 indistinguishable from a transient
         outage: the relay looped forever, logging 'Service unavailable' about a
-        request that could never succeed."""
+        request that could never succeed.
+
+        404 IS NOT TERMINAL. The likeliest 404 here is 'the service restarted
+        and no longer knows this session', which stops being true the moment
+        `cmd_resync` recreates it (Step 2) -- so the queue flushes itself with
+        no human involved. Only 4xx that cannot become true are terminal.
+
+        Returns a STRING, not a bool. Both non-ok values are truthy; every
+        caller must compare against 'ok' explicitly.
+        """
         payload = {"findings": [f.model_dump(mode="json") for f in findings]}
         url = f"{self.service_url}/v1/sessions/{shared_id}/findings"
         try:
@@ -2699,15 +3639,21 @@ Update the **one** CLI test named in [Tests expected to change](#tests-expected-
                 resp.raise_for_status()
             return "ok"
         except httpx.HTTPStatusError as exc:
-            if 400 <= exc.response.status_code < 500:
+            code = exc.response.status_code
+            if code == 404:
+                logger.warning(
+                    "404 from %s — the service does not know session %r. %d finding(s) "
+                    "stay queued; `synapse-orchestrator resync` recreates the session and "
+                    "they flush themselves.", url, shared_id, len(findings))
+                return "retry"
+            if 400 <= code < 500:
                 logger.warning(
                     "Terminal %d from %s; dropping %d finding(s) for session %r from the "
-                    "retry queue. `synapse-orchestrator resync` will re-offer them if the "
-                    "session is recreated.",
-                    exc.response.status_code, url, len(findings), shared_id)
+                    "retry queue. `synapse-orchestrator resync` re-offers them.",
+                    code, url, len(findings), shared_id)
                 return "terminal"
             logger.info("Service error %d; %d finding(s) for session %r stay queued",
-                        exc.response.status_code, len(findings), shared_id)
+                        code, len(findings), shared_id)
             return "retry"
         except (httpx.HTTPError, OSError) as exc:
             logger.info("Service unavailable (%s); %d finding(s) for session %r stay queued",
@@ -2715,44 +3661,102 @@ Update the **one** CLI test named in [Tests expected to change](#tests-expected-
             return "retry"
 ```
 
-`flush()` writes terminal ids to `dropped.jsonl` and counts them as neither sent nor pending. **`resync()` deliberately ignores `dropped.jsonl`** — it is the operator-invoked recovery path, and a session recreated by Step 2 should get those findings.
-
-`cli.py`'s `cmd_resync`, after the success branch:
+`flush()` compares `== "ok"`, writes terminal ids to `dropped.jsonl`, and counts them as neither sent nor pending. Then split `resync`:
 
 ```python
-    # push_findings gates the model on accepted > 0, so a full resync into a
-    # store that already holds these findings never re-synthesizes: the
-    # documented recovery path would return findings with no Working Memory,
-    # no conflicts and no merges. One explicit call closes that.
-    synthesized = False
-    if pushed and shared_id:
-        async with httpx.AsyncClient(transport=transport, timeout=10.0) as client:
-            try:
-                resp = await client.post(
-                    f"{args.service_url.rstrip('/')}/v1/sessions/{shared_id}/synthesize")
-                resp.raise_for_status()
-                synthesized = bool(resp.json().get("synthesized"))
-            except (httpx.HTTPError, OSError, ValueError) as exc:
-                logger.warning("Resync pushed %d finding(s) but re-synthesis failed (%s)",
-                               pushed, exc.__class__.__name__)
-    print(f"resync: re-pushed {pushed} finding(s) (current session: {label!r}; "
-          f"synthesized: {synthesized})")
+    async def resync_sessions(self) -> dict[str, int]:
+        """Re-push the entire retained log — sent or not — and report WHICH
+        sessions converged. `{shared_id: count}`, successes only.
+
+        `resync()` keeps its documented bare-int signature and is now one line
+        over this. The caller needs the ids: findings are partitioned by the
+        Shared Session each was RECORDED under (see `record()`), so a backlog
+        routinely spans several, and re-synthesizing only the currently-bound
+        one leaves every other session with its findings back and no Working
+        Memory, no conflicts and no merges.
+
+        `dropped.jsonl` is deliberately IGNORED here: this is the
+        operator-invoked recovery path, and a session recreated by
+        create-or-return should get those findings offered again.
+        """
+        groups = self._group(self._all_entries())
+        pushed: dict[str, int] = {}
+        for shared_id, findings in groups.items():
+            if await self._post(shared_id, findings) == "ok":     # never truthiness
+                pushed[shared_id] = pushed.get(shared_id, 0) + len(findings)
+        return pushed
+
+    async def resync(self) -> int:
+        """Total re-pushed across every session. The plan's documented `-> int`
+        (Task 2 Interfaces), unchanged."""
+        return sum((await self.resync_sessions()).values())
 ```
 
-The `if pushed and shared_id:` guard is what keeps the two "nothing recorded" CLI tests offline.
+`cli.py`'s `cmd_resync` — recreate and re-synthesize **per session it actually pushed to**:
+
+```python
+    total = relay.retained_count()
+    pushed_by_session = await relay.resync_sessions()
+    pushed = sum(pushed_by_session.values())
+    ...
+    # Two things the documented recovery path needs and had no caller for:
+    #
+    # 1. RECREATE. After a real restart the sh-... does not exist, so the push
+    #    404s. `POST /v1/sessions` with a known id is create-or-return (Task 11
+    #    Step 2): it returns a live session UNCHANGED, so this is safe to call
+    #    every time. The purpose is lost on a genuine recreate -- the retained
+    #    log does not carry it -- which is why it says so.
+    # 2. SYNTHESIZE. push_findings gates the model on accepted > 0, so a resync
+    #    into a store that already holds these findings never re-synthesizes
+    #    and the recovery returns findings with no Working Memory, no conflicts
+    #    and no merges.
+    #
+    # Per session in the BACKLOG, not per binding: the log is partitioned by
+    # the session each finding was recorded under, and `cmd_resync` runs when
+    # nothing may be bound at all.
+    synthesized: list[str] = []
+    async with httpx.AsyncClient(transport=transport, timeout=10.0) as client:
+        base = args.service_url.rstrip("/")
+        for sid in sorted(pushed_by_session):
+            try:
+                resp = await client.post(f"{base}/v1/sessions/{sid}/synthesize")
+                resp.raise_for_status()
+                if resp.json().get("synthesized"):
+                    synthesized.append(sid)
+            except (httpx.HTTPError, OSError, ValueError) as exc:
+                logger.warning("Resync pushed to %s but re-synthesis failed (%s)",
+                               sid, exc.__class__.__name__)
+    print(f"resync: re-pushed {pushed} finding(s) across {len(pushed_by_session)} session(s) "
+          f"(current session: {label!r}; synthesized: {synthesized})")
+```
+
+and, **before** the push, one recreate pass over the sessions the log names:
+
+```python
+    known_sessions = sorted(relay.recorded_session_ids())    # from the log, not the binding
+    async with httpx.AsyncClient(transport=transport, timeout=10.0) as client:
+        for sid in known_sessions:
+            try:
+                await client.post(f"{args.service_url.rstrip('/')}/v1/sessions",
+                                  json={"purpose": "(recovered by resync)",
+                                        "created_by": "resync", "shared_id": sid})
+            except (httpx.HTTPError, OSError):
+                pass          # the push below reports the real failure, loudly
+```
+
+`Relay.recorded_session_ids()` is three lines over `self._group(self._all_entries()).keys()`, excluding `None`.
 
 - [ ] **Step 4: Make the docs say what the code does**
 
-In `docs/STATE.md`, under `## What remains`, replace the resync line (or add one) with:
+In `docs/STATE.md`, under `## What remains`, replace the resync line (or add one):
 
 ```markdown
-- [ ] **Service-side log persistence (the actual restart fix).** First item after the demo, ~20 lines *because of* `adr/0004` (`rebuild()` already proves replay is sufficient) — and half a story on its own: **Working Memory and Conflicts are not in the log**, so even after it a restart recomputes rather than restores them. What the recovery path honestly does today: a service restart loses the in-memory log; every orchestrator resyncs its retained durable log into the **same** `shared_id` (create-or-return, E5 Task 11); findings land (first write of an id wins, by construction now); one `POST /v1/sessions/{sid}/synthesize` re-derives Working Memory, conflicts and merges. **What is recomputed, not restored:** synthesized findings get new ids, Working Memory and Conflicts are re-derived by a fresh 8B call and may differ, and any contributor who does not resync is gone entirely.
-- [ ] **Un-pruned topic membership has no owner.** Membership is never pruned when a finding is merged away, so `TopicIndex` sizes and `TopicHealth` lie (70 members with 69 merged away still reports `size=70, share=0.986` — "collapse looks like working"). E5 Task 10 routes around it (labels and sizes read `View.members_of`; `health()`/`split()` are never called) rather than fixing it. Needs an owner post-demo.
+- [ ] **Service-side log persistence (the actual restart fix).** First item after the demo, ~20 lines *because of* `adr/0004` (`rebuild()` already proves replay is sufficient) — and half a story on its own: **Working Memory and Conflicts are not in the log**, so even after it a restart recomputes rather than restores them. What the recovery path honestly does today: a service restart loses the in-memory log; `synapse-orchestrator resync` recreates every Shared Session its retained log names (create-or-return, E5 Task 11), re-pushes each group to its own session, and calls `/synthesize` on each. **What is recomputed, not restored:** synthesized findings get new ids, Working Memory and Conflicts are re-derived by a fresh 8B call and may differ, the session's `purpose` is lost on a genuine recreate (the retained log does not carry it), and any contributor who does not resync is gone entirely.
 ```
 
-and mirror the honest recovery paragraph into `relay.py`'s module docstring.
+and mirror that paragraph into `relay.py`'s module docstring, including the 404-is-retryable rule and its reason.
 
-- [ ] **Step 5: Run, then commit**
+- [ ] **Step 5: Run**
 
 ```bash
 export PATH="/opt/homebrew/bin:$PATH"
@@ -2762,125 +3766,73 @@ uv run pytest packages/orchestrator/tests/test_end_to_end.py -q
 uv run pytest -q
 ```
 
-Expected: `501 passed` (496 + 2 API + 2 relay + 1 CLI). `test_full_log_replay_into_a_fresh_store_converges_with_the_original_stream` (`test_api.py:268`) is green **unedited** — it is the pin on this whole story. So are the other four `resync` tests in `test_cli.py`, still with no transport.
+Expected: `516 passed` (508 + 3 API + 4 relay + 1 CLI). `test_full_log_replay_into_a_fresh_store_converges_with_the_original_stream` (`test_api.py:268`) is green **unedited** — it is the pin on this whole story. So are the other five `resync` tests in `test_cli.py`, still with no transport.
 
-```bash
-cd /Users/siddharthsingh/Dev/synapse
-git add packages/service packages/orchestrator docs/STATE.md
-git commit -m "feat: create-or-return session ids, terminal 4xx in the Relay, cmd_resync → /synthesize (invariant 4, Plan E.9)"
-```
+- [ ] **Step R: REHEARSAL — kill the service mid-run and recover it by hand**
 
-**Exit gate:** a known `shared_id` returns the same session; a 404 is terminal and a 503 is not; `cmd_resync` converges to a synthesized state; the docs say what the code does, including what is recomputed rather than restored.
-
----
-
-### Task 12: the recall gate, and the topic-lane flag
-
-`scripts/measure_recall.py` is the only quality signal in the system that needs no model, no key and no network, and it is a demonstrably working gate: removing the symbols reserved floor drops the symbol band 100% → 87.5% and fails a named test.
-
-> **No number from this harness leaves the repo.** The corpus is synthetic and was written by the same author as the lanes it measures — the team's own 2026-08-03 trap #3, which `corpus.py` cites against itself in three places — and `HashingEmbedder` has no paraphrase signal at all, so the two lanes that exist to catch paraphrase are measured with the capability removed. It tells you a change made recall worse. It is **not** evidence the lanes work, and no number from it belongs in a demo script or a README. **Keep every "regression guard, not evidence" label that ships with the code.**
-
-**Files:**
-- Modify: `packages/service/src/synapse_service/lanes.py`, `memory.py`, `store.py`, `recall.py`
-- Modify: `scripts/measure_recall.py`
-- Modify: `packages/service/tests/test_lanes.py`
-- Modify: `docs/STATE.md`
-
-**Interfaces:** `select(text, view, indexes, *, top_k=DEFAULT_TOP_K, recent=DEFAULT_RECENT, exclude=frozenset(), topic_lane: bool = False)`. The default is set by the measurement in Step 4, not by opinion.
-
-- [ ] **Step 1: Write the failing tests**
-
-Append to `packages/service/tests/test_lanes.py`:
-
-```python
-def test_the_topic_lane_contributes_nothing_when_it_is_off() -> None:
-    """Measured at 0 partners and 0 uniquely, at 422 findings and at 2,022.
-    A lane that returns a whole 40-member cluster into an RRF fusion is not
-    free: those members take rank credit that can outvote real matches."""
-    memory = _store(*((f"f{i}", f"the pool exhausts under load, case {i}")
-                      for i in range(20)))
-
-    result = memory.candidates("pool exhaustion", topic_lane=False)
-
-    assert all(Lane.TOPIC not in c.lanes for c in result.candidates)
-    assert Lane.TOPIC not in result.lanes_run
-
-
-def test_the_topic_lane_runs_when_it_is_on() -> None:
-    memory = _store(*((f"f{i}", f"the pool exhausts under load, case {i}")
-                      for i in range(20)))
-
-    result = memory.candidates("pool exhaustion", topic_lane=True)
-
-    assert Lane.TOPIC in result.lanes_run
-
-
-def test_default_recent_above_the_reserved_floor_changes_nothing() -> None:
-    """DEFAULT_RECENT is inert above `max(1, top_k // RESERVE_DIVISOR)`:
-    only that many of the collected ids are ever used. Measured identical at
-    recent=2, 8 and 20 on a 422-finding corpus. The fix for the docstring's
-    claim is the docstring, not the number."""
-    memory = _store(*((f"f{i}", f"the pool exhausts under load, case {i}")
-                      for i in range(40)))
-
-    assert (memory.candidates("pool", top_k=14, recent=2).ids()
-            == memory.candidates("pool", top_k=14, recent=8).ids())
-```
-
-- [ ] **Step 2: Thread the flag**
-
-`lanes.select`: add `topic_lane: bool = False` and gate the lane:
-
-```python
-    # OFF by default: measured at 0 partners and 0 uniquely at 422 findings
-    # and at 2,022 (docs/STATE.md, "The topic lane is on notice"). Kept behind
-    # a flag rather than deleted because lane yield on a REAL corpus is what
-    # decides, and that measurement is blocked on the fixture co-sign.
-    if topic_lane:
-        query_vector = indexes.vectors.embedder.embed(text)
-        ranked_by_lane[Lane.TOPIC] = eligible(
-            indexes.topics.search(query_vector, view.topic_of))
-```
-
-Thread `topic_lane` through `SharedMemory.candidates` and `InMemoryStore.candidates`. `recall.measure`'s current signature is `measure(entries, *, top_k=DEFAULT_TOP_K, shared_id="recall")` — it needs **both** new knobs, because Step 4 measures `--recent` through it too:
-
-```python
-def measure(entries: list[CorpusEntry], *, top_k: int = DEFAULT_TOP_K,
-            recent: int = DEFAULT_RECENT, topic_lane: bool = False,
-            shared_id: str = "recall") -> RecallReport:
-```
-
-and its one `store.candidates(...)` call at `recall.py:124` forwards both.
-
-- [ ] **Step 3: Add the harness flags**
-
-`scripts/measure_recall.py` currently declares exactly two arguments, `--distractors` (default 400) and `--top-k` (default `DEFAULT_TOP_K`). Add `--topic-lane` (`action="store_true"`) and `--recent` (`type=int, default=DEFAULT_RECENT`), pass both into `measure`, and print the configuration on the header line so a pasted result is self-describing:
-
-```python
-    print(f"  config: topic_lane={'ON' if args.topic_lane else 'OFF'} "
-          f"recent={args.recent} top_k={args.top_k} distractors={args.distractors}")
-```
-
-**Do not touch** the `WHAT THESE NUMBERS ARE NOT` docstring or the three "reading these" labels.
-
-- [ ] **Step 4: Run the measurement — both runs, one session**
+**Ten minutes. This is the failure the audience is most likely to witness.**
 
 ```bash
 export PATH="/opt/homebrew/bin:$PATH"
 cd /Users/siddharthsingh/Dev/synapse
-uv run python scripts/measure_recall.py                        # topic lane OFF
-uv run python scripts/measure_recall.py --topic-lane           # topic lane ON
-uv run python scripts/measure_recall.py --recent 2             # DEFAULT_RECENT candidate
-uv run python scripts/measure_recall.py --recent 8             # DEFAULT_RECENT as shipped
+# 1. service up, orchestrator up, one contribute through the MCP surface
+# 2. kill the service process
+# 3. contribute once more (the relay should queue it and log a retryable failure)
+# 4. restart the service
+uv run synapse-orchestrator resync
+# 5. query, from a teammate's agent_session
 ```
 
-**The baseline is `/tmp/recall-after.txt` from Task 7 Step 5 — your own run on this tree, not a number quoted from a memo.** (For orientation only, the design memo reports a pre-integration `overall 86.4% (19/22)` with `symbol 100%`, `lexical 100%`, `paraphrase 100%`, `governing 25%` and topic lane `0 · 0`. If your baseline is far from that, say so in `docs/STATE.md` rather than assuming one of the two is wrong.)
+**Pass condition:** step 3 logs a connection failure and **queues** rather than dropping; `resync` prints a non-zero re-push count and a non-empty `synthesized:` list; step 5 returns the finding contributed *after* the kill. **Fail condition worth catching now:** `resync` prints `re-pushed 0` — which means the recreate pass did not run, and on Aug 7 that is a silent demo failure.
 
-**Keep whichever overall number is higher. Record BOTH.** Same rule for `--recent`. A two-second decision the harness was built to make; it is left to a measurement rather than an opinion on purpose.
+- [ ] **Step 6: Commit**
 
-- [ ] **Step 5: Set the defaults and write the numbers down**
+```bash
+cd /Users/siddharthsingh/Dev/synapse
+git add packages/service packages/orchestrator docs/STATE.md
+git commit -m "feat: create-or-return session ids wired into resync; 404 retryable, 422 terminal; re-synthesis per backlog session (invariant 4, Plan E.9)"
+```
 
-Set `select`'s `topic_lane` default from the higher run. Set `DEFAULT_RECENT` from the higher `--recent` run — and if they tie (they are expected to, see `test_default_recent_above_the_reserved_floor_changes_nothing`), **leave the constant at 8 and keep the corrected docstring**, because changing a number that provably does nothing is churn.
+**Exit gate:** a known `shared_id` returns the same session; a 404 stays queued and a 422 does not; `cmd_resync` recreates and re-synthesizes **every** session in the backlog; the documented recovery path has an end-to-end test *and* has been run by hand against a killed process; the docs say what the code does, including what is recomputed rather than restored.
+
+---
+
+### Task 12: the recall numbers, written down
+
+**Box: 25 min. Droppable (tier 1 — drop this first).**
+
+`scripts/measure_recall.py` is the only quality signal in the system that needs no model, no key and no network, and it is a demonstrably working gate: removing the symbols reserved floor drops the symbol band 100% → 87.5% and fails a named test.
+
+Task 7 already added the flags, took the measurements that set the topic-lane default, and left its output in `.measurements/`. **What is left here is recording it** — plus the one open question Task 7 did not need to answer.
+
+> **No number from this harness leaves the repo.** The corpus is synthetic and was written by the same author as the lanes it measures — the team's own 2026-08-03 trap #3, which `corpus.py` cites against itself in three places — and `HashingEmbedder` has no paraphrase signal at all, so the two lanes that exist to catch paraphrase are measured with the capability removed. It tells you a change made recall worse. It is **not** evidence the lanes work, and no number from it belongs in a demo script or a README. **Keep every "regression guard, not evidence" label that ships with the code.**
+
+**Files:** `docs/STATE.md`, and `packages/service/src/synapse_service/lanes.py` only if `--recent` moves the number.
+
+- [ ] **Step 1: Check the baseline exists, and fail loudly if it does not**
+
+```bash
+export PATH="/opt/homebrew/bin:$PATH"
+cd /Users/siddharthsingh/Dev/synapse
+M=/Users/siddharthsingh/Dev/synapse/.measurements
+ls -l $M/recall-00-as-merged.txt $M/recall-01-backfill-lane-ON.txt $M/recall-02-backfill-lane-OFF.txt
+```
+
+**If any file is missing, stop and re-run Task 7 Step 5 rather than proceeding.** A comparison against a number quoted from a memo is the exact failure this harness exists to prevent, and it is silent. (Revision 0 wrote these to `/tmp`, which does not survive a reboot between Aug 5 and Aug 6.)
+
+- [ ] **Step 2: The `--recent` question, in the same session**
+
+```bash
+export PATH="/opt/homebrew/bin:$PATH"
+cd /Users/siddharthsingh/Dev/synapse
+M=/Users/siddharthsingh/Dev/synapse/.measurements
+uv run python scripts/measure_recall.py --recent 2 2>&1 | tee $M/recall-03-recent-2.txt | head -12
+uv run python scripts/measure_recall.py --recent 8 2>&1 | tee $M/recall-04-recent-8.txt | head -12
+```
+
+`DEFAULT_RECENT = 8` is the shipped value; `2` is the reserved floor, above which the constant is provably inert (`test_default_recent_above_the_reserved_floor_changes_nothing`). **If they tie — and they are expected to — leave the constant at 8 and keep Task 7's corrected docstring.** Changing a number that provably does nothing is churn, and churn on the eve of a demo is a defect with good intentions.
+
+- [ ] **Step 3: Write the numbers down**
 
 Add to `docs/STATE.md`, in the `## The topic lane is on notice` section folded in by Task 2:
 
@@ -2889,17 +3841,18 @@ Add to `docs/STATE.md`, in the `## The topic lane is on notice` section folded i
 
 | Run | overall | symbol | lexical | paraphrase | governing | topic lane (surfaced · unique) |
 |---|---|---|---|---|---|---|
-| topic lane OFF | ⟨fill in⟩ | | | | | |
-| topic lane ON | ⟨fill in⟩ | | | | | |
+| as-merged (lane ON, no back-fill) | ⟨fill in⟩ | | | | | |
+| back-fill, lane ON | ⟨fill in⟩ | | | | | |
+| back-fill, lane OFF | ⟨fill in⟩ | | | | | |
 | `--recent 2` | ⟨fill in⟩ | | | | | |
 | `--recent 8` (shipped) | ⟨fill in⟩ | | | | | |
 
-Default set from the higher number: `select(..., topic_lane=⟨fill in⟩)`, `DEFAULT_RECENT = ⟨fill in⟩`.
+Defaults set from the higher numbers (E5 Task 7): `select(..., topic_lane=⟨fill in⟩)`, `DEFAULT_RECENT = ⟨fill in⟩`.
 
 **Regression guard, not evidence.** Synthetic corpus authored alongside the lanes (trap #3, twice now); `HashingEmbedder` has no paraphrase signal, so the two lanes that exist to catch paraphrase are measured with the capability removed. No number here belongs in a demo script or a README, and lane yield on a real corpus — the only honest test of whether a lane earns its cost — is still blocked on the fixture co-sign.
 ```
 
-- [ ] **Step 6: Run, then commit**
+- [ ] **Step 4: Run, then commit**
 
 ```bash
 export PATH="/opt/homebrew/bin:$PATH"
@@ -2908,45 +3861,77 @@ time uv run python scripts/measure_recall.py            # must be well under 5s
 uv run pytest -q
 ```
 
-Expected: `504 passed` (501 + 3), harness well under 5 s (the design memo measures the pre-integration run at 0.28 s; compare against your own Task 7 timing).
+Expected: `516 passed` — **unchanged**. This task adds no tests; if the count moves, something outside it was edited.
 
 ```bash
 cd /Users/siddharthsingh/Dev/synapse
-git add packages/service scripts/measure_recall.py docs/STATE.md
-git commit -m "feat(service): topic lane behind a flag, defaults set from the recall harness (Plan E.10)"
+git add docs/STATE.md packages/service
+git commit -m "docs: recall numbers after the Plan E integration, five configurations recorded (Plan E.10)"
 ```
 
-**Exit gate:** both numbers are in `docs/STATE.md`, the flag's default came from them, and every "regression guard, not evidence" label is intact.
+**Exit gate:** all five runs are in `docs/STATE.md`, the defaults are traceable to them, and every "regression guard, not evidence" label is intact.
 
 ---
 
-### Task 13: live flip + spec sync — MANUAL
+### Task 13: live re-flip on the integrated branch, and the demo-query A/B — MANUAL
 
-**Everything in this task requires a network, a key, or hardware. Nothing here is automated and nothing here gates the test suite.** Steps 1 and 2 need a human at a terminal with the shared credit pool in view.
+**Box: 45 min. Needs the key and the credit pool. This is the SECOND live run, not the first — Task 0 already found the surprises.**
 
-- [ ] **Step 1 (MANUAL — Cirrascale): boot the integrated service against the real 8B, once**
+- [ ] **Step 1 (MANUAL — Cirrascale): re-run Task 0 Step 2, on the branch**
+
+Same commands, same fixtures, same three queries, from `feat/brain-integration`:
 
 ```bash
 export PATH="/opt/homebrew/bin:$PATH"
 cd /Users/siddharthsingh/Dev/synapse
+git switch feat/brain-integration
 SYNAPSE_SYNTHESIZER=aic100 INFERENCE_CLOUD_API_KEY=... uv run synapse-service &
-curl -s -X POST localhost:8899/v1/sessions \
-     -d '{"purpose":"live smoke","created_by":"siddsing"}'
-# push fixtures/findings/seg-005a + seg-005b, then:
-curl -s "localhost:8899/v1/sessions/<sid>/watermark?agent_session=as-live"
-curl -s -X POST localhost:8899/v1/sessions/<sid>/query \
-     -d '{"query":"what do we know about timing","agent_session":"as-live"}'
+# ...then Task 0 Step 2's script, verbatim
 ```
 
-Expected: HTTP 200s end to end; the watermark carries a non-empty `topics` array with a readable medoid label. **The merge quality is unvalidated** — whatever the 8B does with the seg-005 pair, write it into `docs/STATE.md`. That observation is demo material either way. `max_tokens` is bounded on every call; the credit pool is shared.
+Expected, beyond HTTP 200s: the watermark now carries a non-empty `topics` array with a readable medoid label, and the `seg-005` pair merges or does not — either way, record it.
 
-- [ ] **Step 2 (MANUAL — two machines): the real-socket run**
+- [ ] **Step 2 (MANUAL): the A/B nobody had run**
 
-The closed-loop tests are in-process ASGI by design. Run worker → orchestrator → a teammate-hosted service over real HTTP at least once before Aug 7, and remember the `mcp==1.9.4` pin trap for any ARM64 Windows teammate. **Nothing on the NPU changes in this plan** — `packages/worker` and `packages/distiller` are untouched.
+Put Task 0's three answers next to these three. **This is the only evidence in the plan that Task 9 did not make the marquee interaction worse**, and it costs the ten minutes of reading them side by side.
 
-- [ ] **Step 3: Sync the spec docs**
+| Query | `main` (Task 0) | integrated (now) | Better / same / worse |
+|---|---|---|---|
+| "what do we know about timing" | | | |
+| "why does the decode fail" | | | |
+| "what should I avoid touching" | | | |
 
-`docs/plans/2026-08-05-plan-e-brain.md`: add a `⟨STATUS⟩` line marking E.1–E.10 built, pointing at this exec plan. `docs/plans/README.md`: update Plan E's row from "spec written 2026-08-05, unexecuted" to built-and-merged, and add this document to the `exec/` table. `docs/STATE.md`: record the live-flip observation.
+**If any answer is worse:** the demo corpus is almost certainly at or below `TOP_K`, in which case the bypass makes the two paths byte-identical and the difference is model non-determinism — check the visible-finding count first. If it is genuinely above `TOP_K` and worse, **raise the bypass threshold** (`TOP_K` → `2 * TOP_K` in `api.py`) rather than reverting Task 9: that keeps the scaling property and moves the crossover past demo scale. One line, one test to update, and it is the pre-agreed move so nobody has to invent one at 22:00.
+
+- [ ] **Step 3 (MANUAL — two machines): re-run the real-socket check**
+
+Only the delta matters, since Task 0 already did this on `main`: does the orchestrator still boot with the new briefing clause, and does a teammate's arrival briefing render the topic labels over a real link? Five minutes.
+
+- [ ] **Step 4: Record**
+
+Append the observations to `docs/STATE.md` — the merge quality, the A/B table, and anything the branch does that `main` did not.
+
+```bash
+export PATH="/opt/homebrew/bin:$PATH"
+cd /Users/siddharthsingh/Dev/synapse
+uv run pytest -q
+git add docs/STATE.md
+git commit -m "docs: live 8B + real-socket observations on the integrated branch, with the main-vs-branch query A/B"
+```
+
+**Exit gate:** the integrated service has answered a real query from a real 8B, and the answers have been compared against `main`'s. **Nothing pushed.**
+
+---
+
+### Task 14: sync the spec docs — POST-DEMO
+
+**Box: 20 min. Not before Aug 7. Droppable at tier 3.**
+
+Unrelated to whether the demo works; it is bookkeeping, and revision 0 had it sharing a task with the two steps that prove the system runs.
+
+- [ ] `docs/plans/2026-08-05-plan-e-brain.md`: add a `⟨STATUS⟩` line marking E.1–E.10 built, pointing at this exec plan.
+- [ ] `docs/plans/README.md`: update Plan E's row from "spec written 2026-08-05, unexecuted" to built-and-merged, and add this document to the `exec/` table.
+- [ ] `docs/STATE.md`: fold Task 0's and Task 13's observations into the narrative rather than leaving them as an appendix.
 
 ```bash
 export PATH="/opt/homebrew/bin:$PATH"
@@ -2964,28 +3949,37 @@ git commit -m "docs: Plan E built — brain integration merged, live observation
 
 1. `uv run pytest -q` — both suites collected, green, **offline**, with no network and no key.
 2. **`packages/orchestrator/tests/test_end_to_end.py` green *unchanged*.** `git diff main -- packages/orchestrator/tests/test_end_to_end.py` is empty. If it needed editing, the surface moved and something in this plan was wrong. This is the strongest single signal available.
-3. `test_replayed_original_never_clobbers_a_tombstone` green in its rewritten form, through `supersede`.
-4. A producer-forged `status=trivial` / `merged_into` push has no effect on visibility, and the copy handed back carries `KEPT` / `None`.
-5. An old near-duplicate outside the last twenty by arrival is selected as a merge candidate.
-6. `/query` sends at most `TOP_K` findings into one prompt at 100 findings, with invariant 3 applied at both the `exclude=` seam and inside `query_findings`.
-7. `scripts/measure_recall.py` run with the topic lane on and off, both numbers in `docs/STATE.md`, the flag set from them, the "regression guard, not evidence" label intact.
-8. `uv run synapse-service` starts — the entry point the branch's `pyproject.toml` would have silently removed.
-9. `docs/adr/0004-*.md` on the branch with the teammate's text byte-identical plus its `## Amendment (2026-08-05)`; `CONTEXT.md` carrying View / Lane / Candidate / Lane yield / Fold / Topic **and** Triage / Distiller, pinned by `tests/test_vocabulary.py`.
-10. No module outside `store.py` writes `.merged_into`, `.status`, `.conflicts` or `.working_memory` — `test_no_verdict_field_is_written_outside_the_store` is green.
-11. **The count chain closed without an unexplained step:** `387 → 392 → 467 → 471 → 474 → 476 → 479 → 481 → 485 → 496 → 501 → 504`. A total that drifted and was accepted rather than reconciled is the same failure mode as a test edited to pass — it just leaves no diff to review.
-12. **Only the tests in [Tests expected to change](#tests-expected-to-change) were edited.** `git diff main --stat -- '*/tests/*'` names no other test file except through additions.
-13. Every task is one commit, `main` moves only when 1–12 are all true, and **nothing is pushed, from anywhere.**
+3. **Task 0 was done on Aug 5, against `main`**, and its three query answers are written down — without them, item 12 has no baseline and Task 9 ships with no evidence.
+4. `test_replayed_original_never_clobbers_a_tombstone` green in its rewritten form, through `supersede`.
+5. A producer-forged `status=trivial` / `merged_into` push has no effect on visibility, the copy handed back carries `KEPT` / `None`, and **mutating that copy's `attributions` does not reach the log** (the deep-projection pin).
+6. An old near-duplicate outside the last twenty by arrival is selected as a merge candidate, **and the last finding of a five-finding push gets its own partners**.
+7. `/query` sends at most `TOP_K` findings into one prompt at 100 findings; a session at or below `TOP_K` is byte-identical to `main`; invariant 3 is applied at the `exclude=` seam **above the bypass** and inside `query_findings`.
+8. One supersession resolver, not two: `grep -rn _resolve_forward packages/service` is empty and `store.resolve_forward` routes through `View.resolve()`.
+9. `cmd_resync` recreates and re-synthesizes **every** session in the retained backlog; a 404 stays queued; a 422 does not.
+10. **Both rehearsals happened** (Task 9 Step R, Task 11 Step R), and `synapse-service` and `synapse-orchestrator` both boot from their console scripts.
+11. `docs/adr/0004-*.md` on the branch with the teammate's text byte-identical plus its `## Amendment (2026-08-05)`; `CONTEXT.md` carrying View / Lane / Candidate / Lane yield / Fold / Topic **and** Triage / Distiller, pinned by `tests/test_vocabulary.py`; `docs/plans/README.md` says **Six** invariants.
+12. No module outside `store.py` writes `.merged_into`, `.status`, `.conflicts` or `.working_memory` — `test_no_verdict_field_is_written_outside_the_store` is green — and no `.version` other than `memory_version` is read from `api.py`.
+13. **The count chain closed**, with any per-task drift explained in one line of that task's commit message. The totals for Tasks 1, 2 and 6 are binding; a drift there means a test was lost.
+14. **Only the tests in [Tests expected to change](#tests-expected-to-change) were edited.** `git diff main --stat -- '*/tests/*'` names no other test file except through additions.
+15. Every task is one commit; **`main` moves only for Tasks 0 and 1**, and only when 1–14 are true for the rest; and **nothing is pushed, from anywhere.**
 
 ## Not in scope, each for a stated reason
 
-- **Service-side log persistence to disk** — the actual restart fix, ~20 lines *because of* `adr/0004`, and half a story on its own (Working Memory and Conflicts are not in the log). First item after the demo.
-- **`unhealthy_topics()` / `split_topic()`** — blocked on pruning topic membership when a finding is merged away. Not called, so not blocking. **The pruning bug itself has no owner; Task 11 Step 4 files it.**
+- **Making `memory_version` literally count merges.** It counts verdict rounds today (`synthesis.py:273` bumps unconditionally), and two existing tests pin that. This plan corrects every *document* that said otherwise and changes no behaviour — a counter whose meaning shifts two days before a demo breaks `/watermark`, `new_since`, `last_seen` and the briefing at once. Post-demo, with those two tests as its pins.
+- **Service-side log persistence to disk** — the actual restart fix, ~20 lines *because of* `adr/0004`, and half a story on its own (Working Memory and Conflicts are not in the log, so even after it a restart recomputes rather than restores them; whether they get their own entry kinds or a separate snapshot is itself open). First item after the demo.
+- **`unhealthy_topics()` / `split_topic()`** — blocked on pruning topic membership when a finding is merged away. Not called, so not blocking. **The pruning bug itself has no owner; Task 10 Step 5 files it.**
 - **Model-emitted topic names** — the branch rejected them and was right; deterministic medoid labels ship instead.
 - **Option B** for `merged_into`/`status` — a three-track contract break, two days out.
 - **Snapshots / event-sourcing compaction** — `adr/0004` already records this as the scaling move deliberately not taken. Fold is microseconds at demo scale.
-- **Swapping `HashingEmbedder` for Cirrascale bge** — the `Embedder` protocol is the seam and it is ready; flipping it needs the recall harness re-run *and* the live Cirrascale flip, both still open.
+- **Swapping `HashingEmbedder` for Cirrascale bge** — the `Embedder` protocol is the seam and it is ready; flipping it needs the recall harness re-run *and* a live Cirrascale run, and it is the real fix for the paraphrase limitation Task 9's bypass currently hides at small scale.
 - **Auth / the producer trust boundary** — the forged-verdict half closes for free; a shared token is out.
 - **Lane yield on a real corpus** — blocked on the fixture co-sign that is still open.
 - **Anything in `packages/worker` or `packages/distiller`** — not touched by this integration at all.
 - **The worker-side WAL re-join gap** (`docs/STATE.md` trap #8) — untouched here and still needs a prioritization call.
 - **`packages/orchestrator` declaring `synapse-service` as a dependency** — `test_end_to_end.py` imports it and resolves only via the shared workspace venv. Noted, not addressed; harmless until someone installs a package standalone.
+
+
+
+
+
+
