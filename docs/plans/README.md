@@ -36,6 +36,8 @@ The plans above are the **specs**. The `exec/` plans are their execution layer: 
 
 **Integration items** — work landed on `main` directly after all four branch merges, closing seams between them rather than within a single plan: triage repinned against the now-complete corpus expectation map (satisfies E2 Task 4's dependency on E1); the three-package closed-loop test (worker → orchestrator → service → query, E4 Task 5, in-process only — see `docs/STATE.md`'s caveat on which producer-routing branch it exercises); E3's `CANDIDATE_WINDOW`-starvation fix pinned at the route; and a `POST /v1/sessions/{sid}/synthesize` resync-self-heal endpoint. Two docs-only passes also repaired amendments the verifiers had flagged as incomplete or self-contradictory (E2's Task 3 deviations, E3's Task 5 extractor amendment) — the E2 plan still has one known-false sentence outstanding, see `docs/STATE.md`'s "What remains".
 
+**On-hardware testing:** [`exec/2026-08-05-e8-npu-testing.md`](./exec/2026-08-05-e8-npu-testing.md) — the X Elite plan. Aditya's Claude Code session executes it directly ("execute docs/plans/exec/2026-08-05-e8-npu-testing.md"); gates stop on red, results commit to branch `npu-testing-aug6`, and the two numbers only that box can produce (measured prefill, power) land in git. How-to detail: [`docs/NPU-RUNBOOK.md`](../NPU-RUNBOOK.md).
+
 Still parked: Codex adapter, compaction (A.5), A/B measurement (B.8), freshness pointer + relevance skill.
 
 ## Supporting documents
