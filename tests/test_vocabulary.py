@@ -143,19 +143,28 @@ def test_no_document_still_glosses_memory_version_as_merges_completed():
 
     Same shape as test_the_projection_question_is_no_longer_described_as_open,
     which is the one mechanism in this repo that has actually caught this class
-    of drift -- including its exemption. A line MAY carry the phrase if it also
-    carries a correction marker (that is how a correction records what it
-    corrected), OR if it lives in one of the documents that NAME and QUOTE the
-    wrong gloss on purpose while explaining the correction: the exec plan
-    itself (this test was transcribed from it verbatim) and Plan E's own
-    brainstorming/spec docs. Without that exemption this test goes red the
-    moment the exec plan doc (which discusses the old gloss at length while
-    fixing it) sits in the same `docs/` tree it globs -- true the moment this
-    branch reaches `main`, which already carries it."""
+    of drift. A line MAY carry the phrase if it also carries a correction
+    marker (that is how a correction records what it corrected) -- checked
+    line-by-line, not file-by-file, because `plan-e-brain.md` and
+    `brain-integration-design.md` are exactly the two documents Task 3 Step 2b
+    corrects, and a filename exemption for either one would un-pin the
+    correction it exists to hold: verified 2026-08-05, every "merges
+    completed" occurrence in this worktree's `docs/` tree already carries its
+    `CORRECTION`/`corrected 2026-08-05` marker on the same line, so the
+    line-level rule alone is green with ZERO filename exemptions here.
+
+    The one file that needs a name-based exemption is `e5-brain`: the exec
+    plan doc (`docs/plans/exec/2026-08-05-e5-brain-integration.md`) NAMES and
+    QUOTES the wrong gloss at length while fixing it, on lines its own prose
+    does not mark with `CORRECTION` (it is not itself a correction, it is
+    the plan that ORDERS one) -- true the moment this branch reaches `main`,
+    which already carries that file. Do not widen this back to `plan-e-brain`
+    or `brain-integration`: if this guard is red on either of those two
+    files, Task 3 Step 2b was skipped or dropped -- fix the documents, do not
+    re-add the exemption."""
     offenders = []
     for path in sorted((ROOT / "docs").rglob("*.md")):
-        exempt = (path.name.startswith("0004-") or "plan-e-brain" in path.name
-                  or "brain-integration" in path.name or "e5-brain" in path.name)
+        exempt = "e5-brain" in path.name
         if exempt:
             continue
         for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
