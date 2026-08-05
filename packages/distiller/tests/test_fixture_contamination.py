@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from synapse_distiller.fixtures import available_fixtures, fixtures_root, load_segment
-from synapse_distiller.promptpack import load_pack_by_name
+from synapse_distiller.promptpack import available_packs, load_pack_by_name
 
 
 def _packs_dir() -> Path:
@@ -66,3 +66,31 @@ def test_v1_baseline_declares_its_known_contamination():
         "contaminated_fixtures declaration is now stale evidence and should "
         "be removed from the pack rather than kept as a blanket exemption"
     )
+
+
+def test_only_v1_baseline_declares_any_contamination():
+    """Reading the exemption from each pack's own TOML (rather than a
+    hardcoded literal in this file) fixes a real drift risk, but it also
+    widens the exemption surface from one frozen pair to "whatever any pack
+    declares" — nothing else pinned that the set stays that small. Adding
+    `contaminated_fixtures = [...]` to any pack other than v1-baseline would
+    silently exempt a fixture from `test_fixture_shares_no_sixgram_with_any_pack`
+    with no test failing to flag it. This test is the plan's frozen-literal
+    invariant restored on top of the pack-declared mechanism: it must fail,
+    forcing deliberate review, the moment a second pack claims an exemption."""
+    for pack_name in available_packs():
+        pack = load_pack_by_name(pack_name)
+        if pack_name == "v1-baseline":
+            assert pack.contaminated_fixtures == ("seg-004",), (
+                "v1-baseline's declared contamination changed — update this "
+                "test deliberately if that is intentional"
+            )
+        else:
+            assert pack.contaminated_fixtures == (), (
+                f"{pack_name} declares contaminated_fixtures = "
+                f"{list(pack.contaminated_fixtures)} — only v1-baseline/seg-004 "
+                "is frozen evidence of a real incident. A new exemption here "
+                "silently disarms test_fixture_shares_no_sixgram_with_any_pack "
+                "for that fixture; if this is deliberate, update this test in "
+                "the same commit so the widening is reviewed, not silent"
+            )
