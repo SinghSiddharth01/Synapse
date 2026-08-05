@@ -187,6 +187,54 @@ async def test_pending_turn_survives_a_restart(tmp_path) -> None:
     assert result.findings == 1
 
 
+async def test_attach_at_end_primes_the_source_from_the_header(tmp_path) -> None:
+    """CodexSource's session_meta is written once, near the top of the file
+    -- unlike Claude Code, which repeats cwd/gitBranch on every record.
+    attach_at_end's whole job is to jump straight to EOF; without priming
+    first, session_meta would never be seen and every later event would
+    silently carry agent_session_id="", cwd=None, git_branch=None."""
+    from synapse_worker.sources.codex import CodexSource
+
+    loop, _ = build(tmp_path, [])
+    loop.source = CodexSource()
+    transcript = tmp_path / "t.jsonl"
+
+    def rollout(line_type: str, payload: dict, ts: str = TS) -> str:
+        return json.dumps({"timestamp": ts, "type": line_type, "payload": payload}) + "\n"
+
+    transcript.write_text(
+        rollout(
+            "session_meta",
+            {"session_id": "codex-sess-1", "cwd": "/work", "git": {"branch": "perf"}},
+        )
+        + rollout(
+            "response_item",
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "already here"}]},
+        ),
+        encoding="utf-8",
+    )
+
+    loop.attach_at_end()
+
+    (event,) = loop.source.parse_line(
+        rollout(
+            "response_item",
+            {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "new turn"}]},
+        )
+    )
+
+    assert event.agent_session_id == "codex-sess-1"
+    assert event.cwd == "/work"
+    assert event.git_branch == "perf"
+
+
+async def test_attach_at_end_with_a_missing_transcript_does_not_raise(tmp_path) -> None:
+    loop, _ = build(tmp_path, [])
+    (tmp_path / "t.jsonl").unlink()
+
+    loop.attach_at_end()  # must not raise
+
+
 async def test_shutdown_flushes_the_open_turn(tmp_path) -> None:
     loop, _ = build(tmp_path, [condensed("final")])
     transcript = tmp_path / "t.jsonl"

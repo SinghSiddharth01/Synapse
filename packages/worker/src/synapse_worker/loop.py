@@ -146,9 +146,37 @@ class WorkerLoop:
 
         Without this, attaching to a conversation in progress would re-distil its
         entire history — hours of NPU time on a multi-megabyte transcript.
+
+        `_prime_source_from_header` runs first for a reason that has nothing to
+        do with NPU cost: some Source adapters carry state across lines that is
+        only ever written once, near the top of the file — `CodexSource`'s
+        `session_meta` is the concrete case, unlike Claude Code, which repeats
+        `cwd`/`gitBranch` on every record. Jumping straight to EOF, as this
+        method's own name says to do, would mean that state is never seen, and
+        every event for the rest of the run would silently carry
+        `agent_session_id=""`, `cwd=None`, `git_branch=None`. Priming first
+        means the Source ends the jump in the same state it would have reached
+        by reading from line 1 — without turning any of that history into
+        AgentEvents, since only parse_line's side effects are wanted here.
         """
+        self._prime_source_from_header()
         self.follower.start_at_end(self.transcript)
         self.follower.save()
+
+    def _prime_source_from_header(self) -> None:
+        """Feed every line already in the transcript through `self.source`,
+        discarding the events. Cheap: this is JSON parsing, not distillation —
+        the expensive step this whole module exists to avoid re-paying for.
+        """
+        try:
+            with self.transcript.open("r", encoding="utf-8", errors="replace") as handle:
+                for line in handle:
+                    self.source.parse_line(line)
+        except OSError:
+            # No transcript yet, or it disappeared between resolution and
+            # attach — attach_at_end's own start_at_end call handles that the
+            # same way; nothing to prime from.
+            return
 
     async def tick(self) -> TickResult:
         result = TickResult()
