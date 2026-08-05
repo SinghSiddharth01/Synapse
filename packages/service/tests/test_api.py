@@ -21,15 +21,21 @@ class _RecordingProvider(FakeProvider):
     def __init__(self, scripts):
         super().__init__(scripts=scripts)
         self.seen: list[list[str]] = []
+        # The RAW prompt body, kept alongside `seen`. `seen` parses the
+        # bracketed tokens, which are finding ids in a SYNTHESIS prompt but
+        # enumeration indices in a RETRIEVAL one -- so absence-of-a-finding
+        # can only be asserted against the text, never against `seen`.
+        self.prompts: list[str] = []
 
     async def complete(self, messages, response_schema=None):
         listing = messages[-1]["content"]
         self.seen.append(re.findall(r"\[([^\]]+)\]", listing))
+        self.prompts.append(listing)
         return await super().complete(messages, response_schema)
 
 
-def _finding_json(fid: str, agent_session: str = "as-1") -> dict:
-    return {"id": fid, "type": "learning", "text": f"insight {fid}",
+def _finding_json(fid: str, agent_session: str = "as-1", text: str | None = None) -> dict:
+    return {"id": fid, "type": "learning", "text": text or f"insight {fid}",
             "attributions": [{"contributor": "aditya", "agent_session": agent_session,
                               "agent": "claude-code"}],
             "ts": "2026-08-04T12:00:00Z", "refs": [],
@@ -325,3 +331,169 @@ async def test_full_log_replay_into_a_fresh_store_converges_with_the_original_st
 
     assert replay_state == original_state and len(replay_state) == 1
     assert replay_version == original_version
+
+
+async def test_query_sends_at_most_top_k_findings_into_one_prompt():
+    """api.py used to pass the ENTIRE visible log into one model prompt,
+    uncapped and growing linearly. Fourteen findings instead of a hundred is
+    what keeps an 8B usable as the session grows."""
+    from synapse_service.api import TOP_K
+
+    provider = _RecordingProvider(scripts=[MERGE_NOOP, {"ranked": [0]}])
+    async with _client(provider) as client:
+        sid = (await client.post("/v1/sessions", json={"purpose": "p", "created_by": "s"})
+               ).json()["shared_id"]
+        findings = [_finding_json(f"f-{i:03d}") for i in range(100)]
+        await client.post(f"/v1/sessions/{sid}/findings", json={"findings": findings})
+
+        await client.post(f"/v1/sessions/{sid}/query",
+                          json={"query": "insight", "agent_session": "as-OTHER"})
+
+    # Bracketed tokens in a RETRIEVAL prompt are indices, so this counts
+    # candidates -- which is exactly what is being bounded.
+    assert 0 < len(provider.seen[-1]) <= TOP_K
+
+
+async def test_a_small_session_sends_every_visible_finding_exactly_as_main_did():
+    """THE HEDGE. At or below TOP_K allowed findings the route skips select()
+    entirely and passes the visible log through in arrival order -- byte-
+    identical to what main does today, which is what makes this task a no-op
+    at demo scale and a scaling property above it.
+
+    Without this branch, a five-finding session's answer would depend on BM25
+    + symbol overlap + a HashingEmbedder with no paraphrase signal, for no
+    gain: everything fits in the prompt anyway."""
+    from synapse_service.api import TOP_K
+
+    provider = _RecordingProvider(scripts=[MERGE_NOOP, {"ranked": [0]}])
+    async with _client(provider) as client:
+        sid = (await client.post("/v1/sessions", json={"purpose": "p", "created_by": "s"})
+               ).json()["shared_id"]
+        findings = [_finding_json(f"f-{i}") for i in range(5)]
+        await client.post(f"/v1/sessions/{sid}/findings", json={"findings": findings})
+
+        await client.post(f"/v1/sessions/{sid}/query",
+                          json={"query": "totally unrelated words", "agent_session": "as-X"})
+
+    assert 5 <= TOP_K                                   # the branch under test is live
+    prompt = provider.prompts[-1]
+    for i in range(5):
+        assert f"insight f-{i}" in prompt               # every one of them, not 14 of 5
+    assert prompt.index("insight f-0") < prompt.index("insight f-4")   # arrival order
+
+
+async def test_the_bypass_boundary_is_where_the_guarantee_stops():
+    """TOP_K and TOP_K+1, because that is where a finding that WAS returned
+    stops being returned -- and the plan should document that cliff rather than
+    meet it on stage.
+
+    Revision 1's tests sat at 5 findings (bypass) and 100 (lanes), so nothing
+    exercised the one visible finding's worth of difference that flips the
+    route from "the model reads everything" to "the model reads a selection".
+
+    Two contracts, both stated:
+      AT TOP_K      -- every allowed finding reaches the prompt. Guaranteed by
+                       the bypass, not by the selectors.
+      AT TOP_K + 1  -- exactly TOP_K reach it, and the guarantee that survives
+                       is the RECENT reserved floor: `max(1, top_k //
+                       RESERVE_DIVISOR)` == `max(1, 14 // 5)` == 2, so the two
+                       most recently arrived allowed findings are ALWAYS in the
+                       prompt (via the fusion, or via the reservation, or via
+                       the back-fill Task 7 added). Which of the remaining
+                       findings is dropped is decided by fused rank, and a
+                       lexically disjoint one that is not among the two most
+                       recent has NO guarantee. That is the cliff. The
+                       pre-agreed response, if it bites at demo scale, is Task
+                       13 Step 2's: raise the bypass threshold, do not revert
+                       this task."""
+    from synapse_service.api import TOP_K
+
+    provider = _RecordingProvider(scripts=[MERGE_NOOP, {"ranked": [0]},
+                                           MERGE_NOOP, {"ranked": [0]}])
+    async with _client(provider) as client:
+        sid = (await client.post("/v1/sessions", json={"purpose": "p", "created_by": "s"})
+               ).json()["shared_id"]
+        # exactly TOP_K, one of them lexically disjoint from the query
+        batch = [_finding_json(f"f-{i:03d}") for i in range(TOP_K - 1)]
+        batch.append(_finding_json("f-odd", text="qairt refuses the context binary"))
+        await client.post(f"/v1/sessions/{sid}/findings", json={"findings": batch})
+
+        await client.post(f"/v1/sessions/{sid}/query",
+                          json={"query": "insight", "agent_session": "as-X"})
+        at_top_k = provider.prompts[-1]
+
+        # one more unrelated finding: now TOP_K + 1 are visible
+        await client.post(f"/v1/sessions/{sid}/findings",
+                          json={"findings": [_finding_json("f-extra")]})
+        await client.post(f"/v1/sessions/{sid}/query",
+                          json={"query": "insight", "agent_session": "as-X"})
+        above = provider.prompts[-1]
+
+    # AT the boundary: the bypass is live and nothing is selected away.
+    assert "qairt refuses the context binary" in at_top_k
+    assert at_top_k.count("(learning)") == TOP_K
+
+    # ONE ABOVE it: the prompt is bounded, one finding was dropped, and the
+    # RECENT floor is the guarantee that survives. Arrival order is
+    # f-000 … f-012, f-odd, f-extra -- so the two reserved slots are f-extra
+    # and f-odd, and f-odd is the lexically disjoint one. It reaches the prompt
+    # HERE because it is second-most-recent, not because any lane matched it.
+    # Had it arrived first, nothing would guarantee it.
+    assert above.count("(learning)") == TOP_K             # 14 of 15: one dropped
+    assert "insight f-extra" in above                     # most recent, reserved
+    assert "qairt refuses the context binary" in above    # 2nd most recent, reserved
+
+
+async def test_a_relevant_finding_the_lanes_cannot_match_still_reaches_a_small_prompt():
+    """The paraphrase case, at the one scale where this system can promise it.
+    `HashingEmbedder` has NO paraphrase signal, so above the bypass a
+    lexically-disjoint but relevant finding is NOT guaranteed to be selected --
+    that is a known, recorded limitation (docs/STATE.md; the Embedder protocol
+    is the seam for a real embedding model). Below the bypass it is guaranteed,
+    because nothing is selected at all. If someone deletes the bypass, this
+    test is what says so."""
+    provider = _RecordingProvider(scripts=[MERGE_NOOP, {"ranked": [0]}])
+    async with _client(provider) as client:
+        sid = (await client.post("/v1/sessions", json={"purpose": "p", "created_by": "s"})
+               ).json()["shared_id"]
+        await client.post(f"/v1/sessions/{sid}/findings", json={"findings": [
+            _finding_json("f-para", text="the accelerator refuses work past 40 ms"),
+            _finding_json("f-other", text="the build script sets a stale flag"),
+        ]})
+
+        await client.post(f"/v1/sessions/{sid}/query",
+                          json={"query": "why is the NPU dropping requests under load",
+                                "agent_session": "as-X"})
+
+    assert "the accelerator refuses work past 40 ms" in provider.prompts[-1]
+
+
+async def test_a_finding_only_the_asker_produced_never_reaches_the_candidate_set():
+    """Invariant 3 at the NEW seam. The branch has no suppression anywhere and
+    `exclude=` is the seam with nothing populating it; `visible_to` stays the
+    ONE definition and now feeds both the exclusion and query_findings.
+
+    Sized ABOVE the bypass (20 findings > TOP_K) on purpose -- below it the
+    route never calls select(), so a small-session version of this test would
+    pin query_findings' suppression and NOT the exclude= seam, which is the
+    thing this integration puts at risk.
+
+    Asserted against the PROMPT TEXT, not against `provider.seen` -- see the
+    helper's comment. `seen` holds indices for a retrieval prompt, so an id
+    membership check there is vacuous."""
+    provider = _RecordingProvider(scripts=[MERGE_NOOP, {"ranked": [0]}])
+    async with _client(provider) as client:
+        sid = (await client.post("/v1/sessions", json={"purpose": "p", "created_by": "s"})
+               ).json()["shared_id"]
+        others = [_finding_json(f"f-them-{i:02d}", agent_session="as-them")
+                  for i in range(19)]
+        await client.post(f"/v1/sessions/{sid}/findings", json={"findings": [
+            _finding_json("f-mine", agent_session="as-me"), *others]})
+
+        r = await client.post(f"/v1/sessions/{sid}/query",
+                              json={"query": "insight", "agent_session": "as-me"})
+
+    prompt = provider.prompts[-1]
+    assert "insight f-mine" not in prompt          # never offered to the model
+    assert "insight f-them" in prompt              # ...and the teammates' were
+    assert "f-mine" not in [f["id"] for f in r.json()["findings"]]

@@ -267,3 +267,15 @@ def test_default_recent_above_the_reserved_floor_changes_nothing() -> None:
 
     assert (store.candidates("pool", top_k=14, recent=2).ids()
             == store.candidates("pool", top_k=14, recent=8).ids())
+
+
+def test_excluded_findings_are_not_counted_as_searched() -> None:
+    """`coverage_line()`'s stated job is making 'I found no match' calibrated
+    rather than confident. Once suppression populates `exclude=`, reporting
+    `searched` as the whole visible log over-reports by exactly the number of
+    findings the asker was never allowed to see."""
+    store = _store(*((f"f{i}", f"finding {i} about pooling") for i in range(10)))
+
+    line = store.candidates("pooling", exclude=frozenset({"f0", "f1", "f2"})).coverage_line()
+
+    assert "searched 7 findings" in line

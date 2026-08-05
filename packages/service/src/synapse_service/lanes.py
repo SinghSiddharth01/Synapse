@@ -289,9 +289,13 @@ def select(
         for finding_id, score in ordered
     )
 
+    # `searched` is what coverage_line() reports so the model can tell "I saw
+    # everything" apart from "I saw fourteen of three thousand". Counting
+    # findings the asker was never allowed to see over-reports exactly the
+    # suppression, and turns a calibrated statement into a confident one.
     return CandidateSet(
         for_text=text,
         candidates=candidates,
-        searched=len(visible),
+        searched=len(visible - blocked),
         lanes_run=frozenset(ranked_by_lane),
     )

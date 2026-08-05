@@ -14,9 +14,15 @@ from starlette.routing import Route
 from synapse_contracts import Finding
 from synapse_providers import ModelProvider
 
+from synapse_service.lanes import DEFAULT_TOP_K
 from synapse_service.retrieval import query_findings, visible_to
 from synapse_service.store import InMemoryStore
 from synapse_service.synthesis import Synthesizer
+
+# How many findings reach ONE retrieval prompt, regardless of log size. The
+# route used to pass store.retrievable(sid) -- the entire visible log --
+# growing linearly until an 8B could not read it.
+TOP_K = DEFAULT_TOP_K
 
 
 def _missing(body: dict, *required: str) -> JSONResponse | None:
@@ -176,14 +182,42 @@ def build_app(provider: ModelProvider) -> Starlette:
         body = await request.json()
         if (err := _missing(body, "query")) is not None:
             return err
+        agent_session = body.get("agent_session", "")
+
+        # Invariant 3 at the lanes seam. `visible_to` stays the ONE definition
+        # of the rule (retrieval.py); here it computes what must be EXCLUDED
+        # from candidate selection, and query_findings still applies it again
+        # before the prompt. Applying an idempotent predicate twice is the
+        # belt; the definition living in one module is the braces.
+        #
+        # Suppression is a pure predicate over a Finding: an O(N) Python loop
+        # with no model and no prompt cost. What must be bounded is the
+        # PROMPT, not the loop.
+        visible = store.retrievable(sid)
+        allowed = visible_to(visible, agent_session)
+
+        if len(allowed) <= TOP_K:
+            # THE BYPASS. Everything the asker may see already fits in one
+            # prompt, so selecting a subset of it can only lose recall -- and
+            # the selectors available here (BM25, symbol overlap, a
+            # HashingEmbedder with no paraphrase signal) are weaker at this
+            # scale than the 8B reading all of it. Byte-identical to what this
+            # route did before lanes existed. Above TOP_K the lanes are the
+            # only way the prompt stays bounded, and they run.
+            candidates = allowed
+        else:
+            suppressed = frozenset(f.id for f in visible) - {f.id for f in allowed}
+            cands = store.candidates(sid, body["query"], top_k=TOP_K, exclude=suppressed)
+            candidates = [c.finding for c in cands.candidates]
+
         ranked = await query_findings(
             provider,
             context=store.get_context(sid),
-            candidates=store.retrievable(sid),          # the Log, never the prose
+            candidates=candidates,
             query=body["query"],
-            asking_agent_session=body.get("agent_session", ""),
+            asking_agent_session=agent_session,
         )
-        store.mark_seen(sid, body.get("agent_session", ""))
+        store.mark_seen(sid, agent_session)
         return JSONResponse({"findings": [f.model_dump(mode="json") for f in ranked]})
 
     return Starlette(routes=[
