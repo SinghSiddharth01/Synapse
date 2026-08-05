@@ -145,7 +145,9 @@ async def main() -> int:
             print(f"  decode          {total_out/(total_ms/1000):.1f} tok/s")
         print(f"  worst verbatim  {max(s.max_verbatim_overlap for s in scores):.2f}")
 
-    print("\n  A two-fixture corpus is a directional signal, not a statistical claim.")
+    print(
+        f"\n  A {len(scores)}-fixture corpus is a directional signal, not a statistical claim."
+    )
     if not pack.is_calibrated:
         print("  Prompt overhead is ESTIMATED — run scripts/calibrate_prompt.py.")
     print("  Power is unmeasured — do not claim efficiency from this run.")
