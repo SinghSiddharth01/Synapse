@@ -37,9 +37,16 @@ async def test_own_session_findings_are_suppressed_before_the_model_sees_them():
 
 
 async def test_empty_candidates_short_circuits_without_a_model_call():
-    fake = FakeProvider(scripts=[])          # a call would raise: scripts exhausted
+    # Scripted with a real (usable) response rather than an empty script list:
+    # an empty script list raises *before* incrementing FakeProvider's call
+    # counter (scripts-exhausted-before-first-call), so it cannot distinguish
+    # "never called" from "called and blew up" -- fake.calls would read 0
+    # either way. A usable script makes a wrongful call observable: it would
+    # succeed and bump fake.calls to 1.
+    fake = FakeProvider(scripts=[{"ranked": []}])
     assert await query_findings(fake, context=CTX, candidates=[],
                                 query="?", asking_agent_session="as-z") == []
+    assert fake.calls == 0         # proves the model was never reached, not just the result
 
 
 async def test_bogus_indices_are_dropped():

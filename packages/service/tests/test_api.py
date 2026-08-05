@@ -50,7 +50,12 @@ async def test_full_flow_push_watermark_query():
 
 
 async def test_replayed_push_is_a_noop_and_skips_the_model():
-    provider = FakeProvider(scripts=[MERGE_NOOP])     # exactly ONE merge scripted
+    # A second script is deliberately scripted: if the replay wrongly reached
+    # the model it would succeed and be indistinguishable via the JSON
+    # response alone (a swallowed-exception replay also reports
+    # accepted=0/memory_version=1). provider.calls is the only way to prove
+    # the model was never invoked a second time.
+    provider = FakeProvider(scripts=[MERGE_NOOP, MERGE_NOOP])
     async with _client(provider) as client:
         sid = (await client.post("/v1/sessions", json={"purpose": "p", "created_by": "s"})
                ).json()["shared_id"]
@@ -59,7 +64,7 @@ async def test_replayed_push_is_a_noop_and_skips_the_model():
         replay = await client.post(f"/v1/sessions/{sid}/findings", json=body)
     assert first.json()["accepted"] == 1
     assert replay.json() == {"accepted": 0, "memory_version": 1}
-    # scripts NOT exhausted-error'd: the replay never reached the provider.
+    assert provider.calls == 1     # the replay must never reach the provider a 2nd time
 
 
 async def test_unknown_session_404_and_bad_payload_422():
