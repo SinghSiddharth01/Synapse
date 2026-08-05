@@ -258,15 +258,28 @@ async def cmd_replay(args: argparse.Namespace) -> int:
             print("No triage-skipped segments to replay.")
             return 0
 
-        # A joined binding carries its own contributor/shared_id/agent — the
-        # same preference `_build` applies for `run`. --contributor and
-        # --shared-id are the un-joined fallback, not something that should
-        # silently override a `synapse-worker join` a user already ran.
+        # Unlike `run`/`_build`, there is no un-joined fallback here: a
+        # triage-skipped segment's own Attribution.agent_session already
+        # round-trips through the skip log (see the grouping below), and the
+        # only missing piece is contributor/shared_id. `run`'s --contributor/
+        # --shared-id defaults exist because a first run before any `join`
+        # is a normal flow; replaying OLD skips with today's CLI defaults
+        # is not the same thing -- it would silently attribute (and route)
+        # recovered findings to whatever "aditya"/"local-dev" happen to
+        # default to right now, which may not be who or what was active
+        # when the segment was actually skipped. Refuse rather than invent.
         joined = read_binding(binding_path_for_agent(state_dir, DEFAULT_AGENT))
-        if joined is not None:
-            contributor, shared_id, agent = joined.contributor, joined.shared_id, joined.agent
-        else:
-            contributor, shared_id, agent = args.contributor, args.shared_id, DEFAULT_AGENT
+        if joined is None:
+            print(
+                "No joined Shared Session -- refusing to replay skipped segments, "
+                "since Attribution (contributor/shared_id) would have to be "
+                "invented rather than read from a real binding.\n"
+                "Run `synapse-worker join <shared_id>` first, then retry "
+                "`synapse-worker replay --skipped`.",
+                file=sys.stderr,
+            )
+            return 1
+        contributor, shared_id, agent = joined.contributor, joined.shared_id, joined.agent
 
         # Group by the segment's OWN agent_session_id — it round-trips through
         # the skip log exactly (TriageLog serializes the whole Segment), so
@@ -383,10 +396,9 @@ def build_parser() -> argparse.ArgumentParser:
     replay = sub.add_parser("replay", help="retry undelivered findings")
     replay.add_argument(
         "--skipped", action="store_true",
-        help="re-distil segments triage skipped, then archive the skip log",
+        help="re-distil segments triage skipped, then archive the skip log "
+             "(requires a joined Shared Session — see `synapse-worker join`)",
     )
-    replay.add_argument("--contributor", default="aditya")
-    replay.add_argument("--shared-id", default="local-dev")
     replay.set_defaults(func=cmd_replay)
 
     return parser

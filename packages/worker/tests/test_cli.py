@@ -311,7 +311,10 @@ def _fake_distiller_builder(monkeypatch, *, scripts_factory=None):
 
 
 async def test_replay_skipped_redistils_and_archives(tmp_path, monkeypatch, capsys) -> None:
-    """A triage-skipped segment can be forced through the pipeline later.
+    """A triage-skipped segment can be forced through the pipeline later, with
+    contributor/shared_id read from the CURRENTLY joined binding -- never
+    fabricated (see test_replay_skipped_refuses_without_a_joined_binding for
+    the no-binding case, adjudicated 2026-08-04).
 
     Deviation from the plan's literal test body: this file has no `invoke_cli`
     helper and no existing FakeProvider-backed CLI test, so the arrange block
@@ -320,7 +323,7 @@ async def test_replay_skipped_redistils_and_archives(tmp_path, monkeypatch, caps
     `cli.build_distiller` (the construction path extracted below) to return a
     FakeProvider-backed Distiller rather than reaching a real NPU.
     """
-    from synapse_contracts import AgentEvent, Segment
+    from synapse_contracts import AgentEvent, Segment, SessionBinding, write_binding
     from synapse_worker.triage_log import TriageLog
 
     state_dir = tmp_path / ".synapse"  # config default, relative to the isolated cwd
@@ -331,6 +334,14 @@ async def test_replay_skipped_redistils_and_archives(tmp_path, monkeypatch, caps
                                      agent_session_id="as-real-42")],
                   started_at=ts, ended_at=ts)
     TriageLog(state_dir).record_skip(seg, "lint-clean")
+    write_binding(
+        cli.binding_path_for_agent(state_dir, cli.DEFAULT_AGENT),
+        SessionBinding(
+            agent_session_id="as-real-42", shared_id="local-dev",
+            contributor="aditya", agent=cli.DEFAULT_AGENT,
+            transcript_path=str(tmp_path / "sess.jsonl"), pinned_at=ts,
+        ),
+    )
 
     monkeypatch.setattr(cli, "check_canary", _async(PASSING_CANARY))
     seen_bindings = _fake_distiller_builder(monkeypatch)
@@ -343,8 +354,8 @@ async def test_replay_skipped_redistils_and_archives(tmp_path, monkeypatch, caps
     # skip log), not a "replay" sentinel that matches no real Agent Session.
     assert len(seen_bindings) == 1
     assert seen_bindings[0].agent_session_id == "as-real-42"
-    assert seen_bindings[0].contributor == "aditya"  # CLI default, nothing joined
-    assert seen_bindings[0].shared_id == "local-dev"
+    assert seen_bindings[0].contributor == "aditya"     # read from the joined binding
+    assert seen_bindings[0].shared_id == "local-dev"    # read from the joined binding
     assert TriageLog(state_dir).load_skipped() == []          # archived
     archives = list(state_dir.glob("triage-skips.replayed-*.jsonl"))
     assert len(archives) == 1
@@ -353,14 +364,50 @@ async def test_replay_skipped_redistils_and_archives(tmp_path, monkeypatch, caps
     assert "Replayed 1 skipped segments -> 1 findings" in capsys.readouterr().out
 
 
+async def test_replay_skipped_refuses_without_a_joined_binding(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """Adjudicated 2026-08-04: replay --skipped must never fabricate
+    Attribution from CLI defaults. The segment's own agent_session_id
+    round-trips through the skip log, but contributor/shared_id do not -- the
+    only place to get real values for those is the CURRENTLY joined binding.
+    Without one, refuse outright rather than guess, and touch nothing."""
+    from synapse_contracts import AgentEvent, Segment
+    from synapse_worker.triage_log import TriageLog
+
+    state_dir = tmp_path / ".synapse"
+    ts = datetime(2026, 8, 4, tzinfo=timezone.utc)
+    seg = Segment(id="s-skipped", agent_session_id="as-real-42",
+                  events=[AgentEvent(role="assistant", kind="text", content="x",
+                                     ts=ts, agent_session_id="as-real-42")],
+                  started_at=ts, ended_at=ts)
+    TriageLog(state_dir).record_skip(seg, "lint-clean")
+
+    def _must_not_be_called(config, binding):
+        raise AssertionError("build_distiller must not run without a joined binding")
+
+    monkeypatch.setattr(cli, "build_distiller", _must_not_be_called)
+
+    exit_code = await cli.cmd_replay(_ns(skipped=True))
+
+    err = capsys.readouterr().err
+    assert exit_code == 1
+    assert "No joined Shared Session" in err
+    assert "synapse-worker join" in err
+    remaining = TriageLog(state_dir).load_skipped()
+    assert [(s.id, r) for s, r in remaining] == [("s-skipped", "lint-clean")]  # untouched
+    assert not list(state_dir.glob("triage-skips.replayed-*.jsonl"))          # not archived
+
+
 async def test_replay_skipped_prefers_joined_binding_over_cli_defaults(
     tmp_path, monkeypatch, capsys
 ) -> None:
     """`_build` prefers a joined SessionBinding over --contributor/--shared-id
-    for `run`; `replay --skipped` must make the same choice, or a user who ran
-    `join team-standup --contributor akhil` gets every recovered finding
-    attributed to the CLI default contributor and routed to the wrong Shared
-    Session."""
+    for `run`; `replay --skipped` must make the same choice (there is no
+    --contributor/--shared-id fallback for --skipped at all -- see
+    test_replay_skipped_refuses_without_a_joined_binding -- so this pins that
+    the VALUES that make it onto the rebuilt binding are the joined ones, not
+    some other stale or default value)."""
     from synapse_contracts import AgentEvent, Segment, SessionBinding, write_binding
     from synapse_worker.triage_log import TriageLog
 
@@ -384,20 +431,18 @@ async def test_replay_skipped_prefers_joined_binding_over_cli_defaults(
     monkeypatch.setattr(cli, "check_canary", _async(PASSING_CANARY))
     seen_bindings = _fake_distiller_builder(monkeypatch)
 
-    exit_code = await cli.cmd_replay(
-        _ns(skipped=True, contributor="aditya", shared_id="local-dev")
-    )
+    exit_code = await cli.cmd_replay(_ns(skipped=True))
 
     assert exit_code == 0
-    assert seen_bindings[0].contributor == "akhil"        # joined, not the CLI default
-    assert seen_bindings[0].shared_id == "team-standup"    # joined, not the CLI default
+    assert seen_bindings[0].contributor == "akhil"        # joined
+    assert seen_bindings[0].shared_id == "team-standup"    # joined
 
 
 async def test_replay_skipped_refuses_when_canary_fails(tmp_path, monkeypatch, capsys) -> None:
     """The prompt-drop refusal `cmd_run` applies before any distillation must
     also gate `replay --skipped` — otherwise a model that stopped reading its
     prompt writes invented findings straight into the write-ahead log."""
-    from synapse_contracts import AgentEvent, Segment
+    from synapse_contracts import AgentEvent, Segment, SessionBinding, write_binding
     from synapse_worker.triage_log import TriageLog
 
     state_dir = tmp_path / ".synapse"
@@ -407,6 +452,14 @@ async def test_replay_skipped_refuses_when_canary_fails(tmp_path, monkeypatch, c
                                      ts=ts, agent_session_id="as-t")],
                   started_at=ts, ended_at=ts)
     TriageLog(state_dir).record_skip(seg, "lint-clean")
+    write_binding(
+        cli.binding_path_for_agent(state_dir, cli.DEFAULT_AGENT),
+        SessionBinding(
+            agent_session_id="as-t", shared_id="local-dev",
+            contributor="aditya", agent=cli.DEFAULT_AGENT,
+            transcript_path=str(tmp_path / "sess.jsonl"), pinned_at=ts,
+        ),
+    )
 
     monkeypatch.setattr(cli, "check_canary", _async(FAILING_CANARY))
 
@@ -437,6 +490,8 @@ async def test_replay_skipped_requeues_only_the_failed_segment(
     from synapse_contracts import AgentEvent, Attribution, Finding, FindingType, Segment
     from synapse_worker.triage_log import TriageLog
 
+    from synapse_contracts import SessionBinding, write_binding
+
     state_dir = tmp_path / ".synapse"
     ts = datetime(2026, 8, 4, tzinfo=timezone.utc)
     log = TriageLog(state_dir)
@@ -450,6 +505,14 @@ async def test_replay_skipped_requeues_only_the_failed_segment(
                   started_at=ts, ended_at=ts)
     log.record_skip(good, "lint-clean")
     log.record_skip(bad, "readonly-run")
+    write_binding(
+        cli.binding_path_for_agent(state_dir, cli.DEFAULT_AGENT),
+        SessionBinding(
+            agent_session_id="as-t", shared_id="local-dev",
+            contributor="aditya", agent=cli.DEFAULT_AGENT,
+            transcript_path=str(tmp_path / "sess.jsonl"), pinned_at=ts,
+        ),
+    )
 
     monkeypatch.setattr(cli, "check_canary", _async(PASSING_CANARY))
 
