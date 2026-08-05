@@ -10,10 +10,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-from synapse_contracts import Attribution, Finding, FindingType, LocalBinding
+from synapse_contracts import (
+    Attribution,
+    Finding,
+    FindingType,
+    LocalBinding,
+    SessionBinding,
+    write_binding,
+)
 from synapse_distiller import Distiller, load_pack_by_name
 from synapse_providers import FakeProvider
 
+from synapse_worker.discovery import binding_path_for_agent
 from synapse_worker.loop import WorkerLoop
 from synapse_worker.producer import FileSink, Producer
 
@@ -276,6 +284,83 @@ async def test_worker_loop_syncs_the_producer_to_its_own_binding_on_construction
     ]
     assert upstream == ["fresh"]
     assert producer.pending_count() == (0, 1)
+
+
+async def test_live_worker_notices_a_join_to_a_different_session_mid_run(tmp_path) -> None:
+    """The same-process half of trap #8 (fixer-blocker fix). `synapse-worker
+    join <new_id>`, typed in another terminal while THIS `run` is still
+    live, writes straight to `.synapse/bindings/claude-code.json` -- there
+    is no other channel to the running process. The test right above this
+    one (`test_worker_loop_syncs_the_producer_to_its_own_binding_on_
+    construction`) only pins the ONE-TIME sync `WorkerLoop.__init__` does;
+    it cannot detect a re-join that happens after construction, which is
+    the normal way a developer switches sessions mid-work. Without
+    `_sync_binding_from_disk`, a Finding recorded under the ORIGINAL
+    binding keeps reading as deliverable under it forever -- and the
+    orchestrator, which resolves the destination fresh from disk on every
+    POST (`_resolve_binding_for_agent`), would then deliver it under
+    whatever the join moved to: a real cross-session leak, not a cosmetic
+    mis-report. This pins the fix end to end through `tick()`; test_producer.py
+    already pins the Producer half of the mechanism in isolation."""
+    state_dir = tmp_path / "state"
+    transcript = tmp_path / "t.jsonl"
+    transcript.touch()
+    producer = Producer(state_dir / "wal", FileSink(tmp_path / "upstream.jsonl"))
+    loop = WorkerLoop(
+        transcript=transcript,
+        distiller=Distiller(FakeProvider(scripts=[]), BINDING, PACK, ["text"], "labelled"),
+        producer=producer,
+        binding=BINDING,  # shared_id="shared-1"
+        state_dir=state_dir,
+        budget_tokens=5000,
+    )
+    stale = Finding(
+        id="f-A", type=FindingType.LEARNING, text="recorded under session A",
+        attributions=[Attribution(contributor="aditya", agent_session="sess-1",
+                                  agent="claude-code")],
+        ts=datetime(2026, 8, 4, tzinfo=timezone.utc),
+    )
+    producer.record([stale])  # recorded while bound to "shared-1" (construction synced this)
+    assert producer.pending_count() == (1, 0)  # deliverable under the original binding
+
+    # `synapse-worker join shared-2` in another terminal -- writes the join
+    # binding file directly. Nothing calls `producer.rebind()` from here;
+    # this is exactly the gap the fix closes.
+    write_binding(
+        binding_path_for_agent(state_dir, "claude-code"),
+        SessionBinding(
+            agent_session_id="sess-1", shared_id="shared-2", contributor="aditya",
+            agent="claude-code", transcript_path=str(transcript),
+            pinned_at=datetime(2026, 8, 4, tzinfo=timezone.utc),
+        ),
+    )
+
+    # No new transcript content -- this also exercises the "no change"
+    # retry-flush path, which must notice the re-join too (STATE.md trap #8's
+    # scenario calls `flush()` with nothing new having happened).
+    result = await loop.tick()
+
+    assert result.held == 1
+    assert result.sent == 0
+    assert producer.pending_count() == (0, 1)  # held, not lost, not retargeted
+    assert not (tmp_path / "upstream.jsonl").exists()  # never shipped to session B
+
+    # Re-joining BACK to the session it was actually produced under drains
+    # it -- the other half of the guarantee (mirrors test_producer.py's
+    # test_rejoin_back_to_the_original_session_drains_the_held_finding).
+    write_binding(
+        binding_path_for_agent(state_dir, "claude-code"),
+        SessionBinding(
+            agent_session_id="sess-1", shared_id="shared-1", contributor="aditya",
+            agent="claude-code", transcript_path=str(transcript),
+            pinned_at=datetime(2026, 8, 4, tzinfo=timezone.utc),
+        ),
+    )
+    drained = await loop.tick()
+
+    assert drained.sent == 1
+    assert drained.held == 0
+    assert producer.pending_count() == (0, 0)
 
 
 async def test_bookkeeping_lines_produce_no_segments(tmp_path) -> None:

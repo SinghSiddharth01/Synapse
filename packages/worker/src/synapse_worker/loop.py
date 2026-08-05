@@ -31,11 +31,12 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from synapse_contracts import AgentEvent, LocalBinding, Segment
+from synapse_contracts import AgentEvent, LocalBinding, Segment, read_binding
 from synapse_distiller import Distiller
 from synapse_distiller.guards import PromptDropError
 
 from synapse_worker.compaction import compact
+from synapse_worker.discovery import binding_path_for_agent
 from synapse_worker.follower import TranscriptFollower
 from synapse_worker.producer import Producer
 from synapse_worker.segmenter import Segmenter
@@ -112,6 +113,24 @@ class WorkerLoop:
         # `flush()`'s notion of "current" to always match the binding this
         # loop actually runs under, not a stale or default value from
         # construction time.
+        #
+        # AMENDMENT (fixer pass, blocker): this alone only covers the
+        # cross-process half of trap #8 — a NEW `run` started after `join
+        # <new_id>` picks the new binding up correctly, because `_build`
+        # re-resolves it from disk before constructing this loop at all. The
+        # same-process half (`synapse-worker join <new_id>` typed in another
+        # terminal while THIS `run` is still live) has no channel to this
+        # object at all: nothing here ever re-reads
+        # `.synapse/bindings/<agent>.json` again after this one call, so a
+        # Finding recorded under the old binding before the re-join would
+        # keep reading as deliverable under the old `shared_id` forever, and
+        # `flush()` would ship it — which the orchestrator, resolving the
+        # destination fresh from disk on every POST
+        # (`_resolve_binding_for_agent`, its own docstring: "read fresh from
+        # disk"), would then deliver under the NEW session. `_sync_binding_
+        # from_disk` below closes that gap by doing on the worker side,
+        # once per `tick()`/`shutdown()`, exactly what the orchestrator
+        # already does per POST.
         self.producer.rebind(binding.shared_id)
         self.state_dir = Path(state_dir)
         self.state_dir.mkdir(parents=True, exist_ok=True)
@@ -161,6 +180,38 @@ class WorkerLoop:
         self.follower.start_at_end(self.transcript)
         self.follower.save()
 
+    def _sync_binding_from_disk(self) -> None:
+        """Re-resolve this Agent product's join binding from disk and
+        `rebind()` the Producer when it moved — the same-process half of
+        the re-join envelope (STATE.md trap #8) that `__init__`'s one-time
+        `rebind()` call cannot cover; see the comment there.
+
+        Called at the top of every `tick()` (including the "no change"
+        retry-flush path, so a re-join is noticed even with no new
+        transcript content) and at the top of `shutdown()` — anywhere this
+        loop is about to consult or act on "the current binding".
+
+        Deliberately narrow: only a REAL on-disk join binding for THIS
+        loop's own Agent product (`binding_path_for_agent(state_dir,
+        self.binding.agent)`) can move the Producer's target, and only when
+        its `shared_id` actually differs from what's currently bound — an
+        absent file (never joined, or `--transcript`/`--shared-id` used
+        directly) leaves the constructed binding untouched, exactly as
+        before this method existed. A single small JSON file stat+read per
+        call is the same cost the orchestrator already pays reading this
+        same shape of file fresh on every POST
+        (`_resolve_binding_for_agent`).
+        """
+        joined = read_binding(binding_path_for_agent(self.state_dir, self.binding.agent))
+        if joined is not None and joined.shared_id != self.producer.shared_id:
+            logger.info(
+                "Live re-join detected (%r -> %r); syncing the write-ahead "
+                "log's notion of \"current\" so nothing already queued is "
+                "silently retargeted",
+                self.producer.shared_id, joined.shared_id,
+            )
+            self.producer.rebind(joined.shared_id)
+
     def _compact(self, segment: Segment) -> Segment:
         """Compaction (Plan A.5) — BEFORE triage, always, in both `tick()`
         and `shutdown()`. See compaction.py's module docstring for why the
@@ -198,6 +249,13 @@ class WorkerLoop:
 
     async def tick(self) -> TickResult:
         result = TickResult()
+        # Before anything else: notice a `synapse-worker join <new_id>` that
+        # happened in another terminal since the last tick — see
+        # `_sync_binding_from_disk`'s docstring and STATE.md trap #8. Must
+        # run even on the "no change" retry-flush path immediately below,
+        # since that path still calls `flush()`/`pending_count()` against
+        # `self.producer`'s notion of "current".
+        self._sync_binding_from_disk()
 
         if not self.follower.has_new_data(self.transcript):
             idle = (datetime.now(timezone.utc) - self._last_change).total_seconds()
@@ -337,6 +395,9 @@ class WorkerLoop:
     async def shutdown(self) -> TickResult:
         """Flush the open turn so nothing is stranded mid-conversation."""
         logger.info("Shutting down: flushing the open turn")
+        # Same reasoning as tick()'s call — a re-join could have happened
+        # after the last tick and before shutdown flushes.
+        self._sync_binding_from_disk()
         result = TickResult(flushed_incomplete=True)
         segments = self.segmenter.drain(flush_incomplete=True)
         result.segments = len(segments)
