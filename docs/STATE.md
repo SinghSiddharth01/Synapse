@@ -1,4 +1,8 @@
-# Where things stand — 2026-08-05 end of day
+# Where things stand — 2026-08-05, brain merged
+
+**The brain is on `main`.** `feat/shared-memory-store` (append-only log, fold, five-lane candidate selection, topics, recall harness) landed behind the storage seam via `feat/brain-integration` — reviewed from both sides, designed, specced, planned through two persona rounds, implemented, adversarially reviewed, and verified clean. **526 tests green.** Retrieval and synthesis now share one bounded `candidates()` lookup (lanes + RRF) instead of a whole-log prompt and a recency slice; tombstones are a derived condition per ADR 0004; topics reach the briefing as labels (the topic *lane* ships off, measured at zero yield). `docs/demo-script.md` is the demo runbook.
+
+Below, the pre-brain state of 2026-08-04 for history:
 
 **All four exec plans are merged to `main`.** E1 (corpus + privacy metric), E2 (triage), E3 (service), E4 (orchestrator content) each landed through the same gate — dev branch, adversarial review, adjudicated fixes, verifier verdict **clean** — and then `main` picked up six more commits closing the seams between them: triage pinned against the now-complete corpus expectation map, the three-package closed-loop test, two E3 residual fixes (`CANDIDATE_WINDOW` pinned at the route, a `/synthesize` resync-self-heal endpoint), and two docs passes repairing amendments the verifiers had flagged. 387 tests green offline, 96% overall line coverage, 100% on both CLI entry points (`synapse-worker` and `synapse-orchestrator`).
 
