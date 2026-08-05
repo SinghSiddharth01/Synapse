@@ -83,11 +83,12 @@ def test_unbound_producer_returns_503_and_never_invents_a_session(tmp_path):
     def handler(request):
         raise AssertionError("nothing should egress while unbound")
     relay = Relay(tmp_path, "http://svc", "sh-1", transport=httpx.MockTransport(handler))
-    app = build_app(relay, resolve_binding=lambda: None)
+    app = build_app(relay, resolve_binding_for_agent=lambda agent: None)
     with TestClient(app) as client:
         resp = client.post("/producer/findings", json={"findings": [FINDING]})
     assert resp.status_code == 503
     assert "not joined" in resp.json()["error"]
+    assert "claude-code" in resp.json()["error"]              # names the unmatched agent
     assert relay.shared_id == "sh-1"                          # never rebound away
     assert not (tmp_path / "findings.jsonl").exists()          # never durably recorded either
 
@@ -95,12 +96,11 @@ def test_unbound_producer_returns_503_and_never_invents_a_session(tmp_path):
 def test_producer_endpoint_preserves_producer_supplied_attribution(tmp_path):
     """Post-review amendment (2026-08-04): the worker already stamps
     Attribution correctly from its own LocalBinding (distiller.py) — this
-    endpoint must NOT re-stamp it from whichever single binding
-    `resolve_binding` currently resolves to, since that binding is picked
-    across every joined Agent product ("most recently joined wins") and
-    re-stamping silently relabelled a DIFFERENT product's Finding with the
-    wrong Contributor/Agent Session/Agent whenever more than one product was
-    joined at once (round 2 review, blocker)."""
+    endpoint must NOT re-stamp it from whichever single binding happens to
+    be resolved, since a naive single 'most recently joined' pick relabels a
+    DIFFERENT product's Finding with the wrong Contributor/Agent
+    Session/Agent whenever more than one product is joined at once (round 2
+    review, blocker)."""
     forwarded = []
     def handler(request: httpx.Request) -> httpx.Response:
         forwarded.append(json.loads(request.content))
@@ -108,22 +108,72 @@ def test_producer_endpoint_preserves_producer_supplied_attribution(tmp_path):
     binding = LocalBinding(agent_session_id="as-claude", shared_id="sh-real",
                            contributor="aditya", agent="claude-code")
     relay = Relay(tmp_path, "http://svc", None, transport=httpx.MockTransport(handler))
-    app = build_app(relay, resolve_binding=lambda: binding)
+    app = build_app(relay, resolve_binding_for_agent=lambda agent:
+                    binding if agent == "claude-code" else None)
 
-    # A Finding attributed to a DIFFERENT product/session than the currently
-    # resolved binding -- e.g. produced by a codex worker while claude-code's
-    # binding happens to be what resolve_binding() currently returns.
-    codex_attributed = dict(FINDING, attributions=[{"contributor": "akhil",
-                                                     "agent_session": "as-codex",
-                                                     "agent": "codex"}])
+    # A Finding attributed to a DIFFERENT product than the one this test's
+    # ONLY joined binding belongs to (claude-code) -- e.g. produced by a
+    # codex worker with nothing joined for codex specifically. Must be
+    # rejected (503, nothing egresses), not silently routed/stamped onto
+    # claude-code's binding -- that IS the round 3 regression this test
+    # would have missed if it kept resolving a single "current" binding.
+    codex_attributed = dict(FINDING, id="f-codex",
+                            attributions=[{"contributor": "akhil",
+                                          "agent_session": "as-codex", "agent": "codex"}])
     with TestClient(app) as client:
         resp = client.post("/producer/findings", json={"findings": [codex_attributed]})
+        assert resp.status_code == 503
+        assert "codex" in resp.json()["error"]
 
+        # The SAME app, SAME session: a Finding correctly matched against a
+        # binding that IS joined for its own product -- attribution passes
+        # through unchanged.
+        resp = client.post("/producer/findings", json={"findings": [FINDING]})
     assert resp.status_code == 200
     assert resp.json() == {"accepted": 1, "sent": True}
     [sent_attribution] = forwarded[0]["findings"][0]["attributions"]
-    assert sent_attribution == {"contributor": "akhil", "agent_session": "as-codex",
-                                "agent": "codex"}             # preserved, not overwritten
+    assert sent_attribution == {"contributor": "aditya", "agent_session": "as-1",
+                                "agent": "claude-code"}       # preserved, not overwritten
+
+
+def test_producer_endpoint_routes_each_agent_to_its_own_shared_session(tmp_path):
+    """The residual round 3 blocker, closed: with TWO Agent products joined
+    to TWO different Shared Sessions at once, a Finding correctly attributed
+    to one must never egress into the other's Shared Session, even though a
+    single 'most recently joined overall' binding pick would have sent it
+    there. Reproduces the exact scenario from round 3's verify_probe2.py."""
+    claude_binding = LocalBinding(agent_session_id="as-claude", shared_id="sh-A",
+                                  contributor="aditya", agent="claude-code")
+    codex_binding = LocalBinding(agent_session_id="as-codex", shared_id="sh-B",
+                                 contributor="akhil", agent="codex")
+    bindings = {"claude-code": claude_binding, "codex": codex_binding}
+
+    forwarded = []
+    def handler(request: httpx.Request) -> httpx.Response:
+        forwarded.append((str(request.url), json.loads(request.content)))
+        return httpx.Response(200, json={"accepted": 1, "memory_version": 1})
+    relay = Relay(tmp_path, "http://svc", None, transport=httpx.MockTransport(handler))
+    app = build_app(relay, resolve_binding_for_agent=bindings.get)
+
+    claude_attributed = dict(FINDING, id="f-claude",
+                             attributions=[{"contributor": "aditya", "agent_session": "as-claude",
+                                           "agent": "claude-code"}])
+    codex_attributed = dict(FINDING, id="f-codex",
+                            attributions=[{"contributor": "akhil", "agent_session": "as-codex",
+                                          "agent": "codex"}])
+    with TestClient(app) as client:
+        resp = client.post("/producer/findings", json={"findings": [claude_attributed]})
+        assert resp.status_code == 200
+        resp = client.post("/producer/findings", json={"findings": [codex_attributed]})
+        assert resp.status_code == 200
+
+    by_url = {url: body for url, body in forwarded}
+    assert by_url["http://svc/v1/sessions/sh-A/findings"]["findings"][0]["id"] == "f-claude"
+    assert by_url["http://svc/v1/sessions/sh-B/findings"]["findings"][0]["id"] == "f-codex"
+    assert by_url["http://svc/v1/sessions/sh-A/findings"]["findings"][0]["attributions"][0][
+        "agent"] == "claude-code"
+    assert by_url["http://svc/v1/sessions/sh-B/findings"]["findings"][0]["attributions"][0][
+        "agent"] == "codex"
 
 
 def test_producer_endpoint_rejects_empty_attributions(tmp_path):
@@ -174,7 +224,15 @@ def test_rejoin_does_not_retarget_a_still_queued_finding_through_the_real_endpoi
     through the actual Starlette endpoint: a POST while bound to sh-PRIVATE
     queues (service down); the operator re-joins sh-OTHERTEAM; the service
     comes back for the NEXT POST. The first (private) Finding must still be
-    delivered to sh-PRIVATE, never to sh-OTHERTEAM."""
+    delivered to sh-PRIVATE, never to sh-OTHERTEAM.
+
+    NOTE (round 3 review, scope caveat): this reproduces the leak being
+    closed at the ORCHESTRATOR's own boundary — the durable log this
+    process owns is partitioned correctly. It does NOT reproduce (and
+    cannot, from here) the sibling gap where the Finding is still sitting in
+    the WORKER's own write-ahead log at the moment of the re-join — that
+    needs a worker-side fix out of scope for this branch; see relay.py's
+    module docstring, round 3 note."""
     private = LocalBinding(agent_session_id="as-1", shared_id="sh-PRIVATE",
                            contributor="aditya", agent="claude-code")
     joined = {"binding": private}
@@ -182,7 +240,7 @@ def test_rejoin_does_not_retarget_a_still_queued_finding_through_the_real_endpoi
     def down(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("down")
     relay = Relay(tmp_path, "http://svc", None, transport=httpx.MockTransport(down))
-    app = build_app(relay, resolve_binding=lambda: joined["binding"])
+    app = build_app(relay, resolve_binding_for_agent=lambda agent: joined["binding"])
 
     private_finding = dict(FINDING, id="f-private", text="PRIVATE: the auth key rotation trick")
     with TestClient(app) as client:

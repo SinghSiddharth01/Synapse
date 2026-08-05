@@ -26,6 +26,33 @@ session to go to and stays queued forever; that's a stronger version of the
 same guarantee ("nothing egresses without a real binding") than a wrong
 guess would be. See test_relay.py's re-join tests and `resync()` below,
 whose return type was also corrected in this pass (see its docstring).
+
+#### Post-review amendment (2026-08-04), round 3
+
+Round 3 review found the partition above only closes the leak for whatever
+reaches `record()` — it does not, and structurally cannot, close it for a
+Finding still sitting in the WORKER's own write-ahead log
+(`synapse_worker.producer.Producer`) at the moment of a re-join. That log's
+envelope (`producer.py`) carries `{produced_at, finding}` — no Shared
+Session identity — so when the worker retries a POST after `synapse-worker
+join <new_id>`, this process has no way to tell "queued under the OLD
+session" apart from "produced fresh under the NEW one": both arrive as the
+same `agent_session_id` (a re-join does not start a new Agent Session) with
+no `shared_id` anywhere on the wire. `record()` necessarily tags such a
+retry with whatever binding resolves *now*, which is the new session —
+correct for a genuinely new Finding, wrong for a stale retry, and this
+module cannot distinguish the two from the payload alone.
+
+Closing this fully needs the PRODUCER to declare its Shared Session on the
+wire (or tag its own WAL envelope with one, mirroring this file's
+partitioning one hop upstream) — `synapse_worker.producer` territory, Task
+5, an authorized skip on this branch. What this pass *did* fix in scope:
+the sibling case where two Agent products are joined to two different
+Shared Sessions at once — see `app.py`'s amendment note and
+`_resolve_binding_for_agent` (cli.py) — since that one is resolvable
+entirely from information already on the wire (`Attribution.agent`) without
+any worker change. The single-product re-join gap above is not closed by
+this pass and should not be read as closed by the paragraph above it.
 """
 
 from __future__ import annotations
@@ -70,8 +97,10 @@ class Relay:
         self.shared_id = shared_id
 
     # ── write-ahead ─────────────────────────────────────────────────────────
-    def record(self, findings: list[Finding]) -> None:
-        """Append each Finding, tagged with the Shared Session bound RIGHT NOW.
+    _UNSET = object()
+
+    def record(self, findings: list[Finding], *, shared_id: str | None = _UNSET) -> None:
+        """Append each Finding, tagged with a Shared Session.
 
         That tag travels with the Finding for the rest of its life in this
         log. `flush()`/`resync()` read it back and send each Finding only to
@@ -79,10 +108,25 @@ class Relay:
         send time. That is what makes a `rebind()` between `record()` and a
         later `flush()` safe: a still-queued Finding stays addressed to the
         session it was actually produced under.
+
+        `shared_id`, when given, tags EVERY Finding in this call with that
+        exact value instead of `self.shared_id` — for a caller that already
+        resolved the right target itself (e.g. `contribute()` in server.py
+        passing the binding it just re-resolved live, or the producer
+        endpoint in app.py passing the binding matched to each Finding's
+        `attributions[0].agent`). That avoids a second, independent hazard:
+        `self.shared_id` is mutable (`rebind()`), so two coroutines sharing
+        one `Relay` could otherwise have one's `record()` observe the
+        other's `rebind()` between call and `await flush()` (round 2/3
+        review). Passing `shared_id` explicitly means this call never reads
+        `self.shared_id` at all. Omitted, this call falls back to
+        `self.shared_id` exactly as before — every existing caller/test that
+        doesn't know its own target session yet.
         """
+        target = self.shared_id if shared_id is self._UNSET else shared_id
         with self.findings_path.open("a", encoding="utf-8") as fh:
             for f in findings:
-                envelope = {"shared_id": self.shared_id, "finding": f.model_dump(mode="json")}
+                envelope = {"shared_id": target, "finding": f.model_dump(mode="json")}
                 fh.write(json.dumps(envelope) + "\n")
 
     def _load(self, path: Path) -> list[str]:

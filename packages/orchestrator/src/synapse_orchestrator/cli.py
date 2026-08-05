@@ -32,22 +32,36 @@ from synapse_orchestrator.relay import Relay
 from synapse_orchestrator.server import create_mcp, register_tools
 
 
+def _bindings_dir(state_dir: Path) -> Path:
+    return state_dir / "bindings"
+
+
 def _resolve_binding(state_dir: Path) -> LocalBinding | None:
-    """The orchestrator's current binding, read fresh from disk.
+    """The orchestrator's current "primary" binding, read fresh from disk.
 
     One file per Agent PRODUCT (`bindings/claude-code.json`, `bindings/codex.json`
     — Plan D.2), never a single hardcoded path: `synapse_worker.discovery` writes
     one binding per product a user joins, and a Codex-only join must not be
     invisible to an orchestrator that only ever looked for `claude-code.json`.
     When more than one product is bound, the most recently joined one wins —
-    this process serves one Shared Session context at a time.
+    this process serves one Shared Session context at a time for the
+    surfaces that need exactly one "current" binding: the arrival briefing,
+    the startup banner, and `query`/`contribute` (server.py), which speak
+    for whichever conversation is actually attached to this MCP connection.
 
     Called fresh (not cached) by every caller that needs "the binding right
     now": a `synapse-worker join` run after this process started must take
-    effect without a restart, at least on the paths that re-resolve it
-    (the producer endpoint — see app.py).
+    effect without a restart (see server.py's `register_tools` and its round
+    3 amendment note).
+
+    NOT what the producer endpoint uses to decide where an incoming Finding
+    is routed — see `_resolve_binding_for_agent` below. Using this "most
+    recently joined, across every product" pick to route Findings was round
+    3 review's residual blocker: a Finding correctly attributed to codex
+    still egressed to whatever session claude-code happened to be joined
+    to, whenever both were joined at once.
     """
-    bindings_dir = state_dir / "bindings"
+    bindings_dir = _bindings_dir(state_dir)
     if not bindings_dir.is_dir():
         return None
     found = [b for b in (read_binding(p) for p in sorted(bindings_dir.glob("*.json")))
@@ -55,6 +69,24 @@ def _resolve_binding(state_dir: Path) -> LocalBinding | None:
     if not found:
         return None
     return max(found, key=lambda b: b.pinned_at).to_local_binding()
+
+
+def _resolve_binding_for_agent(state_dir: Path, agent: str) -> LocalBinding | None:
+    """The binding for exactly ONE Agent product (`bindings/<agent>.json`),
+    read fresh from disk — never "most recently joined across every
+    product" like `_resolve_binding` above.
+
+    This is what lets the producer endpoint (app.py) route each incoming
+    Finding to the Shared Session ITS OWN Agent product is joined to,
+    rather than to whichever product happens to be the most recently
+    joined overall. Added in round 3 review's fix pass: matching per-Finding
+    on `attributions[0].agent` is what closes the two-products-joined-to-
+    two-different-sessions leak that surviving the round 2 fix pass left
+    open (round 2 preserved attribution content but still routed via
+    `_resolve_binding`'s single pick).
+    """
+    binding = read_binding(_bindings_dir(state_dir) / f"{agent}.json")
+    return binding.to_local_binding() if binding is not None else None
 
 
 def build_npu_distiller(binding: LocalBinding):
@@ -163,14 +195,17 @@ def main(argv: list[str] | None = None, *,
     def resolve_binding() -> LocalBinding | None:
         return _resolve_binding(state_dir)
 
+    def resolve_binding_for_agent(agent: str) -> LocalBinding | None:
+        return _resolve_binding_for_agent(state_dir, agent)
+
     binding = resolve_binding()
     shared_id = binding.shared_id if binding is not None else None
     # Constructed with `shared_id` possibly None rather than the string
     # "unbound" — Relay refuses to egress when unbound instead of inventing a
     # session id to post real Findings to (see relay.py). The producer
-    # endpoint additionally re-resolves the binding on every request via
-    # `resolve_binding` below, so a `join` run after this process started is
-    # picked up without a restart on that path.
+    # endpoint additionally re-resolves per Finding via
+    # `resolve_binding_for_agent` below, so a `join` run after this process
+    # started is picked up without a restart on that path.
     relay = Relay(state_dir / "relay", args.service_url, shared_id, transport=transport)
 
     briefing = asyncio.run(build_briefing(binding, args.service_url, transport=transport))
@@ -179,7 +214,7 @@ def main(argv: list[str] | None = None, *,
         register_tools(server, binding=binding, service_url=args.service_url, relay=relay,
                        distiller_factory=lambda: build_npu_distiller(binding),
                        transport=transport)
-    app = build_app(relay, server, resolve_binding=resolve_binding)
+    app = build_app(relay, server, resolve_binding_for_agent=resolve_binding_for_agent)
     print(f"synapse-orchestrator on http://{args.host}:{args.port} "
           f"(mcp at /mcp, producer at /producer/findings, "
           f"session: {shared_id or 'unbound'})")

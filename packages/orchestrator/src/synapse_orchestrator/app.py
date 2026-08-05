@@ -37,6 +37,40 @@ trust boundary:
    taking custody of Findings it has nowhere to route. Nothing egresses
    without a real binding, and now nothing is even durably recorded here
    without one either.
+
+#### Post-review amendment (2026-08-04), round 3
+
+Round 3 review found the fix above closed attribution trust but not
+routing: preserving `attributions` as the producer sent them means nothing
+if the endpoint still tags/routes every Finding in a POST to the SAME
+single `resolve_binding()` result, picked as "most recently joined across
+every Agent product" (cli.py's `_resolve_binding`). With two products
+joined to two different Shared Sessions, a correctly-attributed
+codex-produced Finding was still egressing to whatever session claude-code
+happened to be joined to (or vice versa) — a live cross-Shared-Session leak,
+reproduced end-to-end in `test_producer_endpoint.py`.
+
+Fixed by resolving PER FINDING instead of once per request:
+`resolve_binding_for_agent`, when given, is called with each Finding's
+`attributions[0].agent` — not the single `resolve_binding` used elsewhere
+in this module for the "no product joined at all" 503 gate. Each Finding is
+recorded (`relay.record(group, shared_id=...)`, relay.py's new per-call
+override) and routed to the binding that actually matches the Agent that
+produced it. A Finding whose agent has no matching binding — including the
+case where nothing at all is joined — 503s the same way as before, naming
+the unmatched agent(s), and (same as before) nothing is durably recorded
+for a request that 503s.
+
+This does NOT close the sibling gap for a Finding queued in the WORKER's
+own write-ahead log across a re-join of the SAME Agent product — see
+relay.py's module docstring, "round 3" note, for why that one needs a
+worker-side (Task 5) change this branch does not make.
+
+`relay.rebind()` is no longer called from this endpoint at all: each group
+is recorded with its own resolved `shared_id` passed explicitly, so this
+path no longer depends on (or mutates) `relay.shared_id` — removing the
+second concurrency hazard round 2/3 review flagged ("two in-flight POSTs
+mutate the same `relay.shared_id` between rebind and await flush").
 """
 
 from __future__ import annotations
@@ -84,17 +118,23 @@ def _trust_violation(findings: list[Finding]) -> str | None:
 
 
 def build_app(relay: Relay, mcp_server=None, *,
-             resolve_binding: Callable[[], LocalBinding | None] | None = None) -> Starlette:
-    """`resolve_binding`, when given, is called fresh on every POST.
+             resolve_binding_for_agent: Callable[[str], LocalBinding | None] | None = None
+             ) -> Starlette:
+    """`resolve_binding_for_agent`, when given, is called fresh on every POST,
+    once per distinct Agent found among the batch's Findings (each Finding's
+    `attributions[0].agent` — the Agent that actually produced it, never
+    re-stamped; see the module docstring's amendment notes).
 
-    Two things depend on reading it live rather than once at boot: (1) a
-    `synapse-worker join` run after this process started must take effect
-    without a restart — `relay.rebind()` follows it, tagging every Finding
-    recorded from this point on with the newly joined Shared Session (see
-    relay.py's `record()`/`rebind()`); (2) when no binding resolves at all,
-    the endpoint 503s rather than accepting a Finding it has nowhere to
-    route — see the module docstring's amendment note. Attribution itself is
-    NOT rewritten from the binding; see the same note.
+    Three things depend on resolving PER AGENT, live, rather than once at
+    boot: (1) a `synapse-worker join` for a given Agent product run after
+    this process started must take effect without a restart; (2) two Agent
+    products joined to two different Shared Sessions must route each
+    Finding to ITS OWN product's Shared Session, never to whichever product
+    happens to be "most recently joined" overall; (3) when a Finding's Agent
+    has no matching binding at all — including the case where nothing is
+    joined — the endpoint 503s rather than accepting a Finding it has
+    nowhere to route. Attribution itself is NOT rewritten from any binding;
+    see the module docstring's round 2 amendment note.
     """
     server = mcp_server or create_mcp()
     app = server.streamable_http_app()
@@ -122,22 +162,38 @@ def build_app(relay: Relay, mcp_server=None, *,
         if violation is not None:
             return JSONResponse({"error": violation}, status_code=422)
 
-        if resolve_binding is not None:
-            # Re-resolved on every call, not captured once at boot — see the
-            # docstring above. When resolve_binding is absent (existing
-            # single-shot callers/tests), the Relay's shared_id as
-            # constructed stands.
-            binding = resolve_binding()
-            if binding is None:
+        if resolve_binding_for_agent is not None:
+            # Re-resolved on every call, per Agent — not captured once at
+            # boot and not a single request-wide binding; see the docstring
+            # above. Grouping first (rather than recording/rebinding as each
+            # Finding is matched) means a request with an unmatched agent
+            # never writes anything durably — same all-or-nothing guarantee
+            # the old single-binding 503 path had.
+            groups: dict[str, list[Finding]] = {}
+            unmatched_agents: set[str] = set()
+            for f in findings:
+                agent = f.attributions[0].agent
+                binding = resolve_binding_for_agent(agent)
+                if binding is None:
+                    unmatched_agents.add(agent)
+                    continue
+                groups.setdefault(binding.shared_id, []).append(f)
+            if unmatched_agents:
+                joined = ", ".join(sorted(unmatched_agents))
                 return JSONResponse(
-                    {"error": "not joined: run `synapse-worker join <shared_id>` "
-                              "before producing findings; nothing egresses without "
-                              "a Shared Session bound"},
+                    {"error": f"not joined for agent(s) {joined}: run "
+                              "`synapse-worker join <shared_id>` before producing "
+                              "findings; nothing egresses without a Shared Session "
+                              "bound for the producing Agent"},
                     status_code=503,
                 )
-            relay.rebind(binding.shared_id)
+            for shared_id, group in groups.items():
+                relay.record(group, shared_id=shared_id)   # durable before any send,
+                                                             # tagged with the binding
+                                                             # that matches ITS agent
+        else:
+            relay.record(findings)                          # legacy/no-resolver callers
 
-        relay.record(findings)                     # durable before any send
         sent, _pending = await relay.flush()       # fail-open: False just queues
         return JSONResponse({"accepted": len(findings), "sent": sent > 0})
 
