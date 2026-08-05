@@ -109,6 +109,51 @@ def test_serve_uses_the_joined_session_when_a_binding_exists(monkeypatch, tmp_pa
     assert "session: sh-joined" in capsys.readouterr().out
 
 
+def test_serve_wires_register_tools_and_the_real_briefing_only_when_bound(
+    monkeypatch, tmp_path
+) -> None:
+    """Pins Task 4's whole CLI composition as an observable effect, not just a
+    printed banner line. Two independent mutations previously survived every
+    test in the suite: cli.main never calling register_tools at all, and
+    cli.main handing create_mcp the wrong (or no) briefing — both regress
+    silently unless something asserts on what main() actually wires together,
+    not just what it prints."""
+    monkeypatch.setattr(cli.uvicorn, "run", lambda app, **kw: None)
+
+    create_mcp_calls: list[str | None] = []
+    register_tools_calls: list[dict] = []
+    real_create_mcp = cli.create_mcp
+    monkeypatch.setattr(cli, "create_mcp",
+                        lambda instructions=None: (create_mcp_calls.append(instructions)
+                                                   or real_create_mcp(instructions)))
+    monkeypatch.setattr(cli, "register_tools",
+                        lambda server, **kw: register_tools_calls.append(kw))
+
+    # Unbound: register_tools must NOT be called, and the briefing handed to
+    # create_mcp must be the plain default — not the joined-session template.
+    cli.main(["--state-dir", str(tmp_path)])
+    assert register_tools_calls == []
+    assert "No session is bound yet" in create_mcp_calls[-1]
+
+    # Bound: register_tools IS called, with the resolved binding — and the
+    # briefing handed to create_mcp is the live, binding-specific one, not a
+    # generic/default string a mutated call could smuggle through instead.
+    write_binding(
+        tmp_path / "bindings" / "claude-code.json",
+        SessionBinding(agent_session_id="as-1", shared_id="sh-wired", contributor="aditya",
+                       agent="claude-code", transcript_path="/tmp/t.jsonl",
+                       pinned_at=datetime(2026, 8, 4, tzinfo=timezone.utc)),
+    )
+    handler = lambda r: httpx.Response(200, json={"version": 2, "new_since": 1,
+                                                  "by_type": {"learning": 1}, "conflicts": 0})
+    cli.main(["--state-dir", str(tmp_path)], transport=httpx.MockTransport(handler))
+
+    assert len(register_tools_calls) == 1
+    assert register_tools_calls[0]["binding"].shared_id == "sh-wired"
+    assert "sh-wired" in create_mcp_calls[-1]
+    assert create_mcp_calls[-1] != create_mcp_calls[0]      # not the same default string
+
+
 def test_serve_falls_back_to_unbound_when_the_bindings_dir_has_no_readable_binding(
     monkeypatch, tmp_path, capsys
 ) -> None:
