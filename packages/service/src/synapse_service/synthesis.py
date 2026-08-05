@@ -80,11 +80,23 @@ class Synthesizer:
         ]
         try:
             result = await self.provider.complete(messages, response_schema=SYNTH_SCHEMA)
-            verdicts = result.data
         except Exception:                                           # noqa: BLE001
             logger.exception("Synthesis failed for %s; findings are landed, memory unchanged",
                              shared_id)
             return ctx
+
+        # Every real provider's documented failure path hands back something
+        # that isn't a verdicts dict: AIC100Provider returns data=None with
+        # schema_valid=False once its retry is exhausted, and
+        # OpenAICompatibleProvider/NPUProvider return the raw text string when
+        # tolerant parsing fails. Only FakeProvider always returns a dict, so
+        # this must be checked explicitly rather than trusted.
+        if not result.schema_valid or not isinstance(result.data, dict):
+            logger.warning("Synthesis returned schema_valid=%s data of type %s for %s; "
+                           "findings are landed, memory unchanged",
+                           result.schema_valid, type(result.data).__name__, shared_id)
+            return ctx
+        verdicts = result.data
 
         known = {f.id for f in store.all_findings(shared_id)}
 

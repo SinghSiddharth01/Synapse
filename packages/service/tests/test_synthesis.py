@@ -93,6 +93,31 @@ async def test_findings_survive_a_synthesis_failure():
     assert ctx.memory_version == 0                           # honestly un-merged
 
 
+async def test_non_dict_verdicts_do_not_crash_merge():
+    """Both real providers can hand back non-dict data on their documented
+    failure path: AIC100Provider returns data=None with schema_valid=False
+    after its retry is exhausted, and OpenAICompatibleProvider/NPUProvider
+    return the raw text string (schema_valid=False) when tolerant parsing
+    fails. FakeProvider can't produce schema_valid=False (it always reports
+    True), so this pins the isinstance(data, dict) half of the guard --
+    merge() must survive whatever shape complete() hands back, not just
+    what FakeProvider happens to script."""
+    store = InMemoryStore()
+    sid = store.create_session(purpose="p", created_by="s").shared_id
+    ctx = await Synthesizer(FakeProvider(scripts=[None])).merge(store, sid, _pair())
+    assert len(store.all_findings(sid)) == 2                 # landed anyway
+    assert ctx.memory_version == 0                            # honestly un-merged
+
+
+async def test_text_verdicts_do_not_crash_merge():
+    store = InMemoryStore()
+    sid = store.create_session(purpose="p", created_by="s").shared_id
+    ctx = await Synthesizer(FakeProvider(scripts=["not json, just prose"])).merge(
+        store, sid, _pair())
+    assert len(store.all_findings(sid)) == 2
+    assert ctx.memory_version == 0
+
+
 async def test_unknown_ids_from_the_model_are_ignored_not_fatal():
     store = InMemoryStore()
     sid = store.create_session(purpose="p", created_by="s").shared_id
