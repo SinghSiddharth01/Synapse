@@ -269,6 +269,48 @@ def test_readonly_run_skip_signature_survives_compaction():
     assert (post.keep, post.reason) == (False, "readonly-run")
 
 
+def test_a_real_error_is_not_crowded_out_by_lint_clean_decoys_within_the_survivor_cap():
+    """Fixer-major finding: `_LIKELY_ERROR_LINE_RE` is deliberately broad
+    enough to match a CLEARED clean-report line too -- "Found 3 errors (3
+    fixed, 0 remaining)" trips it on the word "errors" alone, the exact
+    phrase `triage.LINT_CLEAN_RE`/`triage._has_uncleared_error` exist to
+    veto. Before the fix, `_truncate_tool_result_lines` took the first
+    `MAX_SURVIVOR_LINES` matches in plain document order with no regard for
+    which ones triage would actually call cleared -- so enough clean stage
+    reports ahead of a real, uncleared failure (here, one `fatal:` line)
+    filled the whole survivor budget and the real failure was truncated
+    away before triage or the model ever saw it. This is deliberately the
+    same shape the finding was verified against: 15 kept head lines, then
+    (inside the truncated middle) 15 lint-clean decoys ahead of one real
+    `fatal:` line, then filler, then a kept tail -- 16 matches competing for
+    a 15-line budget."""
+    head = [f"checking module {i}... ok, nothing notable" for i in range(HEAD_TAIL_LINES)]
+    lint_clean_decoys = [
+        f"eslint stage {i}: {i} errors ({i} fixed, 0 remaining)"
+        for i in range(MAX_SURVIVOR_LINES)
+    ]
+    real_error = ["fatal: unable to access repo: Could not resolve host"]
+    filler = [f"cleanup step {i}... ok, nothing notable" for i in range(14)]
+    tail = [f"trailing status {i}... ok, nothing notable" for i in range(HEAD_TAIL_LINES)]
+    content = "\n".join(head + lint_clean_decoys + real_error + filler + tail)
+
+    segment = _seg([_ev(role="user", kind="tool_result", tool_name="Bash", content=content)])
+
+    # Counterfactual: triage on the RAW segment reads the real, uncleared
+    # failure and keeps -- establishing the finding survives triage's own
+    # judgment when compaction hasn't run in front of it yet.
+    raw_decision = triage(segment)
+    assert (raw_decision.keep, raw_decision.reason) == (True, "error-signal")
+
+    compacted = compact(segment)
+    result_content = compacted.events[0].content
+
+    assert "fatal:" in result_content  # the real failure must not be a casualty
+    # of the budget cap -- see the module docstring's AMENDMENT.
+    compacted_decision = triage(compacted)
+    assert (compacted_decision.keep, compacted_decision.reason) == (True, "error-signal")
+
+
 def test_seg003_oversized_tool_result_compacts_within_budget_and_the_buried_error_survives():
     """Plan A.5's first failing test, and the plan-0 fixture's original
     assertion (test_fixture_corpus.py's

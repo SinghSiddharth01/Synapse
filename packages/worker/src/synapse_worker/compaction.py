@@ -70,6 +70,27 @@ choosing what to KEEP, not judging durability the way triage does: a false
 positive here just keeps one extra line for free, while a false negative
 would permanently discard it before triage or the model ever see the segment.
 Recall-biased on purpose, same asymmetry, deliberately looser pattern.
+
+AMENDMENT (fixer pass, major): breadth on its own was not enough.
+`_LIKELY_ERROR_LINE_RE` matches lines triage itself would call CLEARED — a
+lint report's own count noun ("Found 3 errors (3 fixed, 0 remaining)") trips
+"errors" — and `_truncate_tool_result_lines` used to take `matches[:
+MAX_SURVIVOR_LINES]` in plain document order with no regard for that. On a
+log with enough clean stage reports ahead of a real, uncleared failure (a
+`fatal:` line, say), the decoys filled the whole survivor budget and the one
+line that actually mattered got truncated away — silently, since compaction
+runs before triage and the follower never re-reads a transcript position.
+Fixed by ranking survivors, not just capping them: every match is scored by
+`triage.LINT_CLEAN_RE` — the identical clean-phrase veto `triage.
+_has_uncleared_error` itself uses to decide a clause is cleared — and every
+UNCLEARED match wins the budget over every CLEARED one, `MAX_SURVIVOR_LINES`
+applied only after that reordering. Order is preserved within each group
+(first occurrence first), so this changes nothing about which lines survive
+when there's no decoy competition — it only changes who loses when the
+budget is actually contested. This is compaction's own "keep what triage
+would keep" contract, applied one step earlier: a survivor list can no
+longer be filled entirely by lines triage would call clean while a real
+failure sitting right next to them gets cut.
 """
 
 from __future__ import annotations
@@ -78,7 +99,7 @@ import re
 
 from synapse_contracts import AgentEvent, Segment
 
-from synapse_worker.triage import READONLY_TOOLS
+from synapse_worker.triage import LINT_CLEAN_RE, READONLY_TOOLS
 
 HEAD_TAIL_LINES = 15
 THINKING_LINES = 2
@@ -169,7 +190,16 @@ def _truncate_tool_result_lines(content: str) -> str:
     tail = lines[-HEAD_TAIL_LINES:]
     middle = lines[HEAD_TAIL_LINES: len(lines) - HEAD_TAIL_LINES]
     matches = [line for line in middle if _LIKELY_ERROR_LINE_RE.search(line)]
-    survivors = matches[:MAX_SURVIVOR_LINES]
+    # Rank before capping (see the module docstring's AMENDMENT): an
+    # uncleared match — the same test `triage._has_uncleared_error` applies
+    # per clause — always wins the budget over one `triage.LINT_CLEAN_RE`
+    # would call cleared, so a real failure can never be crowded out by a
+    # clean report's own count noun. First-occurrence order is preserved
+    # within each group; only the two groups are reordered relative to
+    # each other.
+    uncleared = [line for line in matches if not LINT_CLEAN_RE.search(line)]
+    cleared = [line for line in matches if LINT_CLEAN_RE.search(line)]
+    survivors = (uncleared + cleared)[:MAX_SURVIVOR_LINES]
     omitted = len(middle) - len(survivors)
     parts = [*head, f"{_OMISSION_MARKER} ({omitted} lines omitted)", *survivors, *tail]
     return "\n".join(parts)
