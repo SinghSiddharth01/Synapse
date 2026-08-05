@@ -95,6 +95,30 @@ string at 1200 characters, because `topics` is unbounded service-supplied
 content interpolated into agent-facing text. `_compose_message` now
 enforces the same cap (`_MAX_MESSAGE_CHARS`), so this hook actually holds
 the parity its own docstring claims rather than merely asserting it.
+
+COMPOSITION ORDER IS LOAD-BEARING (post-review fix, 2026-08-05), the same
+way it is in the sibling above. The cap truncates from the END, so
+whatever is interpolated LAST pays for unbounded growth in whatever came
+before it. `topics_clause` is unbounded service-supplied content (a
+teammate can label a topic with an arbitrarily long string); the
+`` `query` `` instruction is the entire point of this hook existing --
+losing it to truncation silently degrades signal (3) to a truncated list
+of topic labels with the nudge removed. `_compose_message` previously put
+`topics_clause` BEFORE the instruction, inverted from `briefing.py`'s
+documented ordering, so an oversized topics list truncated away the one
+sentence that matters. It now matches: fixed-size identity clause, then
+the instruction, then the growable `topics_clause` last -- see
+`test_the_notice_is_hard_capped_when_the_watermark_topics_list_is_huge`'s
+`assert "query" in context`, which pins the ordering itself, not just the
+cap.
+
+VOCABULARY (post-review fix, 2026-08-05). This composed line is the one
+string signal (3) ever injects into an agent's context, and it said
+"shared memory for this session" -- bare "session", which CONTEXT.md's
+vocabulary lists under _Avoid_ for both Agent Session and Shared Session.
+The sibling composer gets this right (`briefing.py`: "You are in Synapse
+Shared Session {shared_id} as {contributor}."); this hook now says "for
+this Shared Session" to match.
 """
 
 from __future__ import annotations
@@ -400,10 +424,18 @@ def _compose_message(watermark: dict) -> str:
             if isinstance(topic, dict) and isinstance(topic.get("label"), str):
                 labels.append(_clean(topic["label"]))
     topics_clause = f" Topics: {', '.join(labels)}." if labels else ""
+    # Composition order is load-bearing (module docstring's "COMPOSITION
+    # ORDER" section, mirroring synapse_orchestrator.briefing's own note).
+    # The cap below truncates from the END, so whatever is interpolated
+    # LAST pays for unbounded growth in whatever came before it.
+    # `topics_clause` is unbounded service-supplied content; the `query`
+    # instruction is the entire point of this notice existing, so it goes
+    # BEFORE topics_clause, not after.
     text = (
-        f"Synapse: shared memory for this session moved to v{version} "
-        f"({new_since} new since last checked).{topics_clause} "
-        "Call the `query` tool if this is relevant to what you're doing."
+        f"Synapse: shared memory for this Shared Session moved to v{version} "
+        f"({new_since} new since last checked). Call the `query` tool if "
+        "this is relevant to what you're doing."
+        f"{topics_clause}"
     )
     # Parity with synapse_orchestrator.briefing's identical cap on the same
     # response shape -- see the module docstring's "BOUNDED OUTPUT" section.

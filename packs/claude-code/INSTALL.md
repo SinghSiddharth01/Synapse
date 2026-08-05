@@ -55,13 +55,13 @@ skill and hook both talk to whatever is running right now.
 ## Verify
 
 Ask a teammate to push a finding (or push one yourself with
-`mcp__synapse__contribute` from another joined session), then submit any
+`mcp__synapse__contribute` from another joined Shared Session), then submit any
 prompt in this project. If the shared-memory version moved since the last
 time this hook checked, your next prompt gets a line like:
 
-    Synapse: shared memory for this session moved to v4 (2 new since last
-    checked). Topics: prompt caching. Call the `query` tool if this is
-    relevant to what you're doing.
+    Synapse: shared memory for this Shared Session moved to v4 (2 new since
+    last checked). Call the `query` tool if this is relevant to what
+    you're doing. Topics: prompt caching.
 
 Nothing printing is the expected, common case — silence is signal ③'s
 whole design, not a sign the hook isn't running. To confirm the hook itself

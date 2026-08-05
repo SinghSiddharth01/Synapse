@@ -200,6 +200,11 @@ def test_speaks_once_when_the_version_moves_then_falls_silent_again(tmp_path, wa
     context = output["additionalContext"]
     assert "v4" in context
     assert "prompt caching" in context
+    # CONTEXT.md vocabulary: Agent Session and Shared Session both list
+    # "session (unqualified)" under _Avoid_. This is the one string signal
+    # (3) ever injects into an agent's context.
+    assert "Shared Session" in context
+    assert "this session" not in context
 
     again = _run_hook(state_dir, watermark.url)  # same v4 as last check: silent
     assert again.returncode == 0
@@ -349,6 +354,16 @@ def test_the_notice_is_hard_capped_when_the_watermark_topics_list_is_huge(tmp_pa
     assert len(context) <= 1200
     assert context.endswith("…")  # truncated, not silently cut mid-word only
     assert "v2" in context  # the fixed-size lead-in survives the cap
+    # Composition order is load-bearing (module docstring's "COMPOSITION
+    # ORDER" section): the cap truncates from the END, so an unbounded
+    # topics list must never be interpolated BEFORE the instruction. Before
+    # the fix, `topics_clause` came first and this 60-topic fixture
+    # truncated the entire "Call the `query` tool..." sentence away.
+    assert "query" in context
+    # CONTEXT.md vocabulary: bare "session" is on the _Avoid_ list for both
+    # Agent Session and Shared Session.
+    assert "Shared Session" in context
+    assert "this session" not in context
 
 
 def test_a_topic_label_containing_control_characters_is_cleaned_before_injection(tmp_path, watermark):
@@ -373,6 +388,9 @@ def test_a_topic_label_containing_control_characters_is_cleaned_before_injection
     context = payload["hookSpecificOutput"]["additionalContext"]
     assert "\n" not in context
     assert "prompt caching" in context
+    assert "query" in context
+    assert "Shared Session" in context
+    assert "this session" not in context
 
 
 # ---------------------------------------------------------------------------
