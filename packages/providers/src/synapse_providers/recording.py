@@ -55,6 +55,22 @@ def _preview(text: str) -> str:
     return text[:PREVIEW_CHARS] + ("…" if len(text) > PREVIEW_CHARS else "")
 
 
+def _last_message_preview(messages: list[dict[str, Any]]) -> str:
+    """Preview the call's actual payload, not its boilerplate.
+
+    Every `build_messages`-style caller (distiller, synthesis, retrieval) ends
+    the list with one user message holding the real content -- the rendered
+    segment, or the purpose/working-memory/query/findings block. Everything
+    before it is the system prompt and few-shot pairs, which are identical
+    across every call from a given component and would otherwise fill the
+    entire PREVIEW_CHARS window (see recording.py module docstring: the
+    dashboards exist to show what each call actually asked, not the pack).
+    """
+    if not messages:
+        return ""
+    return str(messages[-1].get("content", ""))
+
+
 class RecordingProvider(ModelProvider):
     def __init__(self, inner: ModelProvider, component: str, log: CallLog) -> None:
         self.inner = inner
@@ -79,7 +95,7 @@ class RecordingProvider(ModelProvider):
             "ts_iso": datetime.now(timezone.utc).isoformat(),
             "component": self.component,
             "provider_id": self.inner.provider_id,
-            "prompt_preview": _preview(" | ".join(str(m.get("content", "")) for m in messages)),
+            "prompt_preview": _preview(_last_message_preview(messages)),
         }
         try:
             result = await self.inner.complete(messages, response_schema)
