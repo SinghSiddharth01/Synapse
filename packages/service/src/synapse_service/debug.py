@@ -171,25 +171,31 @@ _PAGE = """<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
 <title>synapse-service — debug</title>
 <style>
+  /* The teal side of the device boundary — matches docs/architecture.html:
+     teal = cloud/service. The worker page is the copper side. */
   :root {
     color-scheme: dark;
-    --bg: #0b0d10;
-    --panel: #14171c;
-    --panel-2: #191d23;
-    --border: #262b33;
-    --text: #e6e9ef;
-    --dim: #8b93a1;
-    --dimmer: #5b6472;
-    --accent: #5eb0ff;
-    --k-finding: #6b7280;
-    --k-merged: #4ade80;
-    --k-trivial: #f5b942;
-    --k-topic: #60a5fa;
-    --tag-llm: #f5b942;
-    --tag-query: #a78bfa;
-    --tag-synthesis: #4ade80;
+    --bg: #0e1416;
+    --panel: #131c1e;
+    --panel-2: #1a2628;
+    --border: #24363a;
+    --text: #e2eaea;
+    --dim: #8fa3a3;
+    --dimmer: #5f7272;
+    --teal: #5fc6cc;
+    --teal-dim: #35747a;
+    --k-finding: #8fa3a3;
+    --k-merged: #84c88b;
+    --k-trivial: #d6b45c;
+    --k-topic: #7fa8d9;
+    --tag-llm: #5fc6cc;
+    --tag-query: #b49fd1;
+    --tag-synthesis: #84c88b;
+    --red: #e38c80;
     --mono: "SF Mono", ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
   }
   * { box-sizing: border-box; }
@@ -203,193 +209,204 @@ _PAGE = """<!doctype html>
   }
   #banner {
     display: none;
-    background: #3a1219;
-    color: #ffb4c0;
-    border-bottom: 1px solid #6b1a29;
+    background: #15343d;
+    color: #a9dbe0;
+    border-bottom: 1px solid #2a5f6b;
     padding: 8px 16px;
     font-weight: 600;
     letter-spacing: 0.02em;
   }
   #banner.show { display: block; }
   header {
-    padding: 18px 20px 14px;
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 16px; flex-wrap: wrap;
+    padding: 14px 22px;
     border-bottom: 1px solid var(--border);
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 16px;
-    flex-wrap: wrap;
   }
-  header h1 {
-    margin: 0;
-    font-size: 15px;
-    font-weight: 600;
-    letter-spacing: 0.01em;
-  }
+  header h1 { margin: 0; font-size: 13px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; }
   header h1 .dot {
-    display: inline-block;
-    width: 8px; height: 8px;
-    border-radius: 50%;
-    background: var(--k-merged);
-    margin-right: 8px;
-    box-shadow: 0 0 6px var(--k-merged);
+    display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+    background: var(--teal); margin-right: 9px;
+    box-shadow: 0 0 8px var(--teal);
   }
+  header h1 .side { color: var(--teal); }
   #session-select {
+    background: var(--panel); color: var(--text);
+    border: 1px solid var(--border); border-radius: 4px;
+    padding: 5px 10px; font: 12px var(--mono);
+    max-width: 46ch;
+  }
+  #session-select:focus-visible { outline: 2px solid var(--teal); outline-offset: 2px; }
+  main { padding: 18px 22px 48px; max-width: 1160px; margin: 0 auto; }
+
+  /* ── the journey rail: the service's slice, in real order ── */
+  .rail { display: flex; align-items: stretch; gap: 0; margin-bottom: 16px; }
+  .node {
+    flex: 1;
     background: var(--panel);
-    color: var(--text);
     border: 1px solid var(--border);
     border-radius: 6px;
-    padding: 5px 10px;
-    font: 12px var(--mono);
+    padding: 10px 14px 9px;
+    min-width: 0;
   }
-  main {
-    padding: 16px 20px 40px;
-    max-width: 1100px;
-    margin: 0 auto;
+  .link {
+    flex: 0 0 22px; align-self: center; height: 1px;
+    background: var(--teal-dim); position: relative;
   }
-  .strip {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
-    gap: 10px;
-    margin-bottom: 16px;
+  .link::after {
+    content: "";
+    position: absolute; right: -1px; top: -3px;
+    border-left: 5px solid var(--teal-dim);
+    border-top: 3.5px solid transparent;
+    border-bottom: 3.5px solid transparent;
   }
-  .card {
-    background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 10px 14px;
+  .node .label {
+    color: var(--dimmer);
+    font-size: 9px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.14em;
+    margin-bottom: 3px;
   }
-  .card .label {
-    color: var(--dim);
-    font-size: 10px;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    margin-bottom: 4px;
+  .node .value { font-size: 20px; font-weight: 700; line-height: 1.2; }
+  .node .sub { color: var(--dimmer); font-size: 10px; margin-top: 2px; }
+
+  /* FOLD: the hero node — the brain's signature, three verdicts of the View */
+  .node.fold { flex: 1.8; border-color: var(--teal-dim); }
+  .node.fold .label { color: var(--teal); }
+  .node.fold .value span { font-size: 20px; font-weight: 700; }
+  .node.fold .value .v-visible    { color: var(--text); }
+  .node.fold .value .v-superseded { color: var(--k-merged); }
+  .node.fold .value .v-trivial    { color: var(--k-trivial); }
+  .node.fold .value .sep { color: var(--dimmer); font-weight: 400; padding: 0 4px; }
+
+  .topics { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+  .topic-chip {
+    border: 1px solid var(--border); background: var(--panel);
+    border-radius: 4px; padding: 3px 10px;
+    font-size: 11px; color: var(--dim);
   }
-  .card .value { font-size: 18px; font-weight: 600; }
+  .topic-chip b { color: var(--k-topic); }
+
   details.wm {
-    background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 10px 14px;
-    margin-bottom: 16px;
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 6px; padding: 10px 14px; margin-bottom: 16px;
   }
   details.wm summary {
-    cursor: pointer;
-    color: var(--dim);
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
+    cursor: pointer; color: var(--dimmer);
+    font-size: 10px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.14em;
   }
+  details.wm summary:focus-visible { outline: 2px solid var(--teal); outline-offset: 2px; }
   details.wm .wm-body {
-    margin-top: 10px;
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-    color: var(--text);
+    margin-top: 10px; white-space: pre-wrap; overflow-wrap: anywhere;
+    color: var(--dim); max-width: 72ch;
   }
-  .topics {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-    margin-bottom: 16px;
-  }
-  .topic-chip {
-    border: 1px solid var(--border);
-    background: var(--panel);
-    border-radius: 999px;
-    padding: 3px 10px;
-    font-size: 11px;
-    color: var(--dim);
-  }
-  .topic-chip b { color: var(--text); }
+
   h2.section {
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: var(--dim);
+    font-size: 10px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.14em;
+    color: var(--dimmer);
     margin: 22px 0 8px;
   }
   #log-tail, #feed {
     background: var(--panel);
     border: 1px solid var(--border);
-    border-radius: 8px;
+    border-radius: 6px;
     overflow: hidden;
   }
   .entry {
-    padding: 8px 14px;
-    border-bottom: 1px solid var(--border);
-    display: flex;
-    gap: 10px;
-    align-items: baseline;
+    --c: var(--dim);
+    padding: 7px 14px 7px 12px;
+    border-bottom: 1px solid var(--panel-2);
+    border-left: 2px solid var(--c);
+    display: flex; gap: 10px; align-items: baseline;
+    flex-wrap: wrap;
   }
   .entry:last-child { border-bottom: none; }
-  .entry .pos { color: var(--dimmer); flex-shrink: 0; width: 3.5em; text-align: right; }
-  .entry .ts { color: var(--dimmer); flex-shrink: 0; }
+  .entry[data-kind="FindingAppended"] { --c: transparent; }
+  .entry[data-kind="Merged"]          { --c: var(--k-merged); }
+  .entry[data-kind="MarkedTrivial"]   { --c: var(--k-trivial); }
+  .entry[data-kind="TopicAssigned"]   { --c: var(--k-topic); }
+  .entry[data-kind="TopicSplit"]      { --c: var(--k-topic); }
+  .entry[data-tag="llm"]       { --c: var(--tag-llm); }
+  .entry[data-tag="query"]     { --c: var(--tag-query); }
+  .entry[data-tag="synthesis"] { --c: var(--tag-synthesis); }
+  .entry .pos { color: var(--dimmer); flex-shrink: 0; width: 3.2em; text-align: right; font-size: 11px; }
+  .entry .ts { color: var(--dimmer); flex-shrink: 0; font-size: 11px; }
   .entry .kind, .entry .tag {
     flex-shrink: 0;
-    border-radius: 4px;
-    padding: 1px 7px;
-    font-size: 10px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.03em;
-    color: var(--bg);
+    font-size: 10px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.05em;
+    color: var(--c);
   }
-  .entry[data-kind="FindingAppended"] .kind { background: var(--k-finding); }
-  .entry[data-kind="Merged"] .kind         { background: var(--k-merged); }
-  .entry[data-kind="MarkedTrivial"] .kind  { background: var(--k-trivial); }
-  .entry[data-kind="TopicAssigned"] .kind  { background: var(--k-topic); }
-  .entry[data-kind="TopicSplit"] .kind     { background: var(--k-topic); }
-  .entry[data-tag="llm"] .tag        { background: var(--tag-llm); }
-  .entry[data-tag="query"] .tag      { background: var(--tag-query); }
-  .entry[data-tag="synthesis"] .tag  { background: var(--tag-synthesis); }
+  .entry .kind { width: 10.5em; }
+  .entry .tag { width: 6.5em; }
+  .entry[data-kind="FindingAppended"] .kind { color: var(--k-finding); }
+  .entry[data-kind="FindingAppended"] .summary { color: var(--dim); }
+  .entry[data-kind="Merged"] .summary { color: var(--text); font-weight: 600; }
   .entry .summary { flex: 1; overflow-wrap: anywhere; }
   .entry[data-tag] { cursor: pointer; }
   .entry .detail {
     display: none;
-    margin: 8px 14px 12px;
+    margin: 8px 0 4px;
     padding: 10px 12px;
-    background: var(--panel-2);
+    background: var(--bg);
     border: 1px solid var(--border);
-    border-radius: 6px;
-    font-size: 12px;
-    color: var(--dim);
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
+    border-radius: 5px;
+    font-size: 12px; color: var(--dim);
+    white-space: pre-wrap; overflow-wrap: anywhere;
+    flex-basis: 100%;
   }
   .entry.expanded .detail { display: block; }
   .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
   .chip {
+    --c: var(--dim);
     border: 1px solid var(--border);
-    background: var(--panel);
+    background: transparent;
     color: var(--dim);
-    border-radius: 999px;
-    padding: 4px 11px;
-    font-size: 11px;
-    font-family: var(--mono);
-    cursor: pointer;
-    user-select: none;
+    border-radius: 4px;
+    padding: 3px 10px 3px 8px;
+    font-size: 11px; font-family: var(--mono);
+    cursor: pointer; user-select: none;
   }
-  .chip[data-active="true"] { color: var(--bg); border-color: transparent; }
-  .chip[data-tag="llm"][data-active="true"]       { background: var(--tag-llm); }
-  .chip[data-tag="query"][data-active="true"]     { background: var(--tag-query); }
-  .chip[data-tag="synthesis"][data-active="true"] { background: var(--tag-synthesis); }
-  .empty { padding: 24px; text-align: center; color: var(--dimmer); }
+  .chip::before {
+    content: "";
+    display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+    background: var(--c); margin-right: 7px;
+  }
+  .chip[data-tag="llm"]       { --c: var(--tag-llm); }
+  .chip[data-tag="query"]     { --c: var(--tag-query); }
+  .chip[data-tag="synthesis"] { --c: var(--tag-synthesis); }
+  .chip[data-active="false"] { opacity: 0.38; }
+  .chip[data-active="false"]::before { background: var(--dimmer); }
+  .chip:focus-visible { outline: 2px solid var(--teal); outline-offset: 2px; }
+  .empty { padding: 26px; text-align: center; color: var(--dimmer); }
+  @media (max-width: 760px) {
+    .rail { flex-direction: column; gap: 8px; }
+    .link { display: none; }
+  }
 </style>
 </head>
 <body>
 <div id="banner">service unreachable — retrying…</div>
 <header>
-  <h1><span class="dot"></span>synapse-service — debug</h1>
+  <h1><span class="dot"></span>synapse-service <span class="side">· cloud</span></h1>
   <select id="session-select"><option>loading…</option></select>
 </header>
 <main>
-  <div class="strip">
-    <div class="card"><div class="label">Version</div><div class="value" id="stat-version">0</div></div>
-    <div class="card"><div class="label">Visible</div><div class="value" id="stat-visible">0</div></div>
-    <div class="card"><div class="label">Superseded</div><div class="value" id="stat-superseded">0</div></div>
-    <div class="card"><div class="label">Trivial</div><div class="value" id="stat-trivial">0</div></div>
-    <div class="card"><div class="label">Conflicts</div><div class="value" id="stat-conflicts">0</div></div>
+  <div class="rail" aria-label="service pipeline: ingest to query, in order">
+    <div class="node"><div class="label">Ingest</div><div class="value" id="stat-entries">0</div><div class="sub">log entries, append-only</div></div>
+    <span class="link"></span>
+    <div class="node fold">
+      <div class="label">Fold — the View</div>
+      <div class="value"><span class="v-visible" id="stat-visible">0</span><span class="sep">·</span><span class="v-superseded" id="stat-superseded">0</span><span class="sep">·</span><span class="v-trivial" id="stat-trivial">0</span></div>
+      <div class="sub">visible · superseded · trivial</div>
+    </div>
+    <span class="link"></span>
+    <div class="node"><div class="label">Merge</div><div class="value" id="stat-merges">0</div><div class="sub">v<span id="stat-version">0</span> · <span id="stat-conflicts">0</span> conflicts</div></div>
+    <span class="link"></span>
+    <div class="node"><div class="label">Topics</div><div class="value" id="stat-topics">0</div><div class="sub">geometry, labels only</div></div>
+    <span class="link"></span>
+    <div class="node"><div class="label">Query</div><div class="value" id="stat-queries">0</div><div class="sub">suppression-aware</div></div>
   </div>
 
   <div class="topics" id="topics"></div>
@@ -402,11 +419,11 @@ _PAGE = """<!doctype html>
   <h2 class="section">Log tail — the merge/topic feed, tailed</h2>
   <div id="log-tail"><div class="empty">no entries yet</div></div>
 
-  <h2 class="section">LLM · query · synthesis feed</h2>
+  <h2 class="section">LLM · query · synthesis</h2>
   <div class="chips" id="chips">
-    <span class="chip" data-tag="llm" data-active="true">llm</span>
-    <span class="chip" data-tag="query" data-active="true">query</span>
-    <span class="chip" data-tag="synthesis" data-active="true">synthesis</span>
+    <span class="chip" data-tag="llm" data-active="true" tabindex="0">llm</span>
+    <span class="chip" data-tag="query" data-active="true" tabindex="0">query</span>
+    <span class="chip" data-tag="synthesis" data-active="true" tabindex="0">synthesis</span>
   </div>
   <div id="feed"><div class="empty">waiting for the first event…</div></div>
 </main>
@@ -544,6 +561,15 @@ _PAGE = """<!doctype html>
     document.getElementById("stat-superseded").textContent = session.view.superseded;
     document.getElementById("stat-trivial").textContent = session.view.trivial;
     document.getElementById("stat-conflicts").textContent = session.conflicts;
+
+    var se = document.getElementById("stat-entries");
+    if (se) se.textContent = session.log_tail.length;
+    var sm = document.getElementById("stat-merges");
+    if (sm) sm.textContent = session.merges.length;
+    var st = document.getElementById("stat-topics");
+    if (st) st.textContent = session.topics.length;
+    var sq = document.getElementById("stat-queries");
+    if (sq) sq.textContent = session.queries.length;
 
     var topicsEl = document.getElementById("topics");
     topicsEl.innerHTML = session.topics.length
