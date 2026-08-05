@@ -34,15 +34,25 @@ handled here:
   inventing a new one.
 * `response_item` — the actual model-visible conversation (Responses-API
   shaped): `payload` is itself tagged, and this adapter handles `message`,
-  `reasoning`, `function_call`, `function_call_output` — the four that map
-  onto AgentEvent.kind's four members. Everything else (`local_shell_call`,
-  `custom_tool_call`, `web_search_call`, `image_generation_call`, ...) is
+  `reasoning`, `function_call`, `function_call_output`, `custom_tool_call`,
+  `custom_tool_call_output` — mapped onto AgentEvent.kind's four members.
+  `custom_tool_call(_output)` is the wire shape of Codex's `apply_patch` —
+  the freeform-grammar tool that is the primary file-edit path in current
+  Codex (`ToolSpec::Freeform`, `codex-rs/core/src/tools/handlers/
+  apply_patch_spec.rs`), not a JSON `function_call` the way `shell` is —
+  and it maps onto `tool_use`/`tool_result` exactly the way `function_call`/
+  `function_call_output` does: same call_id-keyed name resolution, same
+  "string or content-item list" output shape. Everything else
+  (`local_shell_call`, `web_search_call`, `image_generation_call`,
+  `tool_search_call(_output)`, `compaction`/`context_compaction`, ...) is
   logged and skipped, same policy `ClaudeCodeSource` applies to an unknown
   content-block type.
 * `compacted` — a `RolloutItem::Compacted(CompactedItem)` line, NOT a
   `response_item` payload type (`protocol.rs`'s `RolloutItem` enum has it as
-  a sibling tag to `response_item`, not a variant inside it). `payload.
-  message` is the compaction summary the agent itself wrote, replacing
+  a sibling tag to `response_item`, not a variant inside it — confusingly
+  adjacent to the *different*, still-skipped `response_item` payload type
+  named `"compaction"` above). `payload.message` is the compaction summary
+  the agent itself wrote, replacing
   everything compacted away. Plan A.3 is
   explicit that this is ingested, not dropped: "Compaction summaries the
   agent writes are ingested as events — they are high-density signal, not
@@ -91,12 +101,16 @@ RESPONSE_ITEM_TYPE = "response_item"
 COMPACTED_TYPE = "compacted"
 
 # response_item payload "type" values mapped onto AgentEvent.kind — the four
-# that have a home in the contract. Everything else is logged and skipped.
+# that have a home in the contract. custom_tool_call(_output) is apply_patch's
+# wire shape (a Freeform tool, not a JSON function_call) — see module
+# docstring. Everything else is logged and skipped.
 RESPONSE_ITEM_KINDS = {
     "message": "text",
     "reasoning": "thinking",
     "function_call": "tool_use",
     "function_call_output": "tool_result",
+    "custom_tool_call": "tool_use",
+    "custom_tool_call_output": "tool_result",
 }
 
 _KNOWN_ROLES = {"user", "assistant", "system"}
@@ -236,14 +250,34 @@ class CodexSource:
             if isinstance(call_id, str) and tool_name:
                 self._tool_names[call_id] = tool_name
             body = _stringify(payload.get("arguments"))
-        else:  # function_call_output
+        elif item_type == "custom_tool_call":
+            # apply_patch's wire shape (ToolSpec::Freeform) — same call_id ->
+            # name bookkeeping as function_call, but the argument field is
+            # named "input" and is the raw grammar text, not JSON.
+            tool_name = str(payload.get("name", "")) or None
+            call_id = payload.get("call_id")
+            if isinstance(call_id, str) and tool_name:
+                self._tool_names[call_id] = tool_name
+            body = _stringify(payload.get("input"))
+        elif item_type == "function_call_output":
             call_id = payload.get("call_id")
             if isinstance(call_id, str):
                 tool_name = self._tool_names.get(call_id)
             body = _stringify(payload.get("output"))
+        else:  # custom_tool_call_output
+            # Unlike function_call_output, CustomToolCallOutput carries its
+            # own optional `name` directly on the wire; the call_id map is
+            # only a fallback for when that's absent.
+            call_id = payload.get("call_id")
+            name = payload.get("name")
+            tool_name = str(name) if name else None
+            if tool_name is None and isinstance(call_id, str):
+                tool_name = self._tool_names.get(call_id)
+            body = _stringify(payload.get("output"))
 
-        # Neither function_call nor function_call_output carries a role on
-        # the wire — see the module docstring's "Judgment call" note.
+        # Neither function_call/function_call_output nor
+        # custom_tool_call/custom_tool_call_output carries a role on the
+        # wire — see the module docstring's "Judgment call" note.
         if kind == "tool_use":
             role = "assistant"
         elif kind == "tool_result":

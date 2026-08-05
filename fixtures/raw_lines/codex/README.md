@@ -96,6 +96,23 @@ Code's adapter already produces:
 | `reasoning` | `thinking` | `payload.content` (`ReasoningItemContent`: `reasoning_text`/`text`) or `payload.summary` (`ReasoningItemReasoningSummary`: `summary_text`) — both variants carry a `text` field regardless of tag ([models.rs:1716-1725](https://github.com/openai/codex/blob/fa5d5ae047d1891a2f816c22d9ed926a0728ba47/codex-rs/protocol/src/models.rs#L1716-L1725)); `content` is often absent (`encrypted_content` only) when the provider hides reasoning, so `summary` is the realistic fallback |
 | `function_call` | `tool_use` | `payload.name`, `payload.arguments` (a **JSON-encoded string**, not a parsed object — the Responses API convention, noted directly in the struct's own comment), `payload.call_id` |
 | `function_call_output` | `tool_result` | `payload.call_id`, `payload.output` — encoded as **either a plain string or an array of content items**, confirmed by `FunctionCallOutputPayload`'s hand-written `Serialize`/`Deserialize` ([models.rs:1999-2023](https://github.com/openai/codex/blob/fa5d5ae047d1891a2f816c22d9ed926a0728ba47/codex-rs/protocol/src/models.rs#L1999-L2023)) and its own round-trip tests ([models.rs:3247-3300](https://github.com/openai/codex/blob/fa5d5ae047d1891a2f816c22d9ed926a0728ba47/codex-rs/protocol/src/models.rs#L3247-L3300)) — the exact same "string or block list" shape Claude Code's `tool_result.content` already has |
+| `custom_tool_call` | `tool_use` | `payload.name`, `payload.call_id`, `payload.input` (a **raw string**, not JSON — apply_patch's grammar text, not a `function_call`'s JSON-encoded arguments) — [models.rs:927-944](https://github.com/openai/codex/blob/fa5d5ae047d1891a2f816c22d9ed926a0728ba47/codex-rs/protocol/src/models.rs#L927-L944) |
+| `custom_tool_call_output` | `tool_result` | `payload.call_id`, `payload.name` (optional, unlike `function_call_output`), `payload.output` — same `FunctionCallOutputPayload` "string or content-item list" encoding as `function_call_output` — [models.rs:948-964](https://github.com/openai/codex/blob/fa5d5ae047d1891a2f816c22d9ed926a0728ba47/codex-rs/protocol/src/models.rs#L948-L964) |
+
+**`custom_tool_call(_output)` is `apply_patch`'s wire shape, and it matters
+that this adapter handles it.** `apply_patch` — Codex's primary file-editing
+tool in current Codex — is registered as `ToolSpec::Freeform`, not
+`ToolSpec::Function` (`create_apply_patch_freeform_tool`,
+[apply_patch_spec.rs:9-28](https://github.com/openai/codex/blob/fa5d5ae047d1891a2f816c22d9ed926a0728ba47/codex-rs/core/src/tools/handlers/apply_patch_spec.rs#L9-L28)),
+and Freeform tool calls serialize as `custom_tool_call`/
+`custom_tool_call_output`, never `function_call`/`function_call_output`
+([`ResponseItem` enum, models.rs:927 & 948](https://github.com/openai/codex/blob/fa5d5ae047d1891a2f816c22d9ed926a0728ba47/codex-rs/protocol/src/models.rs#L927)).
+`shell`/`exec_command` (`ToolSpec::Function`,
+[shell_spec.rs:91-93](https://github.com/openai/codex/blob/fa5d5ae047d1891a2f816c22d9ed926a0728ba47/codex-rs/core/src/tools/handlers/shell_spec.rs#L91-L93))
+already went through `function_call`; leaving `custom_tool_call(_output)`
+unhandled would have meant every file edit an observed Codex session makes
+— and every failed patch — produced zero `AgentEvent`s, invisible to triage's
+error-signal keep rule. Fixed here rather than left as a documented gap.
 
 ### `compacted` — NOT a `response_item` payload type
 
@@ -125,9 +142,8 @@ maps `compacted` onto `AgentEvent(kind="text", role="assistant")`, mirroring
 Codex's own `From<CompactedItem>` role choice.
 
 Every other `response_item` variant (`local_shell_call`,
-`custom_tool_call(_output)`, `tool_search_call/output`, `web_search_call`,
-`image_generation_call`, `compaction`, `context_compaction`, ...) is logged
-and skipped — same policy
+`tool_search_call/output`, `web_search_call`, `image_generation_call`,
+`compaction`, `context_compaction`, ...) is logged and skipped — same policy
 `ClaudeCodeSource` already applies to an unknown content-block type. Codex's
 format is under active, fast-moving development (a community session-log
 viewer, [PixelPaw-Labs/codex-trace](https://github.com/PixelPaw-Labs/codex-trace),

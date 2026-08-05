@@ -173,6 +173,64 @@ def test_function_call_output_content_items_are_flattened() -> None:
     assert "line two" in event.content
 
 
+def test_custom_tool_call_and_output_resolve_tool_name_from_call_id() -> None:
+    """apply_patch is a Freeform tool (ToolSpec::Freeform), so it serializes
+    as custom_tool_call/custom_tool_call_output, not function_call -- same
+    call_id -> name bookkeeping, but the argument field is "input" (raw
+    grammar text) rather than "arguments" (JSON-encoded)."""
+    source = CodexSource()
+    source.parse_line(session_meta())
+    (call_event,) = source.parse_line(
+        response_item(
+            {
+                "type": "custom_tool_call",
+                "name": "apply_patch",
+                "call_id": "call_9",
+                "input": "*** Begin Patch\n*** Update File: a.py\n*** End Patch",
+            }
+        )
+    )
+
+    assert call_event.kind == "tool_use"
+    assert call_event.role == "assistant"
+    assert call_event.tool_name == "apply_patch"
+    assert "Update File: a.py" in call_event.content
+
+    (result_event,) = source.parse_line(
+        response_item(
+            {"type": "custom_tool_call_output", "call_id": "call_9", "output": "Success. Updated the following files:\na.py"}
+        )
+    )
+
+    assert result_event.kind == "tool_result"
+    assert result_event.role == "user"
+    assert result_event.tool_name == "apply_patch"
+    assert result_event.content == "Success. Updated the following files:\na.py"
+
+
+def test_custom_tool_call_output_prefers_its_own_name_field() -> None:
+    """CustomToolCallOutput carries an optional `name` directly on the wire,
+    unlike function_call_output -- prefer it over the call_id map."""
+    source = CodexSource()
+    source.parse_line(session_meta())
+    source.parse_line(
+        response_item({"type": "custom_tool_call", "name": "apply_patch", "call_id": "call_1", "input": "patch"})
+    )
+
+    (event,) = source.parse_line(
+        response_item(
+            {
+                "type": "custom_tool_call_output",
+                "call_id": "call_1",
+                "name": "apply_patch",
+                "output": "Success.",
+            }
+        )
+    )
+
+    assert event.tool_name == "apply_patch"
+
+
 def test_bookkeeping_line_types_are_skipped() -> None:
     """event_msg duplicates response_item's content for Codex's own TUI
     history; parsing it too would double every turn. `compacted` is NOT
