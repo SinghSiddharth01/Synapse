@@ -645,6 +645,85 @@ async def test_replay_skipped_records_each_finding_before_moving_on(
     ]
 
 
+async def test_replay_skipped_requeues_a_prompt_drop_segment(
+    tmp_path, monkeypatch, capsys, caplog
+) -> None:
+    """`cmd_replay`'s PromptDropError branch is distinct from its generic
+    Exception branch (different log message: "Prompt-drop guard tripped
+    replaying ..." vs "Replay distillation failed for ...", mirroring the
+    same distinction `WorkerLoop.tick()` makes for the live path in
+    test_dropped_prompt_does_not_poison_the_log). One dropped-prompt segment
+    among two must not sink the batch -- it requeues like any other failure
+    -- but the specific log line pins that the dedicated branch, not the
+    fallback `except Exception`, is what actually ran."""
+    from synapse_contracts import (
+        AgentEvent,
+        Attribution,
+        Finding,
+        FindingType,
+        Segment,
+        SessionBinding,
+        write_binding,
+    )
+    from synapse_distiller import PromptDropError
+    from synapse_worker.triage_log import TriageLog
+
+    state_dir = tmp_path / ".synapse"
+    ts = datetime(2026, 8, 4, tzinfo=timezone.utc)
+    log = TriageLog(state_dir)
+    good = Segment(id="s-good", agent_session_id="as-t",
+                    events=[AgentEvent(role="assistant", kind="text", content="ok",
+                                       ts=ts, agent_session_id="as-t")],
+                    started_at=ts, ended_at=ts)
+    dropped = Segment(id="s-dropped", agent_session_id="as-t",
+                       events=[AgentEvent(role="assistant", kind="text", content="x",
+                                          ts=ts, agent_session_id="as-t")],
+                       started_at=ts, ended_at=ts)
+    log.record_skip(good, "lint-clean")
+    log.record_skip(dropped, "readonly-run")
+    write_binding(
+        cli.binding_path_for_agent(state_dir, cli.DEFAULT_AGENT),
+        SessionBinding(
+            agent_session_id="as-t", shared_id="local-dev",
+            contributor="aditya", agent=cli.DEFAULT_AGENT,
+            transcript_path=str(tmp_path / "sess.jsonl"), pinned_at=ts,
+        ),
+    )
+
+    monkeypatch.setattr(cli, "check_canary", _async(PASSING_CANARY))
+
+    class _PromptDroppingDistiller:
+        provider = object()
+
+        async def distil(self, segment):
+            if segment.id == "s-dropped":
+                raise PromptDropError("input_tokens=1, prompt was dropped")
+            from types import SimpleNamespace
+            finding = Finding(
+                id="f-good", type=FindingType.LEARNING, text="ok",
+                attributions=[Attribution(contributor="a", agent_session="as-t",
+                                          agent="claude-code")],
+                ts=ts,
+            )
+            return [finding], SimpleNamespace(skipped_empty=False)
+
+    monkeypatch.setattr(cli, "build_distiller", lambda config, binding: _PromptDroppingDistiller())
+
+    with caplog.at_level("ERROR", logger="synapse_worker.cli"):
+        exit_code = await cli.cmd_replay(_ns(skipped=True))
+
+    assert exit_code == 1
+    assert any(
+        "Prompt-drop guard tripped replaying" in r.message for r in caplog.records
+    )
+    remaining = TriageLog(state_dir).load_skipped()
+    assert [(s.id, r) for s, r in remaining] == [("s-dropped", "readonly-run")]
+    out = capsys.readouterr().out
+    assert "1 segment(s) failed and were re-queued" in out
+    sink_file = state_dir / "upstream.jsonl"
+    assert sink_file.exists() and sink_file.read_text().strip()  # the good one still shipped
+
+
 async def test_replay_skipped_with_nothing_pending(tmp_path, capsys) -> None:
     exit_code = await cli.cmd_replay(_ns(skipped=True))
 
