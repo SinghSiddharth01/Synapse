@@ -1,4 +1,6 @@
-"""Compaction — Plan A.5, deterministic code, not a model. Runs BEFORE triage.
+"""Compaction — Plan A.5, deterministic code, not a model. Runs AFTER triage's
+keep decision, on the Segments triage has already decided are worth sending
+to the model.
 
 Segments routinely exceed the segment budget on the axis that costs nothing
 to read and everything to render: a `tool_result` is often a raw log dump,
@@ -6,8 +8,8 @@ most of which is neither an error nor a conclusion. `adr/0003` already put
 compression on the distiller's shoulders, but the distiller only ever sees
 what actually reaches it — a segment too large simply gets clipped at the
 model's context boundary, silently, with no say in what survives. This module
-makes that choice deliberately, in code, before the model (or triage) ever
-sees the segment:
+makes that choice deliberately, in code, before the model ever sees the
+segment (but after `triage` already has — see the AMENDMENT below):
 
   - `tool_result` is head/tail-truncated (first/last `HEAD_TAIL_LINES`) —
     errors and conclusions overwhelmingly live at the edges of a log.
@@ -29,19 +31,34 @@ not on the raw input — so a second pass sees exactly the content the first
 pass already decided about, reaches the identical verdict, and produces
 identical output. See `_compact_readonly_tool_result`.
 
-WHY THIS RUNS BEFORE TRIAGE (A.5b's "reads the full Segment" note, `triage.py`
-module docstring). Triage keys on `AgentEvent.kind` being PRESENT (`any(e.kind
-== "thinking" ...)`) and on error text living in `tool_result`/`text` content
-— and it runs over the Segment as segmented, unfiltered by `distil_kinds`
-(that filter is `render_segment`'s job, downstream of both). Compaction must
-therefore never make a kind vanish outright — truncating `tool_result`/
-`thinking` CONTENT must not erase the signal triage looks for. That is what
-the buried-error preservation below is for: a naive first/last-N-lines rule
-would silently drop an error sitting in the middle of a long log, which is
-exactly `seg-003`'s shape (~52% through a 118-line dump) and exactly the
-false-negative triage's own docstring calls unrecoverable — the follower
-never re-reads a transcript position, so a line compaction drops here is gone
-as permanently as one triage skips.
+WHY THIS RUNS AFTER TRIAGE (A.5b's "reads the full Segment" note, `triage.py`
+module docstring, taken literally — fixer amendment, blocker). The module
+shipped first with compaction running BEFORE triage, on the reasoning that
+triage keys on `AgentEvent.kind` being PRESENT and compaction must therefore
+never make a kind vanish outright. That reasoning is true but insufficient:
+triage's keep-signals also key on error TEXT living inside `tool_result`/
+`text` CONTENT (`_has_uncleared_error`), and compaction's own head/tail
+truncation — even with the buried-error-preservation and survivor-ranking
+below — is a lossy view of that content by construction. A segment can be
+built (and was, in review: a lint-clean report's own count noun sitting
+ahead of a real, uncleared failure within the truncated middle) where
+compaction's ranked survivor list crowds the real failure out of the budget
+entirely, silently flipping triage's verdict from keep to skip on a Segment
+that never should have been skipped at all — a false negative exactly as
+permanent as one triage produces on its own, since the follower never
+re-reads a transcript position. Running compaction second closes that class
+of bug structurally rather than by out-guessing every future decoy shape:
+triage's keep/skip judgment is now always made against the Segment exactly
+as segmented, the ONE piece of evidence that was actually in the transcript,
+never against a view compaction chose to show it. Compaction's own
+buried-error preservation and survivor-ranking (see the AMENDMENTs below)
+still matter after this reorder — not to protect triage's verdict anymore,
+but so the model, which only ever sees the compacted form, isn't the one
+that loses the buried error instead. That is what the buried-error
+preservation below is for: a naive first/last-N-lines rule would silently
+drop an error sitting in the middle of a long log, which is exactly
+`seg-003`'s shape (~52% through a 118-line dump) and exactly the kind of
+knowledge loss worth guarding against even downstream of triage's decision.
 
 AMENDMENT (fixer pass, blocker): the first version of this module dropped a
 trivial read-only pair ENTIRELY — both the `tool_use` and its `tool_result`
@@ -78,19 +95,28 @@ lint report's own count noun ("Found 3 errors (3 fixed, 0 remaining)") trips
 MAX_SURVIVOR_LINES]` in plain document order with no regard for that. On a
 log with enough clean stage reports ahead of a real, uncleared failure (a
 `fatal:` line, say), the decoys filled the whole survivor budget and the one
-line that actually mattered got truncated away — silently, since compaction
-runs before triage and the follower never re-reads a transcript position.
-Fixed by ranking survivors, not just capping them: every match is scored by
-`triage.LINT_CLEAN_RE` — the identical clean-phrase veto `triage.
-_has_uncleared_error` itself uses to decide a clause is cleared — and every
-UNCLEARED match wins the budget over every CLEARED one, `MAX_SURVIVOR_LINES`
-applied only after that reordering. Order is preserved within each group
-(first occurrence first), so this changes nothing about which lines survive
-when there's no decoy competition — it only changes who loses when the
-budget is actually contested. This is compaction's own "keep what triage
-would keep" contract, applied one step earlier: a survivor list can no
-longer be filled entirely by lines triage would call clean while a real
-failure sitting right next to them gets cut.
+line that actually mattered got truncated away. Fixed by ranking survivors,
+not just capping them: every match is scored by `triage.LINT_CLEAN_RE` — the
+identical clean-phrase veto `triage._has_uncleared_error` itself uses to
+decide a clause is cleared — and every UNCLEARED match wins the budget over
+every CLEARED one, `MAX_SURVIVOR_LINES` applied only after that reordering.
+Order is preserved within each group (first occurrence first), so this
+changes nothing about which lines survive when there's no decoy competition
+— it only changes who loses when the budget is actually contested.
+
+Originally written when compaction still ran before triage, where a lost
+survivor could flip triage's own verdict from keep to skip — the blocker
+reorder above (WHY THIS RUNS AFTER TRIAGE) closed that specific failure
+mode structurally, since triage no longer ever sees this module's output.
+This ranking stays in place anyway: it is now the model's own protection,
+not triage's. Once a Segment has already earned a `keep`, the compacted
+`tool_result` is the ONLY view of it the distiller ever gets — the follower
+never re-reads a transcript position, so a real failure this ranking failed
+to protect would be exactly as permanently lost to the model as one triage
+mistakenly skips. This is compaction's own "keep what triage would keep"
+contract, now applied to what survives for the model's sake rather than
+triage's: a survivor list can no longer be filled entirely by lines triage
+would call clean while a real failure sitting right next to them gets cut.
 """
 
 from __future__ import annotations
@@ -257,12 +283,12 @@ def compact(segment: Segment) -> Segment:
     """Deterministic compaction. Pure — never mutates `segment`; returns a
     new `Segment`. Idempotent — see the module docstring.
 
-    Runs before triage in `WorkerLoop.tick` (see the module docstring for
-    why order matters here). Never removes a `tool_use` or `tool_result`
-    event outright, even a trivial one — only ever collapses `tool_result`
-    CONTENT — because triage's `readonly-run` skip-signature keys on
-    `tool_use` events merely being present (see the module docstring's
-    AMENDMENT)."""
+    Runs AFTER triage's keep decision in `WorkerLoop.tick` (see the module
+    docstring's "WHY THIS RUNS AFTER TRIAGE" for why order matters here).
+    Never removes a `tool_use` or `tool_result` event outright, even a
+    trivial one — only ever collapses `tool_result` CONTENT — because
+    triage's `readonly-run` skip-signature keys on `tool_use` events merely
+    being present (see the module docstring's AMENDMENT)."""
     events = segment.events
     kept: list[AgentEvent] = []
     i = 0

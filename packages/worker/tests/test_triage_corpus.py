@@ -35,11 +35,17 @@ def test_no_fixture_is_skipped_without_a_named_reason():
 
 @pytest.mark.parametrize("fixture_id", available_fixtures())
 def test_triage_still_matches_the_expectation_map_after_compaction(fixture_id):
-    """`WorkerLoop.tick` runs compaction BEFORE triage (compaction.py's module
-    docstring) precisely so triage keeps seeing what it needs to. This is
-    that ordering, pinned at the expectation-map level rather than only unit
-    by unit: every fixture's keep/skip verdict must survive compact() first,
-    or compaction silently broke the signal triage keys on."""
+    """`WorkerLoop.tick` runs triage BEFORE compaction now (compaction.py's
+    module docstring, "WHY THIS RUNS AFTER TRIAGE" — an adjudicated fixer
+    ruling that reversed this module's original ordering after review found
+    compaction's truncation could flip a real triage `keep` to `skip`), so
+    `triage(compact(segment))` is no longer what the real pipeline ever
+    computes for a fixture that triage would keep. Kept anyway as a
+    defense-in-depth corpus check on `compact()` itself: nothing about the
+    reorder requires compaction's OUTPUT to newly disagree with triage's
+    verdict on the RAW input, and a corpus-wide check catches a future
+    compaction change that quietly would, even though production code no
+    longer composes the two functions this way."""
     decision = triage(compact(load_segment(fixture_id)))
     expected_keep = EXPECTATIONS[fixture_id]["expected"] == "keep"
     assert decision.keep == expected_keep, (

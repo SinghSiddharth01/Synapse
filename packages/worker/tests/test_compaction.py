@@ -1,5 +1,6 @@
-"""Compaction (Plan A.5) — deterministic, before triage. See compaction.py's
-module docstring for the four behaviors and why each exists."""
+"""Compaction (Plan A.5) — deterministic, runs after triage's keep decision.
+See compaction.py's module docstring for the four behaviors, why each
+exists, and why the ordering relative to triage is load-bearing."""
 
 from __future__ import annotations
 
@@ -331,7 +332,15 @@ def test_a_real_error_is_not_crowded_out_by_lint_clean_decoys_within_the_survivo
     same shape the finding was verified against: 15 kept head lines, then
     (inside the truncated middle) 15 lint-clean decoys ahead of one real
     `fatal:` line, then filler, then a kept tail -- 16 matches competing for
-    a 15-line budget."""
+    a 15-line budget.
+
+    Written when compaction still ran before triage, where this crowding-out
+    could flip triage's own verdict -- the adjudicated blocker reorder
+    (compaction.py's "WHY THIS RUNS AFTER TRIAGE") has since closed that
+    specific failure mode structurally. This unit-level check on `compact()`
+    stays regardless: post-reorder, a crowded-out real error would still be
+    permanently lost to the MODEL on a Segment triage already kept, which is
+    exactly as unrecoverable."""
     head = [f"checking module {i}... ok, nothing notable" for i in range(HEAD_TAIL_LINES)]
     lint_clean_decoys = [
         f"eslint stage {i}: {i} errors ({i} fixed, 0 remaining)"

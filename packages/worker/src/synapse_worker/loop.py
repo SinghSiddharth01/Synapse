@@ -213,12 +213,17 @@ class WorkerLoop:
             self.producer.rebind(joined.shared_id)
 
     def _compact(self, segment: Segment) -> Segment:
-        """Compaction (Plan A.5) — BEFORE triage, always, in both `tick()`
-        and `shutdown()`. See compaction.py's module docstring for why the
-        order matters: triage keys on kinds/content this must not erase.
-        Unconditional (no `_enabled` toggle like triage) — it is
-        deterministic and cheap, and there is no false-negative risk
-        symmetrical to triage's skip to gate it behind one."""
+        """Compaction (Plan A.5) — AFTER triage's keep decision, in both
+        `tick()` and `shutdown()`. See compaction.py's module docstring for
+        why the order matters: triage's judgment about whether a Segment is
+        worth sending to the model at all must be made against the full,
+        unmodified Segment triage was actually handed — A.5b's "triage reads
+        the full Segment" note, taken literally — never against a
+        truncated/ranked view compaction has already reshaped. Compaction's
+        job starts only once a Segment has already earned a `keep`: from
+        that point on it shapes only what the model sees, never whether the
+        Segment survives at all. Only called for segments `triage` (or the
+        `triage_enabled=False` bypass) has already decided to keep."""
         original_events = len(segment.events)
         original_chars = sum(len(e.content) for e in segment.events)
         compacted = compact(segment)
@@ -293,7 +298,12 @@ class WorkerLoop:
         result.segments = len(segments)
 
         for segment in segments:
-            segment = self._compact(segment)
+            # Triage FIRST, on the Segment exactly as segmented -- before
+            # compaction has a chance to reshape it. See compaction.py's
+            # module docstring and `_compact`'s docstring above: a
+            # keep/skip judgment made against a truncated/ranked view is a
+            # judgment made against evidence compaction chose to show, not
+            # the evidence that was actually there.
             if self.triage_enabled:
                 decision = triage(segment)
                 if not decision.keep:
@@ -315,6 +325,9 @@ class WorkerLoop:
                         segment=segment.id,
                         reason=decision.reason,
                     )
+            # Only now, for a Segment triage has already decided is worth
+            # sending to the model: shape what the model actually sees.
+            segment = self._compact(segment)
             if self.stats:
                 self.stats.distil_started(segment.id, len(segment.events))
             try:
@@ -402,7 +415,8 @@ class WorkerLoop:
         segments = self.segmenter.drain(flush_incomplete=True)
         result.segments = len(segments)
         for segment in segments:
-            segment = self._compact(segment)
+            # Same ordering as tick(): triage the Segment as segmented,
+            # before compaction can reshape what triage would see.
             if self.triage_enabled:
                 decision = triage(segment)
                 if not decision.keep:
@@ -410,6 +424,7 @@ class WorkerLoop:
                     result.skipped_triage += 1
                     logger.info("Triage skipped %s (%s)", segment.id, decision.reason)
                     continue
+            segment = self._compact(segment)
             try:
                 findings, stats = await self.distiller.distil(segment)
                 if not stats.skipped_empty:

@@ -90,9 +90,12 @@ def test_seg003_buried_error_reaches_the_model_only_via_prose_under_shipped_conf
     failure in words. That means seg-003 exercises the same render_segment
     code path as seg-002 today, unaffected by A.5 landing (E7 Chain B2,
     packages/worker/src/synapse_worker/compaction.py) — compaction runs on
-    the Segment upstream of triage/distillation, but distil_kinds = ("text",)
-    still filters tool_result out at RENDER time regardless of whether its
-    content was compacted first. distil_kinds stays ("text",) deliberately
+    the Segment downstream of triage's keep decision, upstream of
+    distillation (adjudicated fixer ruling: triage judges durability against
+    the full uncompacted Segment; compaction only shapes what a KEPT Segment
+    then shows the model), but distil_kinds = ("text",) still filters
+    tool_result out at RENDER time regardless of whether its content was
+    compacted first. distil_kinds stays ("text",) deliberately
     (widening it is a measured decision for the NPU eval, not a side effect
     of compaction landing) — see compaction.py's own module docstring and
     test_compaction.py's test_seg003_oversized_tool_result_compacts_within_
