@@ -54,6 +54,7 @@ class TickResult:
     findings: int = 0
     sent: int = 0
     pending_send: int = 0
+    held: int = 0
     pending_events: int = 0
     skipped_no_change: bool = False
     flushed_incomplete: bool = False
@@ -75,6 +76,8 @@ class TickResult:
             bits.append(f"{self.sent} sent")
         if self.pending_send:
             bits.append(f"{self.pending_send} queued")
+        if self.held:
+            bits.append(f"{self.held} held (other session)")
         if self.pending_events:
             bits.append(f"{self.pending_events} events held (turn open)")
         if self.flushed_incomplete:
@@ -102,6 +105,13 @@ class WorkerLoop:
         self.distiller = distiller
         self.producer = producer
         self.binding = binding
+        # Sync the Producer's write-ahead log to THIS loop's binding, whatever
+        # `shared_id` it happened to be constructed with — the re-join
+        # envelope (producer.py's module docstring, STATE.md trap #8) needs
+        # `flush()`'s notion of "current" to always match the binding this
+        # loop actually runs under, not a stale or default value from
+        # construction time.
+        self.producer.rebind(binding.shared_id)
         self.state_dir = Path(state_dir)
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.stats = stats
@@ -162,6 +172,7 @@ class WorkerLoop:
                 result.pending_events = self.segmenter.pending_events
                 # Still retry anything the sink rejected earlier.
                 result.sent, result.pending_send = await self.producer.flush()
+                result.held = self.producer.pending_count()[1]
                 if self.stats:
                     self.stats.event(
                         "push",
@@ -257,6 +268,7 @@ class WorkerLoop:
             result.findings += len(findings)
 
         result.sent, result.pending_send = await self.producer.flush()
+        result.held = self.producer.pending_count()[1]
         result.pending_events = self.segmenter.pending_events
         if self.stats:
             self.stats.event(
@@ -307,5 +319,6 @@ class WorkerLoop:
             except Exception:  # noqa: BLE001
                 logger.exception("Distillation failed for %s during shutdown", segment.id)
         result.sent, result.pending_send = await self.producer.flush()
+        result.held = self.producer.pending_count()[1]
         self._persist_state()
         return result

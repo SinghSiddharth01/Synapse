@@ -250,7 +250,7 @@ _PAGE = """<!doctype html>
       <div class="elapsed idle" id="npu-elapsed">—</div>
     </div>
     <span class="link"></span>
-    <div class="node"><div class="label">Push</div><div class="value" id="stat-wal">0 / 0</div><div class="sub">sent / queued</div></div>
+    <div class="node"><div class="label">Push</div><div class="value" id="stat-wal">0 / 0</div><div class="sub" id="stat-wal-sub">sent / queued</div></div>
   </div>
 
   <div class="chips" id="chips">
@@ -420,6 +420,12 @@ _PAGE = """<!doctype html>
     var lastTick = snapshot.ticks.length ? snapshot.ticks[snapshot.ticks.length - 1].result : null;
     if (lastTick) {
       document.getElementById("stat-wal").textContent = lastTick.sent + " / " + lastTick.pending_send;
+      var walSub = document.getElementById("stat-wal-sub");
+      if (walSub) {
+        walSub.textContent = lastTick.held
+          ? "sent / queued · " + lastTick.held + " held (other session)"
+          : "sent / queued";
+      }
       document.getElementById("stat-held").textContent = lastTick.pending_events;
       if (lastTick.pending_events > 0) {
         if (heldSince === null) heldSince = Date.now();

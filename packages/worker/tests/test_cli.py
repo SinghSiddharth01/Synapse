@@ -436,6 +436,43 @@ async def test_status_reports_unsent_findings(tmp_path, capsys) -> None:
     assert "unsent findings  1" in out
 
 
+async def test_status_reports_held_findings_from_a_different_session(tmp_path, capsys) -> None:
+    """The re-join envelope (producer.py's module docstring, STATE.md trap
+    #8): a finding recorded under a Shared Session other than the one
+    currently joined must show up as held, not silently counted as plain
+    "unsent" the way it was before the envelope existed."""
+    from synapse_contracts import Attribution, Finding, FindingType, SessionBinding, write_binding
+    from synapse_worker.producer import FileSink, Producer
+
+    state_dir = tmp_path / ".synapse"
+    write_binding(
+        cli.binding_path_for_agent(state_dir, cli.DEFAULT_AGENT),
+        SessionBinding(
+            agent_session_id="as-t", shared_id="team-standup",
+            contributor="aditya", agent=cli.DEFAULT_AGENT,
+            transcript_path=str(tmp_path / "sess.jsonl"),
+            pinned_at=datetime(2026, 8, 4, tzinfo=timezone.utc),
+        ),
+    )
+    # Recorded while a DIFFERENT session ("other-team") was bound -- held
+    # once "team-standup" is joined, per the envelope above.
+    producer = Producer(state_dir / "wal", FileSink(tmp_path / "upstream.jsonl"), "other-team")
+    producer.record([
+        Finding(
+            id="f-1", type=FindingType.LEARNING, text="x",
+            attributions=[Attribution(contributor="a", agent_session="s", agent="claude-code")],
+            ts=datetime(2026, 8, 4, tzinfo=timezone.utc),
+        )
+    ])
+
+    exit_code = await cli.cmd_status(_ns())
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "unsent findings  1" in out
+    assert "held (other session)  1" in out
+
+
 # ---------------------------------------------------------------------------
 # replay
 # ---------------------------------------------------------------------------

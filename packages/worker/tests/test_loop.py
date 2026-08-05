@@ -6,10 +6,11 @@ Offline — FakeProvider, no NPU, no network.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-from synapse_contracts import LocalBinding
+from synapse_contracts import Attribution, Finding, FindingType, LocalBinding
 from synapse_distiller import Distiller, load_pack_by_name
 from synapse_providers import FakeProvider
 
@@ -222,6 +223,59 @@ async def test_dropped_prompt_does_not_poison_the_log(tmp_path) -> None:
     assert result.findings == 0
     assert any("prompt-drop" in e for e in result.errors)
     assert producer.unsent() == []
+
+
+async def test_worker_loop_syncs_the_producer_to_its_own_binding_on_construction(
+    tmp_path,
+) -> None:
+    """The re-join envelope (producer.py's module docstring, STATE.md trap
+    #8) is inert unless `flush()`'s notion of "current" actually matches the
+    binding this loop runs under. `WorkerLoop.__init__` must sync a
+    freshly-built Producer to ITS OWN binding
+    (`producer.rebind(binding.shared_id)`) regardless of whatever
+    `shared_id` the Producer happened to be constructed with -- this pins
+    that construction alone does it, and that it survives a real tick: a
+    finding recorded under a DIFFERENT session before this loop existed
+    stays held, never silently retargeted to this loop's session."""
+    transcript = tmp_path / "t.jsonl"
+    transcript.touch()
+    producer = Producer(
+        tmp_path / "wal", FileSink(tmp_path / "upstream.jsonl"), "session-other"
+    )
+    stale = Finding(
+        id="f-stale", type=FindingType.LEARNING, text="from a previous session",
+        attributions=[Attribution(contributor="aditya", agent_session="sess-1",
+                                  agent="claude-code")],
+        ts=datetime(2026, 8, 4, tzinfo=timezone.utc),
+    )
+    producer.record([stale])  # recorded while bound to "session-other"
+
+    loop = WorkerLoop(
+        transcript=transcript,
+        distiller=Distiller(FakeProvider(scripts=[condensed("fresh")]),
+                            BINDING, PACK, ["text"], "labelled"),
+        producer=producer,
+        binding=BINDING,  # shared_id="shared-1" -- a DIFFERENT session than above
+        state_dir=tmp_path / "state",
+        budget_tokens=5000,
+    )
+
+    # Construction alone must already have synced the binding.
+    assert producer.pending_count() == (0, 1)
+
+    transcript.write_text(user("a") + assistant("b") + user("c"), encoding="utf-8")
+    result = await loop.tick()
+
+    # The fresh finding (produced under THIS loop's real binding) ships; the
+    # stale one stays held -- never retargeted to "shared-1", never dropped.
+    assert result.sent == 1
+    assert result.held == 1
+    upstream = [
+        json.loads(row)["text"]
+        for row in (tmp_path / "upstream.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert upstream == ["fresh"]
+    assert producer.pending_count() == (0, 1)
 
 
 async def test_bookkeeping_lines_produce_no_segments(tmp_path) -> None:

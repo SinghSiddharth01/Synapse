@@ -22,6 +22,46 @@ resync rather than a shrug.
 THE EGRESS RULE. Only `Finding` objects reach a sink. Segments, AgentEvents and
 raw transcript text never enter this module — that is the property the whole
 architecture rests on, and this is the last place it could be broken.
+
+#### The re-join envelope (STATE.md trap #8, closing the gap `relay.py`'s
+#### round-3 amendment left open one hop upstream)
+
+`synapse_orchestrator.relay.Relay` partitions its own write-ahead log by the
+Shared Session bound WHEN each Finding was recorded, so a `rebind()` between
+a failed send and the next retry can never retarget a queued Finding to the
+wrong session. Round 3 of that review found the fix stopped there: a Finding
+still sitting in THIS module's log at the moment of a `synapse-worker join
+<new_id>` carried no Shared Session identity at all (`{produced_at, finding}`
+— see git history), so a retried send after a re-join was indistinguishable
+from a fresh Finding produced under the new session. Both arrive with the
+same `agent_session_id` (a re-join does not start a new Agent Session), and
+`record()` necessarily tags a retry with whatever binding resolves *now*.
+
+Fixed the same way, one hop upstream: every line is now an envelope,
+`{"produced_at": ..., "shared_id": <the Shared Session bound WHEN record()
+was called>, "finding": {...}}`. `flush()` reads that back and sends ONLY
+findings whose recorded `shared_id` matches the CURRENT binding
+(`self.shared_id`, set at construction or by `rebind()`) — never to whatever
+is bound now if that differs from what was bound at record time. A mismatch
+is HELD, not retargeted and not dropped: it simply waits for a later
+`rebind()` back to the session it was actually produced under.
+
+This is deliberately NOT the same rule `Relay` uses. `Relay` sends each group
+to ITS OWN recorded session, because it knows the destination URL for every
+session (`/v1/sessions/{id}/...`). This module's sink is a single upstream
+endpoint with no per-session addressing on the wire (the producer endpoint
+resolves routing itself, live, from `Attribution.agent_session` — see
+`relay.py`'s round-3 note on `app.py`), so there is nowhere to "send it to
+its own session" from here. Holding until the binding matches again is the
+only safe option that is neither a wrong guess nor a silent drop.
+
+A line with no `shared_id` key at all — every line written before this
+envelope existed — reads back as `None`, and `None` always matches: a
+pre-existing WAL keeps draining exactly as it did before this change,
+instead of being silently stranded by a partitioning rule it predates. A
+Finding explicitly recorded while unbound (`self.shared_id is None`) gets
+the same treatment for the same reason — it can never be mistaken for a
+wrong real session, so it stays deliverable under whatever binds next.
 """
 
 from __future__ import annotations
@@ -93,23 +133,60 @@ class FileSink(FindingSink):
 class Producer:
     """Write-ahead log plus delivery."""
 
-    def __init__(self, log_dir: Path, sink: FindingSink) -> None:
+    _UNSET = object()
+
+    def __init__(self, log_dir: Path, sink: FindingSink, shared_id: str | None = None) -> None:
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.findings_path = self.log_dir / "findings.jsonl"
         self.sent_path = self.log_dir / "sent.jsonl"
         self.sink = sink
+        self.shared_id = shared_id
 
-    def record(self, findings: list[Finding]) -> None:
-        """Persist before any send is attempted. Call this first, always."""
+    def rebind(self, shared_id: str | None) -> None:
+        """Point future `record()` calls — and `flush()`'s notion of "the
+        current binding" — at a different Shared Session.
+
+        `WorkerLoop.__init__` calls this once, syncing a freshly-built
+        Producer to the binding it was constructed with; a re-join between
+        two `synapse-worker run` invocations sharing this on-disk WAL (or
+        `cmd_status`/`cmd_replay`, which build a Producer with no binding of
+        their own) call it too.
+
+        Mirrors `Relay.rebind`: does NOT retarget anything already written —
+        every envelope in the log keeps the `shared_id` it was recorded
+        under forever (see `record()`). That is what makes the module
+        docstring's re-join guarantee hold: a still-queued Finding stays
+        addressed to the session it was actually produced under, not
+        whatever's bound when `flush()` next runs.
+        """
+        self.shared_id = shared_id
+
+    def record(self, findings: list[Finding], *, shared_id: str | None = _UNSET) -> None:
+        """Persist before any send is attempted. Call this first, always.
+
+        Each line is now an envelope, `{produced_at, shared_id, finding}` —
+        see the module docstring's re-join amendment. `shared_id`, when
+        given, tags EVERY Finding in this call with that exact value instead
+        of `self.shared_id`, mirroring `Relay.record`'s same parameter and
+        the same race it closes (a caller that already resolved its own
+        target should never have this read a `self.shared_id` a concurrent
+        `rebind()` changed out from under it). Omitted, this call falls back
+        to `self.shared_id` — every caller today.
+        """
         if not findings:
             return
+        target = self.shared_id if shared_id is self._UNSET else shared_id
         produced_at = datetime.now(timezone.utc).isoformat()
         with self.findings_path.open("a", encoding="utf-8") as handle:
             for finding in findings:
                 handle.write(
                     json.dumps(
-                        {"produced_at": produced_at, "finding": finding.model_dump(mode="json")}
+                        {
+                            "produced_at": produced_at,
+                            "shared_id": target,
+                            "finding": finding.model_dump(mode="json"),
+                        }
                     )
                     + "\n"
                 )
@@ -124,12 +201,14 @@ class Producer:
                 ids.add(line)
         return ids
 
-    def unsent(self) -> list[Finding]:
-        """Everything recorded but not yet confirmed delivered, oldest first."""
+    def _entries(self) -> list[tuple[str | None, Finding]]:
+        """Every `(shared_id, Finding)` envelope in the log, in order. A
+        missing `shared_id` key (a line written before this envelope
+        existed) reads as `None` — see the module docstring's re-join
+        amendment for why that's always deliverable."""
         if not self.findings_path.is_file():
             return []
-        sent = self._sent_ids()
-        pending: list[Finding] = []
+        out: list[tuple[str | None, Finding]] = []
         for line in self.findings_path.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if not line:
@@ -140,9 +219,43 @@ class Producer:
             except (json.JSONDecodeError, KeyError, ValueError):
                 logger.warning("Skipping malformed entry in the write-ahead log")
                 continue
-            if finding.id not in sent:
-                pending.append(finding)
-        return pending
+            out.append((record.get("shared_id"), finding))
+        return out
+
+    def unsent(self) -> list[Finding]:
+        """Everything recorded but not yet confirmed delivered, oldest first
+        — deliverable and held alike. See `pending_count()` to split the
+        two, or `flush()`, which only ever attempts the deliverable half."""
+        sent = self._sent_ids()
+        return [finding for _sid, finding in self._entries() if finding.id not in sent]
+
+    def _deliverable_and_held(self) -> tuple[list[Finding], list[Finding]]:
+        """Split `unsent()` by whether each entry's recorded `shared_id`
+        matches the current binding (`self.shared_id`, see `rebind()`). A
+        `None`-tagged entry (unbound at record time, or a pre-envelope
+        legacy line) always counts as deliverable — see the module
+        docstring."""
+        sent = self._sent_ids()
+        deliverable: list[Finding] = []
+        held: list[Finding] = []
+        for sid, finding in self._entries():
+            if finding.id in sent:
+                continue
+            if sid is None or sid == self.shared_id:
+                deliverable.append(finding)
+            else:
+                held.append(finding)
+        return deliverable, held
+
+    def pending_count(self) -> tuple[int, int]:
+        """(deliverable, held) — how much of `unsent()` a `flush()` right
+        now would actually attempt to send, versus how much is queued under
+        a Shared Session that isn't the current binding. Never retargeted,
+        never dropped — a held entry just waits for a re-join back to the
+        session it was actually produced under. What `synapse-worker
+        status` and the debug page's PUSH node report."""
+        deliverable, held = self._deliverable_and_held()
+        return len(deliverable), len(held)
 
     def _mark_sent(self, findings: list[Finding]) -> None:
         with self.sent_path.open("a", encoding="utf-8") as handle:
@@ -150,15 +263,25 @@ class Producer:
                 handle.write(f"{finding.id}\n")
 
     async def flush(self) -> tuple[int, int]:
-        """Try to deliver everything outstanding. Returns (sent, still_pending).
+        """Try to deliver everything deliverable. Returns (sent,
+        still_pending) — the same two-tuple shape this method has always
+        had, which `Producer`'s callers (including the closed-loop
+        end-to-end test) depend on.
 
-        Replays across restarts for free: `unsent` is derived from the log, so a
-        worker that crashed mid-send picks up exactly where it left off.
+        Counts ONLY findings this call actually attempted: those whose
+        recorded `shared_id` matched the current binding. A HELD finding
+        (mismatch — see the module docstring's re-join amendment) is never
+        attempted and never counted in either number here; call
+        `pending_count()` for the (deliverable, held) breakdown.
+
+        Replays across restarts for free: `unsent` is derived from the log,
+        so a worker that crashed mid-send picks up exactly where it left
+        off.
         """
-        pending = self.unsent()
-        if not pending:
+        deliverable, _held = self._deliverable_and_held()
+        if not deliverable:
             return 0, 0
-        if await self.sink.send(pending):
-            self._mark_sent(pending)
-            return len(pending), 0
-        return 0, len(pending)
+        if await self.sink.send(deliverable):
+            self._mark_sent(deliverable)
+            return len(deliverable), 0
+        return 0, len(deliverable)

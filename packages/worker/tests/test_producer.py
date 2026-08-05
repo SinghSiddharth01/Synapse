@@ -141,3 +141,96 @@ async def test_malformed_log_entry_is_skipped_not_fatal(tmp_path) -> None:
         handle.write("{ torn write\n")
 
     assert [f.id for f in producer.unsent()] == ["f-1"]
+
+
+# ---------------------------------------------------------------------------
+# The re-join envelope (STATE.md trap #8 / relay.py's round-3 note, applied
+# one hop upstream). Every line is now `{produced_at, shared_id, finding}` --
+# `shared_id` is the Shared Session THIS Producer was bound to (`rebind()`)
+# at the moment `record()` ran, captured once and carried forever. `flush()`
+# only ever sends findings whose recorded `shared_id` matches the CURRENT
+# binding; a mismatch is held, never retargeted, never dropped, and never
+# counted in `flush()`'s own two-tuple (that return shape is a public
+# contract other callers, including the closed-loop end-to-end test,
+# depend on unchanged) -- `pending_count()` is where held is exposed.
+# ---------------------------------------------------------------------------
+
+async def test_rejoin_holds_a_queued_finding_rather_than_sending_it_under_the_new_session(
+    tmp_path,
+) -> None:
+    """The re-join scenario itself: record while bound to session-A, then
+    re-join to a DIFFERENT session (session-B) before the finding ever sends.
+    `flush()` must not silently ship it to session-B -- that's exactly the
+    leak trap #8 describes one hop downstream of this module."""
+    sink = RecordingSink()
+    producer = Producer(tmp_path, sink, "session-A")
+    producer.record([finding("f-1")])
+
+    producer.rebind("session-B")                    # re-join to a DIFFERENT session
+    sent, pending = await producer.flush()
+
+    assert (sent, pending) == (0, 0)                 # nothing DELIVERABLE was attempted
+    assert sink.batches == []                        # never sent to session-B
+    assert producer.pending_count() == (0, 1)         # held is visible here, not lost
+
+
+async def test_rejoin_back_to_the_original_session_drains_the_held_finding(tmp_path) -> None:
+    """The other half of the scenario: re-joining BACK to the session a
+    held finding was actually produced under must drain it, not strand it
+    forever."""
+    sink = RecordingSink()
+    producer = Producer(tmp_path, sink, "session-A")
+    producer.record([finding("f-1")])
+    producer.rebind("session-B")
+    await producer.flush()                            # held, confirmed above
+
+    producer.rebind("session-A")                       # re-join BACK to the original
+    sent, pending = await producer.flush()
+
+    assert (sent, pending) == (1, 0)
+    assert [f.id for f in sink.batches[0]] == ["f-1"]
+    assert producer.pending_count() == (0, 0)
+
+
+async def test_legacy_bare_line_wal_still_drains(tmp_path) -> None:
+    """A line written before the `shared_id` envelope existed has no
+    `shared_id` key at all. It must read as `None`, and `None` matches
+    whatever session is CURRENTLY bound -- a pre-existing WAL keeps draining
+    exactly as it did before this change, rather than being silently
+    stranded by a partitioning rule it predates."""
+    sink = RecordingSink()
+    producer = Producer(tmp_path, sink, "session-A")
+    legacy_line = json.dumps(
+        {"produced_at": "2026-08-01T00:00:00+00:00", "finding": finding("f-legacy").model_dump(mode="json")}
+    )
+    producer.findings_path.write_text(legacy_line + "\n", encoding="utf-8")
+
+    sent, pending = await producer.flush()
+
+    assert (sent, pending) == (1, 0)
+    assert [f.id for f in sink.batches[0]] == ["f-legacy"]
+
+
+async def test_pending_count_splits_deliverable_from_held(tmp_path) -> None:
+    producer = Producer(tmp_path, FailingSink(), "session-A")
+    producer.record([finding("f-a")])
+    producer.rebind("session-B")
+    producer.record([finding("f-b")])
+
+    assert producer.pending_count() == (1, 1)
+
+
+async def test_a_finding_recorded_while_unbound_matches_any_binding(tmp_path) -> None:
+    """`record()` with no explicit override tags the CURRENT binding --
+    `None` if this Producer was never bound to anything. That's a stronger
+    version of the legacy-line guarantee: it can never be mistaken for a
+    real session id, so it stays deliverable under whatever binds next
+    rather than being invented a wrong target."""
+    sink = RecordingSink()
+    producer = Producer(tmp_path, sink)              # never bound (shared_id=None)
+    producer.record([finding("f-1")])
+
+    producer.rebind("session-A")
+    sent, pending = await producer.flush()
+
+    assert (sent, pending) == (1, 0)

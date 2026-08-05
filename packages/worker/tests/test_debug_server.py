@@ -70,6 +70,10 @@ def test_debug_page_returns_html_with_required_ids() -> None:
         assert "text/html" in content_type
         assert 'id="feed"' in body
         assert 'id="npu-now"' in body
+        # The re-join envelope's "held (other session)" display (STATE.md
+        # trap #8) — see test_worker_debug_page_js.py for the executed-JS
+        # coverage of what actually populates this sub-label.
+        assert 'id="stat-wal-sub"' in body
     finally:
         server.stop()
 
