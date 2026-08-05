@@ -34,7 +34,7 @@ import argparse
 import sys
 
 from synapse_service.corpus import Band, build
-from synapse_service.lanes import DEFAULT_TOP_K, Lane
+from synapse_service.lanes import DEFAULT_RECENT, DEFAULT_TOP_K, Lane
 from synapse_service.recall import measure
 
 
@@ -52,9 +52,23 @@ def main() -> int:
         default=DEFAULT_TOP_K,
         help=f"candidates shown to the model (default: {DEFAULT_TOP_K})",
     )
+    parser.add_argument(
+        "--topic-lane",
+        action="store_true",
+        help="run the topic lane (default: off — see docs/STATE.md)",
+    )
+    parser.add_argument(
+        "--recent",
+        type=int,
+        default=DEFAULT_RECENT,
+        help=f"recent ids collected before the reserved floor caps them (default: {DEFAULT_RECENT})",
+    )
     args = parser.parse_args()
 
-    report = measure(build(distractors=args.distractors), top_k=args.top_k)
+    print(f"  config: topic_lane={'ON' if args.topic_lane else 'OFF'} "
+          f"recent={args.recent} top_k={args.top_k} distractors={args.distractors}")
+    report = measure(build(distractors=args.distractors), top_k=args.top_k,
+                     recent=args.recent, topic_lane=args.topic_lane)
     print()
     print(report.format())
 

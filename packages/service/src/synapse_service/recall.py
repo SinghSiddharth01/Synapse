@@ -28,7 +28,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 
 from synapse_service.corpus import Band, CorpusEntry
-from synapse_service.lanes import DEFAULT_TOP_K, Lane
+from synapse_service.lanes import DEFAULT_RECENT, DEFAULT_TOP_K, Lane
 from synapse_service.memory import SharedMemory
 
 
@@ -103,7 +103,9 @@ class RecallReport:
 
 
 def measure(
-    entries: list[CorpusEntry], *, top_k: int = DEFAULT_TOP_K, shared_id: str = "recall"
+    entries: list[CorpusEntry], *, top_k: int = DEFAULT_TOP_K,
+    recent: int = DEFAULT_RECENT, topic_lane: bool = False,
+    shared_id: str = "recall"
 ) -> RecallReport:
     """Load the corpus into a store, then probe every finding that has a partner.
 
@@ -125,7 +127,9 @@ def measure(
         result = store.candidates(
             entry.finding.text,
             top_k=top_k,
+            recent=recent,
             exclude=frozenset({entry.finding.id}),
+            topic_lane=topic_lane,
         )
         ids = result.ids()
         found = entry.partner_id in ids

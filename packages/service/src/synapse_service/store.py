@@ -23,7 +23,7 @@ from synapse_contracts import (Conflict, Finding, FindingId, FindingStatus,
                                SessionContext, SynapseSession)
 
 from synapse_service.fold import SupersessionCycleError, View
-from synapse_service.lanes import DEFAULT_TOP_K, CandidateSet
+from synapse_service.lanes import DEFAULT_TOP_K, DEFAULT_TOPIC_LANE, CandidateSet
 from synapse_service.memory import SharedMemory
 
 logger = logging.getLogger(__name__)
@@ -124,12 +124,14 @@ class InMemoryStore:
         return [self._project(view, f) for f in view.visible()]
 
     def candidates(self, shared_id: str, text: str, *, top_k: int = DEFAULT_TOP_K,
-                   exclude: frozenset[FindingId] = frozenset()) -> CandidateSet:
+                   exclude: frozenset[FindingId] = frozenset(),
+                   topic_lane: bool = DEFAULT_TOPIC_LANE) -> CandidateSet:
         """The one lookup. Synthesis passes a finding's text; retrieval passes
         a teammate's question. Projected like every other read -- api.query
         serialises `c.finding` straight into the response body."""
         memory = self._memories[shared_id]
-        result = memory.candidates(text, top_k=top_k, exclude=exclude)
+        result = memory.candidates(text, top_k=top_k, exclude=exclude,
+                                   topic_lane=topic_lane)
         view = memory.view()
         return replace(result, candidates=tuple(
             replace(c, finding=self._project(view, c.finding))

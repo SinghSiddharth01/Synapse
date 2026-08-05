@@ -33,6 +33,7 @@ from synapse_service.fold import View, fold
 from synapse_service.lanes import (
     DEFAULT_RECENT,
     DEFAULT_TOP_K,
+    DEFAULT_TOPIC_LANE,
     CandidateSet,
     Indexes,
     select,
@@ -182,6 +183,7 @@ class SharedMemory:
         top_k: int = DEFAULT_TOP_K,
         recent: int = DEFAULT_RECENT,
         exclude: frozenset[FindingId] = frozenset(),
+        topic_lane: bool = DEFAULT_TOPIC_LANE,
     ) -> CandidateSet:
         """The one lookup. Synthesis passes a finding; retrieval passes a query."""
         return select(
@@ -191,6 +193,7 @@ class SharedMemory:
             top_k=top_k,
             recent=recent,
             exclude=exclude,
+            topic_lane=topic_lane,
         )
 
     def unhealthy_topics(self) -> list[TopicId]:

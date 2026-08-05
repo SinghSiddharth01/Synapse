@@ -56,6 +56,14 @@ from synapse_service.symbols import SymbolIndex, extract
 RRF_K = 60
 
 DEFAULT_TOP_K = 14
+# How many recent ids are COLLECTED. Only `max(1, top_k // RESERVE_DIVISOR)` of
+# them are ever used (see the reserved floor below), so at the default
+# top_k=14 this constant is inert above 2: measured identical results at
+# recent=2, 8 and 20, and different only at recent=1. Raising it does nothing;
+# raising the FLOOR costs fusion slots that were measured as harmful (an
+# unranked recency pick scores identically to a symbol lane's top entry under
+# RRF, so eight of them displaced genuine matches and pushed noise to rank 4
+# of 14). Whether 2 is right is a harness question -- Plan E Task E.10.
 DEFAULT_RECENT = 8
 
 # What fraction of the result a lane with a guaranteed floor may occupy: one
@@ -63,6 +71,12 @@ DEFAULT_RECENT = 8
 # floor is deliberately small — it exists to stop a lane being shut out
 # entirely, not to promote it.
 RESERVE_DIVISOR = 5
+
+# The topic lane's default, set by MEASUREMENT in Step 5 of this task and read
+# -- never re-declared -- by SharedMemory.candidates, InMemoryStore.candidates,
+# recall.measure, test_lanes.py and tests/test_vocabulary.py. One line changes
+# the shipped behaviour, the assertions and the vocabulary document together.
+DEFAULT_TOPIC_LANE = False
 
 
 class Lane(StrEnum):
@@ -154,6 +168,7 @@ def select(
     top_k: int = DEFAULT_TOP_K,
     recent: int = DEFAULT_RECENT,
     exclude: frozenset[FindingId] = frozenset(),
+    topic_lane: bool = DEFAULT_TOPIC_LANE,
 ) -> CandidateSet:
     """Run every lane over the current view and fuse the rankings.
 
@@ -176,10 +191,16 @@ def select(
         Lane.VECTOR: eligible(indexes.vectors.search(text)),
     }
 
-    query_vector = indexes.vectors.embedder.embed(text)
-    ranked_by_lane[Lane.TOPIC] = eligible(
-        indexes.topics.search(query_vector, view.topic_of)
-    )
+    # OFF by default: measured at 0 partners and 0 uniquely at 422 findings
+    # and at 2,022 (docs/STATE.md, "The topic lane is on notice"). A lane
+    # returning a whole 40-member cluster into an RRF fusion is not free --
+    # those members take rank credit that can outvote real matches. Kept
+    # behind a flag rather than deleted because lane yield on a REAL corpus is
+    # what decides, and that measurement is blocked on the fixture co-sign.
+    if topic_lane:
+        query_vector = indexes.vectors.embedder.embed(text)
+        ranked_by_lane[Lane.TOPIC] = eligible(
+            indexes.topics.search(query_vector, view.topic_of))
 
     # The recall hedge: the last M unconditionally, regardless of any score.
     # Recent work is disproportionately likely to be relevant, and a finding
@@ -230,7 +251,8 @@ def select(
     )
     budget = top_k - sum(min(len(ids), floor) for _, ids in reserved)
 
-    ordered = sorted(fused.items(), key=lambda kv: (-kv[1], kv[0]))[:budget]
+    fused_ranked = sorted(fused.items(), key=lambda kv: (-kv[1], kv[0]))
+    ordered = fused_ranked[:budget]
     chosen = {finding_id for finding_id, _ in ordered}
 
     for lane, ids in reserved:
@@ -242,6 +264,18 @@ def select(
                 continue
             ordered.append((finding_id, fused.get(finding_id, 0.0)))
             chosen.add(finding_id)
+
+    # A reserved id that the fusion had ALREADY chosen consumed a budget slot
+    # and then hit the `continue` above, so the result silently came back short
+    # -- measured 12 of 14, and worst exactly when the shared symbol is common
+    # and breadth matters most. Refill from the fusion remainder.
+    for finding_id, score in fused_ranked:
+        if len(ordered) >= top_k:
+            break
+        if finding_id in chosen:
+            continue
+        ordered.append((finding_id, score))
+        chosen.add(finding_id)
 
     ordered.sort(key=lambda kv: (-kv[1], kv[0]))
     candidates = tuple(
