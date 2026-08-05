@@ -5,17 +5,16 @@ both probed gotchas make its schema path structurally different —
   * response_format is silently IGNORED (a 200 proves nothing; control-probed)
   * /chat/completions EATS emitted JSON into empty tool_calls
 so schema calls flatten the messages into one prompt and use POST /completions,
-then tolerantly extract and structurally validate a JSON object (reusing
-openai_compat's _parse_json_tolerantly — routing and response_format are the
-standalone-class justification, not the parser). One retry that changes the
-prompt and temperature so a deterministic decode isn't just resent, then
-honest schema_valid=False. max_tokens is bounded on every call — shared
-credit pool.
+then tolerantly extract and structurally validate a JSON object. One retry
+that changes the prompt and temperature so a deterministic decode isn't just
+resent, then honest schema_valid=False. max_tokens is bounded on every call
+— shared credit pool.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from typing import Any
@@ -24,19 +23,66 @@ import httpx
 
 from synapse_contracts import ModelResult, ModelUsage
 from synapse_providers.base import ModelProvider, ProviderCapabilities
-from synapse_providers.openai_compat import _parse_json_tolerantly
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_BASE_URL = "https://aisuite.cirrascale.com/apis/v2"
 
-# extract_first_json_object used to be a standalone brace-counter with no
-# string awareness: it mis-closed on the first `}` inside a *string* value
-# (routine for working_memory, free prose an 8B writes about code), costing
-# a full retry for nothing. _parse_json_tolerantly (openai_compat) already
-# solves this -- it tries json.loads on the whole text first, which respects
-# string escaping, before falling back to a fenced-block or outer-span
-# heuristic. Reusing it is strictly stronger; kept as a module-level name
-# here since existing callers/tests reference `extract_first_json_object`.
-extract_first_json_object = _parse_json_tolerantly
+
+def extract_first_json_object(text: str) -> dict[str, Any] | None:
+    """Find the FIRST balanced, string-aware JSON object in free-form text.
+
+    A Llama-3.1-8B answering a /completions prompt that ends in "JSON:"
+    routinely narrates around the object, shows a code snippet with its own
+    braces, or appends a trailing example -- any of which puts a second,
+    unrelated brace pair in the response. Reaching for the OUTERMOST
+    `{`..`}` span (as openai_compat._parse_json_tolerantly's fallback does)
+    is poisoned by that second pair; a naive brace-counter is poisoned by an
+    unbalanced `}` inside a *string* value (routine free prose about code).
+    `json.JSONDecoder.raw_decode` is used instead: it is string-aware (a `}`
+    inside a quoted value never closes the object early) and, tried at every
+    `{` in the text, stops at the FIRST index that parses -- matching what a
+    balanced-brace scanner intends without either failure mode.
+    """
+    stripped = text.strip()
+    if not stripped:
+        return None
+
+    # The common, cheap case: the whole response IS the JSON object.
+    try:
+        whole = json.loads(stripped)
+        if isinstance(whole, dict):
+            return whole
+    except json.JSONDecodeError:
+        pass
+
+    # A fenced ```json block, with or without the language tag.
+    if "```" in stripped:
+        for chunk in stripped.split("```"):
+            chunk = chunk.strip()
+            if chunk.startswith("json"):
+                chunk = chunk[4:].strip()
+            if chunk.startswith("{"):
+                try:
+                    fenced = json.loads(chunk)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(fenced, dict):
+                    return fenced
+
+    # Scan for the first index where a balanced object decodes, string
+    # escaping respected by the stdlib tokenizer rather than hand-rolled.
+    decoder = json.JSONDecoder()
+    idx = stripped.find("{")
+    while idx != -1:
+        try:
+            candidate, _end = decoder.raw_decode(stripped, idx)
+            if isinstance(candidate, dict):
+                return candidate
+        except json.JSONDecodeError:
+            pass
+        idx = stripped.find("{", idx + 1)
+    return None
 
 
 def _satisfies_schema(data: Any, schema: dict[str, Any]) -> bool:

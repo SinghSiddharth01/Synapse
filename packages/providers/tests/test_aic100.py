@@ -6,7 +6,7 @@ import json
 import httpx
 import pytest
 
-from synapse_providers.aic100 import AIC100Provider
+from synapse_providers.aic100 import AIC100Provider, extract_first_json_object
 
 SCHEMA = {"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"]}
 
@@ -98,6 +98,28 @@ async def test_json_extraction_survives_an_unbalanced_brace_inside_a_string():
     assert result.schema_valid is True
     assert result.data == {"working_memory": "the guard closes with } before the return",
                            "merges": []}
+
+
+@pytest.mark.parametrize("text,expected", [
+    ('{"ok": true}', {"ok": True}),
+    ('Sure! {"ok": true} hope that helps', {"ok": True}),
+    ('Here is the fix: if (x) { doThing(); }\n{"ok": true}', {"ok": True}),
+    ('{"ok": true}\nExample: func() { return; }', {"ok": True}),
+    ('{"ok": true}\n\nNote: {"unused": 1}', {"ok": True}),
+    ('{"a":1} {"b":2}', {"a": 1}),
+    ('{"working_memory": "closes with } before return", "merges": []}',
+     {"working_memory": "closes with } before return", "merges": []}),
+])
+def test_json_extraction_finds_the_first_object_around_narration_and_code(text, expected):
+    """A Llama-3.1-8B answering a /completions prompt that ends in 'JSON:'
+    routinely narrates, shows a code snippet with its own braces, or
+    appends a trailing example -- all of which put a second, unrelated
+    brace pair in the response. The extractor must still find the FIRST
+    balanced JSON object rather than reaching for the outermost brace span
+    (which any second brace pair poisons), while still tolerating an
+    unbalanced brace INSIDE a string value (the case the aliasing to
+    openai_compat's _parse_json_tolerantly was originally meant to fix)."""
+    assert extract_first_json_object(text) == expected
 
 
 async def test_the_retry_is_not_a_byte_identical_resend():
