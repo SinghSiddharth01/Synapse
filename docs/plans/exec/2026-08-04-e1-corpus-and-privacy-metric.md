@@ -223,6 +223,50 @@ git add fixtures/segments/seg-003.json fixtures/findings/seg-003.findings.json p
 git commit -m "test(fixtures): seg-003 — oversized tool_result, buried error (Plan 0.3)"
 ```
 
+#### Post-review amendment (2026-08-04)
+
+This task's opening paragraph and Interfaces line claim seg-003 "pins two
+things: budget-splitting doesn't lose the error line, and `dead_end` recall
+when the signal lives in a `tool_result`," with "whose middle `tool_result`
+event exceeds 4000 chars with the error at roughly the midpoint."
+
+Corpus review (findings-e1.json, "Task 2 (seg-003 oversized tool_result)")
+found that under the shipped config (`config/synapse.toml`:
+`distil_kinds = ["text"]`), the oversized `tool_result` is filtered out of
+`render_segment` before the model ever sees it — no budget-splitting occurs,
+and there is no truncation/compaction path to pin, because the fixture stays
+under the derived budget even when every event kind is included. The
+`dead_end` golden is reachable only because the assistant's own prose
+(event 5) restates the failure in words, which means seg-003 currently
+exercises the same code path as seg-002 (a conversational-recall case), not
+the buried-tool_result/compaction case this task set out to build.
+
+This is not a design reversal — it is a gap between what this task's prose
+promises and what the shipped `distil_kinds` default (chosen in
+`config/synapse.toml`) actually exercises today. No fixture change is
+warranted: the fixture *file* still legitimately has an oversized
+`tool_result` with the error buried mid-log
+(`test_seg003_error_is_buried_in_an_oversized_tool_result` pins that), and
+that data property is needed the moment `distil_kinds` widens and/or
+compaction (Plan A.5) lands. What was missing was a test pinning the
+*current, honest* system behaviour so the gap between "the data has this
+shape" and "the system exercises this behaviour today" cannot silently go
+stale in either direction.
+
+Added `test_seg003_buried_error_reaches_the_model_only_via_prose_under_
+shipped_config` (`packages/distiller/tests/test_fixture_corpus.py`), which
+asserts the buried `ConnectionResetError` is absent from the rendered prompt
+under the shipped config, and that the `dead_end` is recoverable only via
+prose. A later review pass replaced this test's `load_config()` call with
+explicit construction from module-level `_SHIPPED_*` constants, since even
+guarding `load_config()` against `SYNAPSE_*` env vars still routed a "pin
+the committed config" test through env-merge machinery it had no need of.
+
+Deferred, tracked, not a defect: compaction/budget-splitting recall for a
+buried `tool_result` remains unbuilt until `distil_kinds` widens or Plan A.5
+lands — already recorded in this file's "Deferred, with reasons" section for
+the related cross-segment `dead_end` case, and applies here too.
+
 ---
 
 ### Task 3: seg-005a / seg-005b — the semantic-merge pair
@@ -391,6 +435,58 @@ Expected: ALL PASS — including `test_corpus_is_complete`, now that all 8 ids e
 git add fixtures/segments/seg-006.json fixtures/segments/seg-007.json fixtures/findings/seg-006.findings.json fixtures/findings/seg-007.findings.json fixtures/triage.json packages/distiller/tests/test_fixture_corpus.py
 git commit -m "test(fixtures): adversarial triage pair + expectation map — corpus complete at 8"
 ```
+
+#### Post-review amendment (2026-08-04)
+
+Corpus review (findings-e1.json, "Task 4 (seg-006/seg-007 adversarial
+pair)") flagged that this task's goldens were rewritten from `[]` to
+faithful-compression content by a later commit (7fb9f12, "seg-006/seg-007
+need faithful-compression goldens, not empty ones (ADR 0003)") without this
+plan being amended — the checkboxes above stayed `[x]` and Step 3's fixture
+text, this task's opening paragraph ("Their goldens are empty arrays"), and
+Step 1's `test_adversarial_fixtures_have_empty_goldens` all still describe
+the original, now-superseded design.
+
+**Ruling on review: the reversal is correct, upheld.** This task predates
+`adr/0003` (the on-device Distiller compresses; it does not judge —
+durability judgment belongs to triage upstream and synthesis downstream).
+When this task was written, an empty golden for a `keep`-triaged adversarial
+segment encoded a durability judgment ("the distiller should recognize this
+isn't worth keeping and emit nothing") that made sense under the pre-ADR
+design, where the distiller was still expected to filter. Under ADR 0003
+that judgment no longer belongs to the distiller at all — triage has already
+decided `keep` by the time seg-006/seg-007 reach it (see
+`fixtures/triage.json`'s two ACCEPTED FALSE POSITIVE entries), and a
+compress-only distiller asked to faithfully compress real content (seg-006's
+tool_result contains a genuine NameError-driven test failure; seg-007's
+contains three real call sites) SHOULD produce findings. An empty golden
+here is now internally inconsistent with `adr/0003`: it would fail a
+correct, ADR-compliant distiller and reward one that reproduces the pre-ADR
+filtering behaviour the ADR explicitly removed.
+
+What was wrong was not the direction but the **honesty trail**: the goldens
+changed and the test asserting emptiness was deleted and inverted, but this
+plan document was never updated to say so, and the implementation report
+claimed no deviations. That is the defect this amendment corrects.
+
+**Current state, superseding Step 1 and Step 3 above and this task's opening
+paragraph:**
+- `fixtures/findings/seg-006.findings.json` / `seg-007.findings.json` are
+  **non-empty** (`f-006-01`, `f-007-01`), not `[]`.
+- The Step 1 test `test_adversarial_fixtures_have_empty_goldens` no longer
+  exists. In its place: `test_seg006_seg007_have_faithful_compression_
+  goldens` (`packages/distiller/tests/test_fixture_corpus.py`), asserting
+  the goldens are non-empty, with the ADR-0003 rationale above in its
+  docstring.
+- `f-006-01`'s text was further trimmed in a later review pass
+  (findings-e1.json, "Task 4 — seg-006 adversarial fixture + golden") to
+  remove facts ("an undefined-variable typo", "caused one test failure")
+  that live only in the tool_result the shipped `distil_kinds = ("text",)`
+  excludes from the model's view — see
+  `test_seg006_typo_reaches_the_model_only_via_prose_under_shipped_config`.
+- `fixtures/README.md` and `fixtures/triage.json` are updated to describe
+  this corpus as it actually ships; their current text supersedes this
+  task's "Their goldens are empty arrays" line, which is now historical.
 
 ---
 

@@ -21,11 +21,20 @@ triage should do per fixture, including two ACCEPTED FALSE POSITIVE entries.
 | Fixture | Purpose |
 |---|---|
 | `segments/seg-001.json` | Ordinary turn. Golden covers all four `FindingType`s |
+| `segments/seg-002.json` | Conversational decision, no tool call, no error — the case a keyword filter cannot catch; triage must default-keep it |
+| `segments/seg-003.json` | Oversized `tool_result` with the error buried mid-log. Under the shipped config the `tool_result` is filtered out before the model sees it, so today this pins only prose-restated `dead_end` recall — see the Post-review amendment on Task 2 in `docs/plans/exec/2026-08-04-e1-corpus-and-privacy-metric.md` |
 | `segments/seg-004.json` | **All noise.** Golden is an **empty array** |
+| `segments/seg-005a.json` + `segments/seg-005b.json` | Two Contributors reach overlapping halves of one insight — the semantic-merge pair E3's synthesis test consumes directly (`f-005a-01`, `f-005b-01`) |
+| `segments/seg-006.json` | Adversarial: a typo-error that resolves in seconds, not durable insight. Triage keeps it anyway (ACCEPTED FALSE POSITIVE, `fixtures/triage.json`); under `adr/0003` the distiller compresses it faithfully rather than judging it worthless, so its golden is non-empty — see the Post-review amendment on Task 4 |
+| `segments/seg-007.json` | Adversarial: grep output full of the word "error", nothing actually failed. Same ACCEPTED FALSE POSITIVE / non-empty-golden treatment as seg-006 |
 
-`seg-004` is the load-bearing one. Small models invent findings for boring
-input — it is failure mode #3 in Plan B's calibration table — and an empty
-golden is the only thing that catches it.
+`seg-004` is the load-bearing empty-golden fixture. Small models invent
+findings for boring input — it is failure mode #3 in Plan B's calibration
+table — and an empty golden is the only thing that catches it. seg-006 and
+seg-007 are also triage false positives but are NOT empty-golden fixtures:
+they reach the distiller as `keep`, and `adr/0003` means the distiller
+compresses whatever reaches it rather than re-judging durability, so their
+goldens are faithful compressions, not empty arrays.
 
 ## How goldens are compared
 
