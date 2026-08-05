@@ -35,7 +35,7 @@ Read-only, no model calls from any debug endpoint (pinned by test), localhost-on
 **Interfaces:**
 - Produces: `CallLog(maxlen=200)` with `.append(call)`, `.snapshot() -> list[dict]`; `LLMCall` dataclass `{ts_iso, component, provider_id, input_tokens, output_tokens, latency_ms, schema_valid, ok, prompt_preview, output_preview}`; `RecordingProvider(inner: ModelProvider, component: str, log: CallLog)` implementing `ModelProvider`. Tasks 2 and 4 wrap providers with exactly this.
 
-- [ ] **Step 1: Failing tests**
+- [x] **Step 1: Failing tests**
 
 ```python
 # packages/providers/tests/test_recording.py
@@ -81,9 +81,9 @@ def test_ring_buffer_bounds():
     assert [c["n"] for c in log.snapshot()] == [2, 3, 4]
 ```
 
-- [ ] **Step 2: Run** — `uv run pytest packages/providers/tests/test_recording.py -v` → FAIL (`ModuleNotFoundError`).
+- [x] **Step 2: Run** — `uv run pytest packages/providers/tests/test_recording.py -v` → FAIL (`ModuleNotFoundError`).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```python
 # packages/providers/src/synapse_providers/recording.py
@@ -164,7 +164,7 @@ class RecordingProvider(ModelProvider):
 
 Export from `__init__.py`.
 
-- [ ] **Step 4: Run** → PASS. **Step 5: Commit** — `feat(providers): RecordingProvider — tagged LLM-call instrumentation`.
+- [x] **Step 4: Run** → PASS. **Step 5: Commit** — `feat(providers): RecordingProvider — tagged LLM-call instrumentation`.
 
 ---
 
