@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -137,13 +138,37 @@ def test_install_md_exists_and_documents_where_the_pack_is_copied_to():
     assert "settings.json" in text
 
 
-def test_this_repos_own_claude_dir_does_not_exist():
+def test_this_repos_own_claude_dir_is_not_where_the_pack_self_installed():
     """Chain C: 'The pack is a shipped artifact, not installed into this
     repo's own `.claude/` — installing it on a dev machine is INSTALL.md's
     job.' A stray `.claude/` here would mean this task installed itself
     into its own repo rather than shipping something a teammate installs
-    elsewhere."""
-    assert not (ROOT / ".claude").exists()
+    elsewhere.
+
+    Deliberately NOT `assert not (ROOT / ".claude").exists()`: that pins a
+    property of the developer's *working tree*, not of the shipped
+    artifact. A teammate who approves any Claude Code permission in this
+    repo gets a `.claude/settings.local.json` — real, gitignored by the
+    user's *global* gitignore (`~/.config/git/ignore:
+    **/.claude/settings.local.json`), so `git status` clean is not evidence
+    it is absent, and it has nothing to do with whether this task
+    self-installed. Instead pin the two things the scope line actually
+    means: none of the paths INSTALL.md's own `mkdir -p` step would create
+    exist here, and nothing under `.claude/` is tracked by this repo's git
+    -- which is what "not installed into this repo" actually cashes out
+    to."""
+    claude_dir = ROOT / ".claude"
+    # The exact paths `INSTALL.md`'s `mkdir -p .claude/skills
+    # .claude/synapse-pack` step creates on a teammate's machine.
+    assert not (claude_dir / "skills" / "synapse-shared-memory").exists()
+    assert not (claude_dir / "synapse-pack").exists()
+
+    tracked = subprocess.run(
+        ["git", "-C", str(ROOT), "ls-files", "--", ".claude"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    assert tracked.strip() == "", (
+        f"unexpected files under .claude/ tracked by this repo's git: {tracked!r}")
 
 
 def test_the_hook_file_the_snippet_and_install_doc_point_at_actually_exists():
