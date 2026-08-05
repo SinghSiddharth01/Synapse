@@ -55,7 +55,7 @@ skill and hook both talk to whatever is running right now.
 ## Verify
 
 Ask a teammate to push a finding (or push one yourself with
-`mcp__synapse__contribute` from another joined Shared Session), then submit any
+`mcp__synapse__contribute` from another joined Agent Session), then submit any
 prompt in this project. If the shared-memory version moved since the last
 time this hook checked, your next prompt gets a line like:
 
