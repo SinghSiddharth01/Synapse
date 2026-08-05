@@ -18,9 +18,9 @@ Full prior detail: **[`2026-08-04-implementation-report.md`](./2026-08-04-implem
 packages/contracts/     frozen schemas + SessionBinding
 packages/providers/     ModelProvider · FakeProvider · OpenAICompatible · NPUProvider · AIC100Provider
 packages/distiller/     guards · promptpack · distiller · capability · config · evaluation (+ identifier_leaks)
-packages/worker/        claude_code source · follower · segmenter · triage · triage_log · producer · loop · discovery · cli (join/run/status/replay[--skipped])
+packages/worker/        claude_code source · follower · segmenter · triage · triage_log · producer · loop · discovery · stats · debug_server (/debug) · cli (join/run/status/replay[--skipped])
 packages/orchestrator/  server (query/contribute MCP tools + instructions briefing) · app (producer endpoint) · relay (write-ahead egress) · briefing · cli
-packages/service/       api (sessions/findings/synthesize/watermark/query) · synthesis (semantic merge) · retrieval · store · cli
+packages/service/       api (sessions/findings/synthesize/watermark/query) · synthesis (semantic merge) · retrieval · store · debug (/debug) · cli
 config/                 synapse.toml + 4 versioned prompt packs
 fixtures/               8 segments (seg-001…seg-007, seg-005 split a/b) + triage.json — PROVISIONAL, solo-authored
 scripts/                run_npu_eval · trace_one · calibrate_prompt · dump_prompt · verify_orchestrator · verify_instructions
@@ -35,6 +35,8 @@ scripts/                run_npu_eval · trace_one · calibrate_prompt · dump_pr
 **Orchestrator content (E4).** The transport shell has content now: the producer endpoint (`POST /producer/findings`, 422 on anything that isn't a `Finding`), a durable `Relay` (write-ahead log partitioned by the Shared Session bound *when each Finding was recorded*, not whatever's bound at send time — see Traps), and the MCP surface's `query`/`contribute` tools plus a watermark-driven arrival briefing riding the `initialize` response's `instructions` field (amendment F Q11 — verified live against a real `synapse-orchestrator` process, not just FakeProvider). Every route re-resolves its binding live rather than caching one at boot, and `contribute()` never raises out of the MCP tool.
 
 **The closed loop.** `test_end_to_end.py` sends one `Finding` through all three packages — worker's `Producer` → orchestrator's producer endpoint → `Relay` → the real service's `/findings` and `/query` — over in-process ASGI transports (zero real sockets) and gets it back out through a teammate's query; a second test pins awareness suppression across the same full chain. **Caveat:** both tests exercise the producer endpoint's legacy no-`resolver` branch (`relay.record(findings)` against a single `shared_id`), matching the plan's own usage — not the `resolve_binding_for_agent` per-agent-routing branch that `cli.main` actually wires up in production. The routing logic that resolves each Finding's Agent to its own Shared Session has unit coverage elsewhere, but the closed-loop test does not exercise it in combination with the other two hops.
+
+**Debug dashboards (E6, built on `exec/e6`, not yet merged).** Both processes now serve a live, self-contained `/debug` page — `synapse-worker --debug-port` (stdlib `http.server` in a daemon thread, default 8790, `0` disables) and `synapse-service` (mounted on the existing Starlette app, same port the API already listens on) — dark, `tabular-nums`, no chart libraries. `RecordingProvider` (`packages/providers`) wraps any `ModelProvider` transparently (same result, exceptions re-raised) to record every `complete()` call; the worker page shows a tagged `tick`/`triage`/`render`/`llm`/`push`/`error` feed and a live NPU-now elapsed timer, the service page tails the append-only Finding Log itself (CONTEXT.md: "the log IS the merge/topic feed") plus a tagged `llm`/`query`/`synthesis` feed. Both stats endpoints are read-only and provider-untouching, pinned by test, not by intention. 549 tests green (526 floor + 23 new); closed-loop test unmodified.
 
 ## What remains
 

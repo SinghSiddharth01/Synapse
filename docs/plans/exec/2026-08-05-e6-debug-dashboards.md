@@ -231,9 +231,9 @@ Export from `__init__.py`.
 
 ### Task 5: demo-script wiring + docs
 
-- [ ] Add to `docs/demo-script.md` §B, right after the two boot steps: open `http://127.0.0.1:8790/debug` and `http://127.0.0.1:8899/debug` side by side — beats 3–5 are *watchable* (NPU-now counts the distil seconds; the Merged entry appears in the service log tail the moment beat 5's push lands).
-- [ ] `docs/STATE.md`: one line under what exists; `docs/plans/README.md`: E6 row.
-- [ ] Full suite; commit — `docs: dashboards wired into the demo runbook`.
+- [x] Add to `docs/demo-script.md` §B, right after the two boot steps: open `http://127.0.0.1:8790/debug` and `http://127.0.0.1:8899/debug` side by side — beats 3–5 are *watchable* (NPU-now counts the distil seconds; the Merged entry appears in the service log tail the moment beat 5's push lands).
+- [x] `docs/STATE.md`: one line under what exists; `docs/plans/README.md`: E6 row.
+- [x] Full suite; commit — `docs: dashboards wired into the demo runbook`.
 
 ---
 
