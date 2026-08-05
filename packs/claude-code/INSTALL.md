@@ -74,6 +74,43 @@ python3 .claude/synapse-pack/hooks/freshness_pointer.py; echo "exit: $?"
 `exit: 0` with no output either way (nothing to report, or nothing joined
 yet) is correct — see **Fail-open, by design** below.
 
+Note that this direct-run command cannot reproduce the multi-window
+mismatch described next: run from a terminal, its stdin is a TTY, and the
+hook treats a TTY exactly like "no session_id available" — the same
+fallback as before conversation-scoping existed. Use it to confirm the
+hook is wired up and reaching the service at all; it will not tell you
+*which* Claude Code window, if any, it is currently speaking for.
+
+## Troubleshooting: the pointer stays silent in one window but not another
+
+The hook only ever speaks for the Claude Code conversation whose own
+`session_id` (piped to it on stdin by Claude Code) matches the
+`agent_session_id` recorded in `.synapse/bindings/claude-code.json` when
+you last ran `synapse-worker join` — every other window's invocation
+returns before it even reaches the network, by design (a window that
+never joined must not receive shared-memory content, and must not consume
+the joined window's own pending notice).
+
+`synapse-worker join` binds *whichever* Claude Code session it finds live
+at the moment you run it. If two Claude Code windows on the same project
+are open when you join, the binding can end up pointing at a window other
+than the one you're actually working in — and from then on the pointer is
+permanently silent in your window, with no error, because a mismatch and
+"nothing changed yet" produce identical (empty) output. This gets more
+likely the more windows you have open on one project at once.
+
+If you're confident shared memory has moved (a teammate confirms it, or
+`query` returns findings you haven't seen) but your prompts never surface
+a notice, the fix is to re-join **from a terminal inside the window you
+are actually using**:
+
+```bash
+synapse-worker join <shared_id>
+```
+
+This rebinds `claude-code.json` to whichever session is live in *that*
+terminal, which fixes the mismatch for that window going forward.
+
 ## Custom service URL
 
 If `synapse-orchestrator` was started with a non-default `--service-url`,
