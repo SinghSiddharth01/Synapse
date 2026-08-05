@@ -39,6 +39,19 @@ always exits 0; `run()` prints nothing until its very last line, so no
 partial output can ever reach stdout. Every network attempt is bounded by
 `_TIMEOUT_SECONDS`, which is deliberately small — this hook sits on the
 critical path of every prompt.
+
+RATE-LIMITED, INDEPENDENTLY OF THE WATERMARK (Plan D.6 rule 2: "The
+pointer speaks only when the version moved, rate-limited independently of
+the watermark so a burst of teammate activity produces one notice rather
+than one per turn."). `memory_version` bumps once per verdict round
+APPLIED -- including no-op verdicts (`schemas.py`'s `SessionContext`
+docstring, corrected 2026-08-05) -- so a version-only comparison would
+speak on nearly every turn during a busy stretch with several
+contributors and synthesis running: exactly the "fires constantly" failure
+rule 1's silence exists to prevent. This hook's state file therefore
+tracks `last_spoken_at` alongside `last_version`; a move inside
+`_notice_cooldown_seconds()` of the last REAL notice stays silent, even
+though the version baseline still advances underneath it -- see `run()`.
 """
 
 from __future__ import annotations
@@ -46,6 +59,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -71,6 +85,30 @@ _MAX_RESPONSE_BYTES = 65_536
 _DEFAULT_SERVICE_URL = "http://127.0.0.1:8899"
 
 _HOOK_EVENT_NAME = "UserPromptSubmit"
+
+# Plan D.6 rule 2 / architecture.html #awareness: "the pointer is
+# rate-limited independently of the watermark so a burst of teammate
+# activity produces one notice rather than one per turn." `memory_version`
+# bumps once per verdict round APPLIED -- including no-op verdicts
+# (schemas.py's SessionContext docstring, corrected 2026-08-05) -- so with
+# a couple of contributors and synthesis running, the version can move on
+# nearly every turn; without a cooldown independent of the watermark
+# itself, "silence is the feature" (rule 2's other half) fails exactly
+# when it matters most. Five minutes absorbs a realistic burst of
+# back-to-back merges while still surfacing real news within one sitting.
+# Overridable via SYNAPSE_FRESHNESS_COOLDOWN_SECONDS for tests, the same
+# way SYNAPSE_STATE_DIR/SYNAPSE_SERVICE_URL are.
+_DEFAULT_NOTICE_COOLDOWN_SECONDS = 300.0
+
+
+def _notice_cooldown_seconds() -> float:
+    override = os.environ.get("SYNAPSE_FRESHNESS_COOLDOWN_SECONDS")
+    if override:
+        try:
+            return float(override)
+        except ValueError:
+            pass
+    return _DEFAULT_NOTICE_COOLDOWN_SECONDS
 
 
 def _state_dir() -> Path:
@@ -154,25 +192,39 @@ def _state_path(state_dir: Path) -> Path:
     return state_dir / "awareness" / "freshness.json"
 
 
-def _load_last_version(path: Path, shared_id: str) -> int | None:
+def _load_state_entry(path: Path, shared_id: str) -> dict:
+    """This shared_id's raw entry from this hook's own state file
+    (`{"last_version": ..., "last_spoken_at": ...}`, the second key added
+    for rule 2's cooldown -- see `run()`), or `{}` if the file is missing,
+    corrupt, or has no entry for this shared_id yet. Fail-open extends to
+    this hook's own persistence too: a corrupt read is treated exactly like
+    no prior state, never an error."""
     try:
         state = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return None
+        return {}
     if not isinstance(state, dict):
-        return None
+        return {}
     entry = state.get(shared_id)
-    if not isinstance(entry, dict):
-        return None
+    return entry if isinstance(entry, dict) else {}
+
+
+def _last_version(entry: dict) -> int | None:
     version = entry.get("last_version")
     return version if isinstance(version, int) else None
 
 
-def _save_last_version(path: Path, shared_id: str, version: int) -> None:
+def _last_spoken_at(entry: dict) -> float | None:
+    value = entry.get("last_spoken_at")
+    return float(value) if isinstance(value, (int, float)) else None
+
+
+def _save_state_entry(path: Path, shared_id: str, entry: dict) -> None:
     """Best-effort, atomic when it succeeds. A write failure here (e.g. a
     read-only filesystem) is not escalated — this hook's own persistence is
     subordinate to fail-open too; the worst case is re-evaluating from a
-    stale baseline next turn, never a broken prompt submission.
+    stale baseline (and, if this turn spoke, a stale last-spoken-at) next
+    turn, never a broken prompt submission.
 
     That promise covers the WHOLE function, not just the read: `mkdir`,
     `write_text` and `os.replace` are wrapped in the same `except OSError`
@@ -190,7 +242,7 @@ def _save_last_version(path: Path, shared_id: str, version: int) -> None:
                 state = {}
         except (OSError, json.JSONDecodeError):
             state = {}
-        state[shared_id] = {"last_version": version}
+        state[shared_id] = entry
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(path.suffix + ".tmp")
         tmp.write_text(json.dumps(state), encoding="utf-8")
@@ -248,33 +300,55 @@ def run() -> None:
     version = int(watermark["version"])
 
     state_path = _state_path(state_dir)
-    last_version = _load_last_version(state_path, shared_id)
+    entry = _load_state_entry(state_path, shared_id)
+    last_version = _last_version(entry)
+    last_spoken_at = _last_spoken_at(entry)
 
     # `last_version is None`: first-ever check for this shared_id --
     # nothing to compare against, so this establishes the baseline rather
     # than reporting a "move" from nothing. `==`: no movement since the
-    # last check. Either way, silent. Any OTHER difference -- including a
+    # last check. Either way, no move. Any OTHER difference -- including a
     # DECREASE, which a Synapse Service restart can legitimately produce
     # (Shared Memory lives in memory; Plan D.4's `resync` climbs back up
-    # from whatever a machine's durable log replays) -- is real news worth
-    # a line, not just an increase.
+    # from whatever a machine's durable log replays) -- is real news, but
+    # still subject to rule 2's cooldown below.
     moved = last_version is not None and last_version != version
-    if moved:
+
+    now = time.time()
+    # Rule 2 (Plan D.6 / architecture.html #awareness): "rate-limited
+    # independently of the watermark so a burst of teammate activity
+    # produces one notice rather than one per turn." A move that lands
+    # inside the cooldown since the last REAL notice stays silent too --
+    # `last_spoken_at is None` covers both "never spoken yet" and "spoken
+    # long enough ago it doesn't matter" identically, so there's no
+    # cooldown to respect on the very first notice ever.
+    cooled_down = (last_spoken_at is None
+                   or (now - last_spoken_at) >= _notice_cooldown_seconds())
+    should_speak = moved and cooled_down
+
+    if should_speak:
         # Emit BEFORE persisting, deliberately: this line is the one thing
-        # `_save_last_version`'s own docstring promises a write failure can
+        # `_save_state_entry`'s own docstring promises a write failure can
         # never cost. Persisting after also means a crash between the two
         # (there isn't one here, but the ordering is what makes the
         # property hold regardless) still leaves the notice already on
         # stdout.
         _emit(_compose_message(watermark))
 
-    # Persist the new baseline unconditionally, whether or not this turn
-    # spoke -- the next comparison is always against the LATEST observed
-    # version, never against the version last spoken about. That is what
-    # makes this "fires once": the turn right after a move updates the
-    # baseline to the new version, so the turn after THAT compares equal
-    # and stays silent, with no dependency on `query` ever being called.
-    _save_last_version(state_path, shared_id, version)
+    # The version baseline advances on EVERY check, spoken or not -- same
+    # "fires once" property rule 1's silence relies on: the turn right
+    # after a move updates the baseline to the new version, so the turn
+    # after THAT compares equal and stays silent, with no dependency on
+    # `query` ever being called. `last_spoken_at` is different: it only
+    # advances when this turn actually spoke. A move suppressed by the
+    # cooldown leaves it untouched, so the cooldown window is always
+    # measured from the last REAL notice, not extended by a turn that
+    # stayed silent because of it.
+    new_entry: dict = {"last_version": version}
+    spoken_at = now if should_speak else last_spoken_at
+    if spoken_at is not None:
+        new_entry["last_spoken_at"] = spoken_at
+    _save_state_entry(state_path, shared_id, new_entry)
 
 
 def main() -> int:

@@ -197,6 +197,66 @@ def test_requests_the_bound_sessions_watermark_with_the_agent_session_param(tmp_
 
 
 # ---------------------------------------------------------------------------
+# Rate-limited, independently of the watermark (Plan D.6 rule 2): "a burst
+# of teammate activity produces one notice rather than one per turn."
+# ---------------------------------------------------------------------------
+
+def test_a_burst_of_moves_inside_the_cooldown_produces_exactly_one_notice(tmp_path, watermark):
+    """Two version bumps landing back-to-back -- as fast as a test can
+    drive them, well inside the default cooldown -- must produce exactly
+    one notice, not one per turn. Before this fix, the hook compared only
+    against `last_version` (which advances on every check regardless of
+    whether it spoke), so a second move immediately after the first would
+    have spoken again; verified by reverting to that behavior and
+    re-running this test, which then failed on the second assertion."""
+    state_dir = tmp_path / ".synapse"
+    _write_binding(state_dir)
+    watermark.body["version"] = 1
+
+    baseline = _run_hook(state_dir, watermark.url)
+    assert baseline.stdout == ""  # first-ever check: baseline only, no cooldown yet
+
+    watermark.body["version"] = 2
+    first_move = _run_hook(state_dir, watermark.url)
+    assert first_move.stdout != ""
+    assert "v2" in json.loads(first_move.stdout)["hookSpecificOutput"]["additionalContext"]
+
+    watermark.body["version"] = 3  # a second teammate's merge, seconds later
+    second_move = _run_hook(state_dir, watermark.url)
+    assert second_move.returncode == 0
+    assert second_move.stdout == ""  # inside the cooldown: silent, not a second notice
+
+
+def test_the_pointer_speaks_again_once_the_cooldown_elapses(tmp_path, watermark):
+    """The suppression from rule 2 is temporary, not permanent: once the
+    cooldown window passes, a further move speaks again. Uses
+    SYNAPSE_FRESHNESS_COOLDOWN_SECONDS to shrink the window so this test
+    doesn't sleep for the production five minutes."""
+    state_dir = tmp_path / ".synapse"
+    _write_binding(state_dir)
+    cooldown_env = {"SYNAPSE_FRESHNESS_COOLDOWN_SECONDS": "0.2"}
+    watermark.body["version"] = 1
+
+    baseline = _run_hook(state_dir, watermark.url, extra_env=cooldown_env)
+    assert baseline.stdout == ""
+
+    watermark.body["version"] = 2
+    first_move = _run_hook(state_dir, watermark.url, extra_env=cooldown_env)
+    assert first_move.stdout != ""
+
+    watermark.body["version"] = 3
+    suppressed = _run_hook(state_dir, watermark.url, extra_env=cooldown_env)
+    assert suppressed.stdout == ""  # still inside the 0.2s cooldown
+
+    time.sleep(0.3)
+    watermark.body["version"] = 4
+    after_cooldown = _run_hook(state_dir, watermark.url, extra_env=cooldown_env)
+    assert after_cooldown.returncode == 0
+    payload = json.loads(after_cooldown.stdout)
+    assert "v4" in payload["hookSpecificOutput"]["additionalContext"]
+
+
+# ---------------------------------------------------------------------------
 # Fail open, absolutely.
 # ---------------------------------------------------------------------------
 
