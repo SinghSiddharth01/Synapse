@@ -223,23 +223,19 @@ class Synthesizer:
                 provenance=Provenance.SYNTHESIZED,
                 merged_from=[s.id for s in sources],
             )
-            store.upsert(shared_id, [synthesized])
-            for s in sources:
-                s.merged_into = synthesized.id                     # tombstone: text stays
+            store.supersede(shared_id, [s.id for s in sources], synthesized)
 
-        for fid in verdicts.trivial_ids:
-            finding = store.get(shared_id, fid)
-            if finding is None:
-                logger.warning("Trivial verdict for unknown id %s; ignored", fid)
-                continue
-            if finding.merged_into is None:
-                finding.status = FindingStatus.TRIVIAL
+        store.mark_trivial(shared_id, list(verdicts.trivial_ids))
 
+        # Accumulate locally. `ctx.conflicts.append(...)` was a mutation
+        # through a reference just as much as an assignment was; it survives a
+        # mutable store and vanishes on a projecting one.
+        pending: list[Conflict] = list(ctx.conflicts)
         for c in verdicts.conflicts:
             if c.a not in known or c.b not in known or c.a == c.b:
                 continue
-            ctx.conflicts.append(Conflict(finding_a=c.a, finding_b=c.b,
-                                          description=c.description))
+            pending.append(Conflict(finding_a=c.a, finding_b=c.b,
+                                    description=c.description))
 
         # Resolve EVERY stored conflict -- old rounds' and this round's new
         # ones alike -- forward through merged_into, then dedup. Resolving
@@ -255,7 +251,7 @@ class Synthesizer:
         # window makes re-reporting the expected case, not a rare one.
         resolved: list[Conflict] = []
         seen_pairs: set[frozenset[str]] = set()
-        for conflict in ctx.conflicts:
+        for conflict in pending:                # was: for conflict in ctx.conflicts
             ra = _resolve_forward(store, shared_id, conflict.finding_a)
             rb = _resolve_forward(store, shared_id, conflict.finding_b)
             if ra == rb:
@@ -266,9 +262,8 @@ class Synthesizer:
             seen_pairs.add(key)
             resolved.append(Conflict(finding_a=ra, finding_b=rb,
                                      description=conflict.description))
-        ctx.conflicts = resolved
 
-        if verdicts.working_memory is not None:
-            ctx.working_memory = verdicts.working_memory
-        store.bump_version(shared_id)                               # 4. exactly once
-        return ctx
+        store.set_context(shared_id, working_memory=verdicts.working_memory,
+                          conflicts=resolved)
+        store.bump_version(shared_id)           # 4. exactly once per VERDICT ROUND
+        return store.get_context(shared_id)

@@ -15,9 +15,13 @@ upsert idempotency is tested harder than anything else here.
 
 from __future__ import annotations
 
+import logging
 import uuid
 
-from synapse_contracts import Finding, FindingStatus, SessionContext, SynapseSession
+from synapse_contracts import (Conflict, Finding, FindingId, FindingStatus,
+                               SessionContext, SynapseSession)
+
+logger = logging.getLogger(__name__)
 
 
 def is_retrievable(finding: Finding) -> bool:
@@ -68,6 +72,54 @@ class InMemoryStore:
 
     def retrievable(self, shared_id: str) -> list[Finding]:
         return [f for f in self._findings[shared_id].values() if is_retrievable(f)]
+
+    # ── verdicts (the seam: Plan E Task E.1) ────────────────────────────────
+    # Synthesis used to apply every verdict by mutating objects `get()` handed
+    # back. That works only while the store hands back the live object; a store
+    # that returns copies, frozen records or a projected view discards all of it
+    # silently, with every API-level test still green. These three methods are
+    # the entire write path, and test_storage_seam.py reads the source to keep
+    # them the ONLY one.
+    def supersede(self, shared_id: str, sources: list[FindingId],
+                  result: Finding) -> None:
+        """Land `result`, then tombstone every LIVE source (ADR 0002).
+
+        An already-superseded source keeps pointing at its first successor: a
+        merge is the only irreversible act in the system, and re-pointing it
+        would rewrite lineage a human may need to read back."""
+        self.upsert(shared_id, [result])
+        table = self._findings[shared_id]
+        for finding_id in sources:
+            finding = table.get(finding_id)
+            if finding is None or finding.merged_into is not None:
+                continue
+            finding.merged_into = result.id
+
+    def mark_trivial(self, shared_id: str, finding_ids: list[FindingId]) -> None:
+        """Apply the trivia verdict, skipping anything already tombstoned.
+
+        Unknown ids are ignored rather than fatal -- an 8B inventing an id must
+        not crash ingest (synthesis.py's own docstring)."""
+        table = self._findings[shared_id]
+        for finding_id in finding_ids:
+            finding = table.get(finding_id)
+            if finding is None:
+                logger.warning("Trivial verdict for unknown id %s; ignored", finding_id)
+                continue
+            if finding.merged_into is None:
+                finding.status = FindingStatus.TRIVIAL
+
+    def set_context(self, shared_id: str, *, working_memory: str | None = None,
+                    conflicts: list[Conflict] | None = None) -> None:
+        """Write only the keyword arguments given. `None` means LEAVE ALONE --
+        which is what preserves synthesis's behaviour when a verdict omits the
+        working-memory rewrite (a schema gate that demands only ONE required key
+        makes that a real case, not a hypothetical)."""
+        ctx = self._contexts[shared_id]
+        if working_memory is not None:
+            ctx.working_memory = working_memory
+        if conflicts is not None:
+            ctx.conflicts = conflicts
 
     # ── context / versioning ────────────────────────────────────────────────
     def get_context(self, shared_id: str) -> SessionContext:
