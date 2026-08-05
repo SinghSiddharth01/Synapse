@@ -40,6 +40,9 @@ scripts/                run_npu_eval · trace_one · calibrate_prompt · dump_pr
 
 ## What remains
 
+- **⟨2026-08-05 E7 merged⟩ The demo-window gaps are closed — 717 tests.** `CodexSource` (research-grounded against openai/codex source + its own test literals, machine-injected context filtered, parity-tested against `ClaudeCodeSource`, registry-wired into `run`); the **WAL re-join envelope** including the live mid-run case (binding re-read per tick, `Producer.rebind`, held-never-retargeted); **compaction (A.5)** — running *after* triage's keep decision, because review proved the other order can truncate away the only real error and flip the verdict; and the **Claude Code awareness pack** (`packs/claude-code/`: fail-open freshness-pointer hook + relevance skill, CTA survives label truncation). Remaining Codex caveat, disclosed in its README: format confirmed from source, not yet against a live transcript — one real Codex session before the demo closes it.
+
+
 - **⟨2026-08-05 late⟩ Cirrascale Indonesia unlocked — the 70B works.** `aisuite-indonesia.cirrascale.com` serves `Llama-3.3-70B` with real capacity (separate key, stored in gitignored `secrets.jsonc` with a post-hackathon rotation note). Full live rehearsal on the 70B: **all beats pass, and the flagship seg-005 merge happened unscripted** (`syn-c4e2b317 <- f-005b-01, f-005a-01`, 24 findings apart) — versus the 8B run where it could not be confirmed. Demo-day config is three env vars: `INFERENCE_CLOUD_BASE_URL` (Indonesian instance) · `INFERENCE_CLOUD_API_KEY` (Indonesian key) · `INFERENCE_CLOUD_MODEL=Llama-3.3-70B`. The `.com` 8B path stays as fallback. A/B logs: `.measurements/rehearsal-live-8b-com.log` vs `rehearsal-live-70b-indonesia.log`. Prerequisite fix that made ANY live synthesis work: prompts now show an example instance, never the schema (an 8B parrots schemas — probed, fixed, pinned).
 
 
