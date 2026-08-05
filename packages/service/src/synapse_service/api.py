@@ -75,9 +75,18 @@ def build_app(provider: ModelProvider) -> Starlette:
             # `findings` is passed through (not []) so synthesis knows which
             # ids were just pushed and can force them into its candidate
             # window regardless of CANDIDATE_WINDOW (see synthesis.merge's
-            # docstring) -- store.upsert is idempotent, so merge()'s own
-            # upsert of the same list is a harmless no-op. Replays
-            # (accepted == 0) never reach the model at all.
+            # docstring). Replays (accepted == 0) never reach the model at all.
+            #
+            # ⟨CORRECTED 2026-08-05, Plan E Task E.6⟩ This comment used to say
+            # "store.upsert is idempotent, so merge()'s own upsert of the same
+            # list is a harmless no-op". Idempotent in the VIEW, yes. Not free
+            # in the LOG: `SharedMemory.append` records a resend on purpose, so
+            # merge()'s second upsert writes one more FindingAppended per
+            # finding and one push of N costs 3N entries. Pinned by
+            # test_a_second_upsert_of_the_same_batch_appends_without_reindexing.
+            # A THIRD upsert would cost another N. Removing merge()'s is the
+            # real fix and needs all 19 direct call sites in test_synthesis.py
+            # to upsert first -- post-demo.
             await synthesizer.merge(store, sid, findings)
             # A provider outage, an exhausted retry, or a verdict that
             # fails structural validation all make merge() return with

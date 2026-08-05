@@ -230,3 +230,25 @@ def test_marked_trivial_round_trips_through_rebuild():
     assert after.visible_ids == before.visible_ids == ("b",)
     assert after.trivial == before.trivial == frozenset({"a"})
     assert set(after.findings) == set(before.findings)
+
+
+def test_the_fold_is_last_merge_wins_when_a_source_is_claimed_twice():
+    """The LOG's semantics, said out loud. `_apply` writes
+    `superseded_by[source] = entry.result.id` unconditionally, so a second
+    Merged entry naming the same source re-points it.
+
+    The registry's `supersede` gives the OPPOSITE answer (first successor
+    wins) and does it by pre-filtering to live sources before it ever reaches
+    here -- see test_store.py's
+    test_supersede_leaves_an_already_superseded_source_pointing_at_its_first_successor.
+    Both are intentional; this test is what stops the next reader assuming the
+    fold enforces the registry's rule."""
+    log = Log(shared_id="s")
+    log.append(FindingAppended(finding=_finding("a")))
+    log.append(Merged(result=_finding("syn-1"), sources=("a",)))
+    log.append(Merged(result=_finding("syn-2"), sources=("a",)))
+
+    view = fold(log)
+
+    assert view.superseded_by["a"] == "syn-2"
+    assert view.resolve("a") == "syn-2"

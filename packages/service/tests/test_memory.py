@@ -125,3 +125,18 @@ def test_splitting_a_topic_re_maps_membership_without_re_tagging() -> None:
     view = store.view()
     assert set(view.topic_of.values()) >= {left, right}
     assert view.findings["p0"].text == "the connection pool is exhausted"
+
+
+def test_merging_with_no_live_sources_still_records_the_result():
+    """The path `InMemoryStore.supersede` takes when every named source is
+    already superseded: `merge(result, ())`. It must land the result and
+    supersede nothing -- undocumented and untested before Plan E Task E.6, and
+    load-bearing for the registry's first-successor-wins rule."""
+    memory = SharedMemory(shared_id="s")
+    memory.append(_finding("a", "the connection pool is exhausted"))
+
+    memory.merge(_finding("syn-1", "merged"), ())
+
+    view = memory.view()
+    assert set(view.visible_ids) == {"a", "syn-1"}
+    assert view.superseded_by == {}

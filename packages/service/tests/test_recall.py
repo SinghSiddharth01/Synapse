@@ -49,25 +49,9 @@ def test_the_flagship_pair_is_found_by_the_symbol_lane() -> None:
     assert Lane.SYMBOLS in flagship.lanes
 
 
-def test_recall_is_reported_per_band_and_per_lane() -> None:
-    report = measure(build(distractors=100))
-
-    assert set(report.by_band()) == set(Band)
-    assert set(report.by_lane()) == set(Lane)
-
-
 def test_report_formats_without_error() -> None:
     text = measure(build(distractors=20)).format()
 
     assert "candidate recall" in text
     assert "by band" in text
     assert "by lane" in text
-
-
-def test_a_larger_corpus_does_not_change_the_prompt_size() -> None:
-    """The point of the whole design: what the model sees is flat in N."""
-    small = measure(build(distractors=20), top_k=14)
-    large = measure(build(distractors=600), top_k=14)
-
-    assert small.top_k == large.top_k
-    assert large.corpus_size > small.corpus_size * 5

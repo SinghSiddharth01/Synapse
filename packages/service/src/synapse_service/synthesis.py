@@ -108,19 +108,6 @@ class _SynthesisVerdicts(BaseModel):
     conflicts: list[_ConflictVerdict] = Field(default_factory=list)
 
 
-def _resolve_forward(store: InMemoryStore, shared_id: str, finding_id: str) -> str:
-    """Follow merged_into pointers to the live (or most-recently-synthesized)
-    id a Conflict should reference, so it never dangles at a tombstone."""
-    seen: set[str] = set()
-    current = finding_id
-    while current not in seen:
-        seen.add(current)
-        finding = store.get(shared_id, current)
-        if finding is None or finding.merged_into is None:
-            return current
-        current = finding.merged_into
-    return current                                       # cycle guard; should not happen
-
 
 class Synthesizer:
     def __init__(self, provider: ModelProvider) -> None:
@@ -252,8 +239,8 @@ class Synthesizer:
         resolved: list[Conflict] = []
         seen_pairs: set[frozenset[str]] = set()
         for conflict in pending:                # was: for conflict in ctx.conflicts
-            ra = _resolve_forward(store, shared_id, conflict.finding_a)
-            rb = _resolve_forward(store, shared_id, conflict.finding_b)
+            ra = store.resolve_forward(shared_id, conflict.finding_a)
+            rb = store.resolve_forward(shared_id, conflict.finding_b)
             if ra == rb:
                 continue                  # both sides converged into the same finding
             key = frozenset((ra, rb))

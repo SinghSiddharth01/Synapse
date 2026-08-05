@@ -99,23 +99,41 @@ class SharedMemory:
 
     # ---- writes -----------------------------------------------------------
 
-    def append(self, finding: Finding) -> Appended:
+    def append(self, finding: Finding, *, is_new: bool | None = None) -> Appended:
         """Add a finding. Idempotent by id, because the resend path demands it.
 
-        A worker replaying its durable log re-sends findings the service already
-        holds. The duplicate is recorded in the log (it happened) but changes
-        nothing derived — no re-indexing, no second topic assignment, and
-        critically no un-superseding of a finding that was merged away.
+        `is_new` lets a BATCHING caller pass the answer it already has.
+        `InMemoryStore.upsert` folds once for the whole push and then tells
+        each append; leaving it None makes this method ask `self.view()`
+        itself, and since every append invalidates the fold cache that is one
+        fold PER FINDING -- O(N**2) in log entries over a batch. Correct
+        either way, and the batch path is the one the route uses.
+
+        The authority is the folded view, never an index. Reading
+        `self.indexes.vectors.vectors` here made the duplicate guard
+        untestable: deleting the guard left 75 tests green, because the index
+        and the log happened to agree.
         """
-        if finding.id in self.indexes.vectors.vectors:
+        if is_new is None:
+            is_new = finding.id not in self.view().findings
+        if not is_new:
+            # A resend. Record that it happened; index nothing; and DO NOT
+            # FOLD. This branch runs N times per push, not zero: api.py:71
+            # upserts and then synthesis.py:131 upserts the SAME list again
+            # (see api.py's rewritten comment). Reading `self.view()` here to
+            # fill `topic_id` re-folded a log the previous append had just
+            # invalidated -- one fold per duplicate, which is precisely the
+            # O(N**2) the `is_new` hint exists to remove, left in place on the
+            # one path that always takes it.
+            #
+            # `topic_id` is empty because NOTHING consumes `Appended` (see
+            # __init__.py, and Task 5's docstring on `.version`). If anything
+            # ever does, read it from the CALLER's batch view -- do not fold
+            # here.
             self.log.append(FindingAppended(finding=finding))
             self._view = None
-            return Appended(
-                finding_id=finding.id,
-                topic_id=self.view().topic_of.get(finding.id, ""),
-                topic_founded=False,
-                version=self.log.version,
-            )
+            return Appended(finding_id=finding.id, topic_id="",
+                            topic_founded=False, version=self.log.version)
 
         self.log.append(FindingAppended(finding=finding))
         return self._index_and_assign(finding)
