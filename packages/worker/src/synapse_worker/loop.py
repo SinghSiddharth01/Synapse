@@ -27,7 +27,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -39,6 +39,7 @@ from synapse_worker.follower import TranscriptFollower
 from synapse_worker.producer import Producer
 from synapse_worker.segmenter import Segmenter
 from synapse_worker.sources.claude_code import ClaudeCodeSource
+from synapse_worker.stats import StatsBuffer
 from synapse_worker.triage import triage
 from synapse_worker.triage_log import TriageLog
 
@@ -95,6 +96,7 @@ class WorkerLoop:
         *,
         idle_flush_seconds: float = 120.0,
         triage_enabled: bool = True,
+        stats: StatsBuffer | None = None,
     ) -> None:
         self.transcript = Path(transcript)
         self.distiller = distiller
@@ -102,6 +104,7 @@ class WorkerLoop:
         self.binding = binding
         self.state_dir = Path(state_dir)
         self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.stats = stats
 
         self.follower = TranscriptFollower(self.state_dir / "follow-state.json")
         self.source = ClaudeCodeSource()
@@ -159,6 +162,15 @@ class WorkerLoop:
                 result.pending_events = self.segmenter.pending_events
                 # Still retry anything the sink rejected earlier.
                 result.sent, result.pending_send = await self.producer.flush()
+                if self.stats:
+                    self.stats.event(
+                        "push",
+                        f"{result.sent} sent, {result.pending_send} queued",
+                        sent=result.sent,
+                        queued=result.pending_send,
+                    )
+                    self.stats.tick(asdict(result))
+                    self.stats.event("tick", result.summary())
                 return result
         else:
             self._last_change = datetime.now(timezone.utc)
@@ -182,9 +194,25 @@ class WorkerLoop:
                     self.triage_log.record_skip(segment, decision.reason)
                     result.skipped_triage += 1
                     logger.info("Triage skipped %s (%s)", segment.id, decision.reason)
+                    if self.stats:
+                        self.stats.event(
+                            "triage",
+                            f"skip {segment.id} ({decision.reason})",
+                            segment=segment.id,
+                            reason=decision.reason,
+                        )
                     continue
+                if self.stats:
+                    self.stats.event(
+                        "triage",
+                        f"keep {segment.id} ({decision.reason})",
+                        segment=segment.id,
+                        reason=decision.reason,
+                    )
+            if self.stats:
+                self.stats.distil_started(segment.id, len(segment.events))
             try:
-                findings, stats = await self.distiller.distil(segment)
+                findings, distil_stats = await self.distiller.distil(segment)
             except PromptDropError as exc:
                 # The model stopped conditioning on its prompt. Every finding it
                 # would produce is invented, so drop the segment rather than
@@ -192,13 +220,37 @@ class WorkerLoop:
                 # type is wrong.
                 logger.error("Prompt-drop guard tripped on %s: %s", segment.id, exc)
                 result.errors.append(f"prompt-drop on {segment.id}")
+                if self.stats:
+                    self.stats.event(
+                        "error", f"prompt-drop on {segment.id}", segment=segment.id
+                    )
                 continue
             except Exception as exc:  # noqa: BLE001 - a tick must never die
                 logger.exception("Distillation failed for %s", segment.id)
                 result.errors.append(f"{segment.id}: {exc}")
+                if self.stats:
+                    self.stats.event(
+                        "error", f"{segment.id}: {exc}", segment=segment.id
+                    )
                 continue
+            finally:
+                if self.stats:
+                    self.stats.distil_finished()
 
-            if stats.skipped_empty:
+            if self.stats:
+                retained = sum(
+                    1 for e in segment.events if e.kind in set(self.distiller.kinds)
+                )
+                self.stats.event(
+                    "render",
+                    f"{segment.id}: {retained}/{len(segment.events)} events reached the model",
+                    events_in=len(segment.events),
+                    retained=retained,
+                    kinds=list(self.distiller.kinds),
+                    input_tokens=distil_stats.input_tokens,
+                )
+
+            if distil_stats.skipped_empty:
                 continue
             # Write-ahead: on disk before any send is attempted.
             self.producer.record(findings)
@@ -206,9 +258,19 @@ class WorkerLoop:
 
         result.sent, result.pending_send = await self.producer.flush()
         result.pending_events = self.segmenter.pending_events
+        if self.stats:
+            self.stats.event(
+                "push",
+                f"{result.sent} sent, {result.pending_send} queued",
+                sent=result.sent,
+                queued=result.pending_send,
+            )
 
         # Last, so a crash costs duplicated work rather than lost conversation.
         self._persist_state()
+        if self.stats:
+            self.stats.tick(asdict(result))
+            self.stats.event("tick", result.summary())
         return result
 
     async def run(self, interval_seconds: float, max_ticks: int | None = None) -> None:

@@ -178,16 +178,16 @@ Export from `__init__.py`.
 **Interfaces:**
 - Produces: `StatsBuffer(llm: CallLog)` with `.event(tag, summary, **detail)`, `.tick(result_dict)`, `.distil_started(segment_id, events)/.distil_finished()`, `.snapshot() -> dict` (JSON-safe: `{now, current, ticks, events, llm}`). `WorkerLoop.__init__` gains optional `stats: StatsBuffer | None = None`; every hook below is a no-op when `stats is None`.
 
-- [ ] **Step 1: Failing tests** — assert: `snapshot()` is `json.dumps`-able; `distil_started` sets `current = {segment_id, started_iso, events}` and `distil_finished` clears it; `.event("triage", …)` lands in `events` with its tag and ISO ts; ring bounds hold (`maxlen=200` events, 100 ticks); **and an integration test**: run a `WorkerLoop.tick()` (arrange exactly like the nearest existing test in `test_loop.py`) with a `StatsBuffer` attached and assert the snapshot contains ≥1 `tick` event, a `render` event whose detail has `events_in`/`retained`/`kinds`, and (via a `RecordingProvider`-wrapped `FakeProvider`) ≥1 `llm` call with `component == "distiller"`.
-- [ ] **Step 2: Run** → FAIL.
-- [ ] **Step 3: Implement.** `stats.py`: dataclass-free, deques + one dict, all values already JSON-safe. Loop instrumentation points, exactly these, all guarded by `if self.stats:`:
+- [x] **Step 1: Failing tests** — assert: `snapshot()` is `json.dumps`-able; `distil_started` sets `current = {segment_id, started_iso, events}` and `distil_finished` clears it; `.event("triage", …)` lands in `events` with its tag and ISO ts; ring bounds hold (`maxlen=200` events, 100 ticks); **and an integration test**: run a `WorkerLoop.tick()` (arrange exactly like the nearest existing test in `test_loop.py`) with a `StatsBuffer` attached and assert the snapshot contains ≥1 `tick` event, a `render` event whose detail has `events_in`/`retained`/`kinds`, and (via a `RecordingProvider`-wrapped `FakeProvider`) ≥1 `llm` call with `component == "distiller"`.
+- [x] **Step 2: Run** → FAIL.
+- [x] **Step 3: Implement.** `stats.py`: dataclass-free, deques + one dict, all values already JSON-safe. Loop instrumentation points, exactly these, all guarded by `if self.stats:`:
   - end of `tick()`: `stats.tick(asdict(result))` + `stats.event("tick", result.summary())`
   - triage skip branch: `stats.event("triage", f"skip {segment.id} ({decision.reason})", segment=segment.id, reason=decision.reason)`; keep branch: same with `keep`
   - around distil: `stats.distil_started(segment.id, len(segment.events))` before, `stats.distil_finished()` in a `finally:`
   - after distil: `stats.event("render", f"{segment.id}: {retained}/{len(segment.events)} events reached the model", events_in=len(segment.events), retained=retained, kinds=list(self.distiller.kinds), input_tokens=stats_obj.input_tokens)` where `retained = sum(1 for e in segment.events if e.kind in set(self.distiller.kinds))` and `stats_obj` is the `DistillStats` the call returned
   - producer flush result: `stats.event("push", f"{sent} sent, {pending} queued", sent=sent, queued=pending)`
   - every `except` branch that appends to `result.errors`: `stats.event("error", …)`
-- [ ] **Step 4: Run full worker suite** → PASS, 526 floor intact. **Step 5: Commit** — `feat(worker): StatsBuffer — tagged tick/triage/render/llm/push/error feed`.
+- [x] **Step 4: Run full worker suite** → PASS, 526 floor intact. **Step 5: Commit** — `feat(worker): StatsBuffer — tagged tick/triage/render/llm/push/error feed`.
 
 ---
 
