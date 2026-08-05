@@ -15,8 +15,11 @@ The old plans accumulated five amendment layers and ~30 inline code snippets sho
 | [Plan B — Model](./2026-08-03-plan-b-model.md) | distillation, NPU, measurement | distiller + NPU + eval built and measured · **reframed by `adr/0003`** · privacy metric now includes `identifier_leaks()` (E1), not just the 8-gram check |
 | [Plan C — Service](./2026-08-03-plan-c-service.md) | ingest, synthesis, memory, retrieval | **built and merged (E3)**: ingest, synthesis (semantic merge + tombstones), retrieval, watermark, `AIC100Provider` — verified against `FakeProvider` only, live Cirrascale flip still open |
 | [Plan D — Orchestrator](./2026-08-03-plan-d-orchestrator.md) | the local hub | **built and merged (E4)**: producer endpoint, durable `Relay`, `query`/`contribute` MCP tools, watermark-driven briefing; D.2's binding landed in the worker earlier |
+| [Plan E — Brain integration](./2026-08-05-plan-e-brain.md) | the service's retrieval core | **spec written 2026-08-05, unexecuted** — integrates `feat/shared-memory-store` (append-only log, fold, five-lane candidate selection, recall harness) *under* main's registry; amends Plan C.2's storage seam and C.4's `CANDIDATE_WINDOW` mechanism, and lands `adr/0004` on `main` with a dated amendment |
 
 All four exec plans below are merged; the closed loop across all three packages is verified in-process (zero real sockets — a real-socket two-machine run is still open, see `docs/STATE.md`). Detail: [`docs/2026-08-04-implementation-report.md`](../2026-08-04-implementation-report.md) (pre-merge state) · current summary: [`docs/STATE.md`](../STATE.md)
+
+Plan E is the one plan above with no separate `exec/` layer: it is a spec **and** its own execution order (tasks E.1–E.10, each independently revertable, the demo loop touched only from E.6 on), written against the two days before the Aug 7 demo. Its reasoning lives in [`docs/brainstorming/2026-08-05-brain-integration-design.md`](../brainstorming/2026-08-05-brain-integration-design.md); the plan adds nothing new to it.
 
 ## Execution plans (`exec/`)
 
