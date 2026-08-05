@@ -343,6 +343,36 @@ git add packages/orchestrator pyproject.toml uv.lock
 git commit -m "feat(orchestrator): Relay — write-ahead egress with retained-log resync (Plan D.4)"
 ```
 
+#### Post-review amendment (2026-08-04)
+
+Round 2 review found a blocker in the implementation this task's Step 3
+produced: `findings.jsonl` was one undifferentiated append-only stream, and
+`flush()`/`resync()` sent everything pending to `self.shared_id` — whatever
+Shared Session happened to be bound *at send time*, not the one the Finding
+was actually produced under. A `synapse-worker join <other_shared_id>`
+between a failed flush and the next attempt silently retargeted the whole
+backlog, including Findings queued under a completely different, unrelated
+Shared Session — a cross-Shared-Session leak.
+
+**Fix, superseding this task's Step 3 code as shipped:** every line in
+`findings.jsonl` is now an envelope, `{"shared_id": <the Shared Session
+bound WHEN record() was called>, "finding": {...}}`, not a bare `Finding`.
+`flush()` and `resync()` group pending/retained entries by that recorded
+`shared_id` and POST each group to *its own* `/v1/sessions/{id}/...` —
+never to whatever `rebind()` most recently set. A Finding recorded while
+genuinely unbound (`shared_id` is `None`) has no session to go to and stays
+queued forever, rather than being guessed at on the next join.
+
+Also corrected here: `resync()`'s return type is `-> int` (this task's own
+Interfaces section, above) — a mid-review pass had changed it to
+`tuple[int, int]` to let a caller distinguish "nothing to push" from "push
+failed". That distinction now comes from a new `Relay.retained_count()`
+(entries recorded under a real Shared Session, sent or not) compared
+against `resync()`'s plain int result, rather than being baked into the
+return type — restoring the signature this task originally specified. See
+`relay.py`'s module docstring and `cli.cmd_resync` for the full mechanism,
+and `test_relay.py`'s re-join tests for the exact reproduction.
+
 ---
 
 ### Task 3: producer endpoint on the shared app (D.1) + CLI rewire
@@ -512,6 +542,49 @@ Run: `uv run pytest packages/orchestrator -q` → PASS.
 git add packages/orchestrator
 git commit -m "feat(orchestrator): producer endpoint on the shared app + resync CLI (Plan D.1)"
 ```
+
+#### Post-review amendment (2026-08-04)
+
+Round 2 review found two design problems in how this task's producer
+endpoint (as it evolved through the round-1 fix pass) handled the
+producer/binding trust boundary. Both are corrected, superseding the
+behavior described in this task's Step 3/Step 4 code as shipped:
+
+1. **Attribution is no longer re-stamped from `resolve_binding()`.** A
+   round-1 fix had the endpoint overwrite every incoming Finding's
+   `attributions` with the single binding `resolve_binding()` currently
+   resolves to. Per Plan D.2's global constraint, one binding file exists
+   *per Agent product* (`bindings/claude-code.json`, `bindings/codex.json`)
+   — more than one can be joined on the same machine at once — and
+   `_resolve_binding` picks ONE across all of them ("most recently joined
+   wins"). Stamping that single binding over every Finding silently
+   relabelled a DIFFERENT product's Finding with the wrong
+   Contributor/Agent Session/Agent whenever two products were joined
+   simultaneously — a correctness regression, since the worker already
+   stamps Attribution correctly from its own `LocalBinding` (`distiller.py`)
+   before the Finding ever reaches this endpoint. Attribution now passes
+   through exactly as the producer sent it, matching this task's *original*
+   Step 3 code. Producer trust is enforced on shape and on the
+   service-written fields instead: `attributions` must be non-empty, and a
+   producer that sets `status`, `merged_from`, `merged_into` away from their
+   defaults, or claims `provenance: synthesized`, is rejected with 422 —
+   those fields are written by synthesis, service-side (`schemas.py`), and
+   accepting them from a producer would let a local process manufacture a
+   tombstone or forge merge lineage.
+2. **An unbound orchestrator now returns 503, not 200 accept-and-queue.**
+   A local producer POSTing to an orchestrator with no Shared Session
+   joined used to get `{"accepted": N, "sent": false}` with the Finding
+   durably written to `findings.jsonl` and nowhere to ever send it. It now
+   gets a 503 with a "not joined" body, and nothing is durably recorded
+   here at all in that case. The worker's own `HttpSink` already treats any
+   non-2xx as "stay queued, retry later" (`producer.py`) — that IS the
+   designed fail-open path, so this process no longer needs to take custody
+   of a Finding it has nowhere real to route.
+
+See `app.py`'s module docstring and `test_producer_endpoint.py`'s
+`test_unbound_producer_returns_503_and_never_invents_a_session` and
+`test_producer_endpoint_preserves_producer_supplied_attribution` for the
+exact behavior and its tests.
 
 ---
 
@@ -752,6 +825,30 @@ Run: `uv run pytest packages/orchestrator -q` → PASS.
 git add packages/orchestrator
 git commit -m "feat(orchestrator): query/contribute tools + watermark-driven briefing (Plan D.3)"
 ```
+
+#### Post-review amendment (2026-08-04)
+
+Round 2 review found two gaps in this task's Step 3/Step 4 code as shipped,
+both fixed without changing the Interfaces section above:
+
+- `build_briefing`'s docstring claimed "Hard-capped ... by design" and
+  "FAIL OPEN" with neither enforced: the exception guard was a hand-picked
+  tuple rather than covering the whole build, there was no length cap on
+  the composed string, and service-supplied `by_type` values were
+  interpolated into `instructions` (the highest-trust text surface a
+  connecting agent sees) without stripping control characters. Now the
+  entire build — HTTP round trip, JSON parse, and string composition — is
+  one `except Exception` fail-open, the result is hard-capped to 1200 chars
+  with an ellipsis, and every service-supplied value is run through a
+  `_clean()` that collapses control characters/newlines before
+  interpolation. See `briefing.py`.
+- `contribute()` had no error handling at all — an unreachable NPU, a
+  tripped prompt-drop guard (`synapse_distiller.guards.PromptDropError`),
+  or a bad on-disk config raised straight out of the MCP tool as a raw
+  internal exception string. `distiller_factory()` and `distil()` are now
+  both inside one try/except that returns a calm one-line result in
+  `query()`'s voice, matching the Global Constraints' "Fail open, always."
+  See `server.py`'s `contribute`.
 
 ---
 
