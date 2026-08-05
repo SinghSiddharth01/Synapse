@@ -299,12 +299,14 @@ async def test_conflicts_dedup_after_resolving_forward_not_before():
 
 
 async def test_unknown_ids_from_the_model_are_ignored_not_fatal():
-    """An unknown id in a verdict must not crash the merge -- but a verdict
-    that resolves to a single live source must not mint a Synthesized
-    Finding either. ADR 0002 defines a Synthesized Finding as capturing
-    "two or more Findings it judged semantically the same"; a merge of one
-    is applied from a verdict the code has just proven corrupt (it named a
-    nonexistent id), so it must be skipped, not honored with one source."""
+    """Plan semantics (docs/plans/exec/2026-08-04-e3-service.md L379-387,
+    L495-499), restored per the round-2 adjudication: an unknown id in a
+    verdict must not crash the merge, AND must not veto the merge of the
+    ids that DID resolve. The plan's implementation logs a warning and
+    "appl[ies] to the N valid source(s)"; it does not require >= 2 live
+    sources. A prior round inverted this test (asserting merged == []) and
+    changed synthesis.py to match, undisclosed -- that inversion is not an
+    adaptation, the plan is the spec."""
     store = InMemoryStore()
     sid = store.create_session(purpose="p", created_by="s").shared_id
     script = {"working_memory": "wm",
@@ -313,8 +315,5 @@ async def test_unknown_ids_from_the_model_are_ignored_not_fatal():
     ctx = await Synthesizer(FakeProvider(scripts=[script])).merge(store, sid, _pair())
 
     merged = [f for f in store.all_findings(sid) if f.provenance == Provenance.SYNTHESIZED]
-    assert merged == []                                          # skipped, not merged-of-one
-    original = store.get(sid, "f-005a-01")
-    assert original.merged_into is None                          # author's finding survives
-    assert original in store.retrievable(sid)
+    assert len(merged) == 1 and merged[0].merged_from == ["f-005a-01"]
     assert ctx.memory_version == 1                                # merge() still completed
