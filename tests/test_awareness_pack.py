@@ -340,6 +340,37 @@ def test_fail_open_when_the_state_file_is_corrupt(tmp_path, watermark):
     assert result.stdout == ""  # corrupt state == no baseline == first-check silence
 
 
+def test_the_notice_still_fires_when_the_state_dir_cannot_be_written(tmp_path, watermark):
+    """`_save_last_version`'s own docstring promise: a write failure "is
+    not escalated" and costs "at most re-evaluating from a stale baseline
+    next turn, never a broken prompt submission" -- but the notice itself
+    must not be a casualty either. `run()` calls `_emit` BEFORE it ever
+    tries to persist, so a state directory that refuses new files (a
+    read-only or root-owned project directory, a full disk, a sandboxed
+    hook execution) must still produce the notice on this turn, even
+    though the baseline it would have recorded is lost."""
+    state_dir = tmp_path / ".synapse"
+    _write_binding(state_dir)
+    watermark.body["version"] = 1
+
+    baseline = _run_hook(state_dir, watermark.url)  # writable: establishes v1
+    assert baseline.stdout == ""
+
+    watermark.body["version"] = 2
+    awareness_dir = state_dir / "awareness"
+    awareness_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(awareness_dir, 0o555)  # r-xr-xr-x: no new/replaced files
+    try:
+        result = _run_hook(state_dir, watermark.url)
+    finally:
+        os.chmod(awareness_dir, 0o755)  # restore so tmp_path cleanup can remove it
+
+    assert result.returncode == 0
+    assert result.stderr == ""
+    payload = json.loads(result.stdout)
+    assert "v2" in payload["hookSpecificOutput"]["additionalContext"]
+
+
 # ---------------------------------------------------------------------------
 # Binding resolution is scoped to THIS pack's own product only
 # (bindings/claude-code.json) -- never "whichever product was pinned most

@@ -172,18 +172,31 @@ def _save_last_version(path: Path, shared_id: str, version: int) -> None:
     """Best-effort, atomic when it succeeds. A write failure here (e.g. a
     read-only filesystem) is not escalated — this hook's own persistence is
     subordinate to fail-open too; the worst case is re-evaluating from a
-    stale baseline next turn, never a broken prompt submission."""
+    stale baseline next turn, never a broken prompt submission.
+
+    That promise covers the WHOLE function, not just the read: `mkdir`,
+    `write_text` and `os.replace` are wrapped in the same `except OSError`
+    as the read, not left to propagate. `run()` also calls `_emit` (when
+    this turn earns a notice) BEFORE calling this function, so even a
+    total failure here — `mkdir` refused on a read-only or root-owned
+    project directory, a full disk, a sandboxed hook execution — costs at
+    most a stale baseline next turn. It can never cost the notice this
+    turn, which is what "not escalated" has to mean for a promise this
+    function makes about itself to be true."""
     try:
-        state = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(state, dict):
+        try:
+            state = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(state, dict):
+                state = {}
+        except (OSError, json.JSONDecodeError):
             state = {}
-    except (OSError, json.JSONDecodeError):
-        state = {}
-    state[shared_id] = {"last_version": version}
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(state), encoding="utf-8")
-    os.replace(tmp, path)
+        state[shared_id] = {"last_version": version}
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(state), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        pass
 
 
 def _clean(value: object) -> str:
@@ -236,28 +249,32 @@ def run() -> None:
 
     state_path = _state_path(state_dir)
     last_version = _load_last_version(state_path, shared_id)
+
+    # `last_version is None`: first-ever check for this shared_id --
+    # nothing to compare against, so this establishes the baseline rather
+    # than reporting a "move" from nothing. `==`: no movement since the
+    # last check. Either way, silent. Any OTHER difference -- including a
+    # DECREASE, which a Synapse Service restart can legitimately produce
+    # (Shared Memory lives in memory; Plan D.4's `resync` climbs back up
+    # from whatever a machine's durable log replays) -- is real news worth
+    # a line, not just an increase.
+    moved = last_version is not None and last_version != version
+    if moved:
+        # Emit BEFORE persisting, deliberately: this line is the one thing
+        # `_save_last_version`'s own docstring promises a write failure can
+        # never cost. Persisting after also means a crash between the two
+        # (there isn't one here, but the ordering is what makes the
+        # property hold regardless) still leaves the notice already on
+        # stdout.
+        _emit(_compose_message(watermark))
+
     # Persist the new baseline unconditionally, whether or not this turn
-    # speaks -- the next comparison is always against the LATEST observed
+    # spoke -- the next comparison is always against the LATEST observed
     # version, never against the version last spoken about. That is what
     # makes this "fires once": the turn right after a move updates the
-    # baseline to the new version, so the turn after THAT compares
-    # equal and stays silent, with no dependency on `query` ever being
-    # called.
+    # baseline to the new version, so the turn after THAT compares equal
+    # and stays silent, with no dependency on `query` ever being called.
     _save_last_version(state_path, shared_id, version)
-
-    if last_version is None or last_version == version:
-        # `last_version is None`: first-ever check for this shared_id --
-        # nothing to compare against, so this establishes the baseline
-        # rather than reporting a "move" from nothing. `==`: no movement
-        # since the last check. Either way, silent.
-        return
-
-    # Any other difference -- including a DECREASE, which a Synapse
-    # Service restart can legitimately produce (Shared Memory lives in
-    # memory; Plan D.4's `resync` climbs back up from whatever a machine's
-    # durable log replays) -- is real news worth a line, not just an
-    # increase.
-    _emit(_compose_message(watermark))
 
 
 def main() -> int:
