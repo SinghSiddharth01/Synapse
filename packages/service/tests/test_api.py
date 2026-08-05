@@ -35,7 +35,7 @@ async def test_full_flow_push_watermark_query():
 
         r = await client.post(f"/v1/sessions/{sid}/findings",
                               json={"findings": [_finding_json("f-1")]})
-        assert r.json() == {"accepted": 1, "memory_version": 1}
+        assert r.json() == {"accepted": 1, "memory_version": 1, "synthesized": True}
 
         r = await client.get(f"/v1/sessions/{sid}/watermark", params={"agent_session": "as-9"})
         assert r.json() == {"version": 1, "new_since": 1,
@@ -63,8 +63,26 @@ async def test_replayed_push_is_a_noop_and_skips_the_model():
         first = await client.post(f"/v1/sessions/{sid}/findings", json=body)
         replay = await client.post(f"/v1/sessions/{sid}/findings", json=body)
     assert first.json()["accepted"] == 1
-    assert replay.json() == {"accepted": 0, "memory_version": 1}
+    assert replay.json() == {"accepted": 0, "memory_version": 1, "synthesized": False}
     assert provider.calls == 1     # the replay must never reach the provider a 2nd time
+
+
+async def test_push_response_reports_whether_synthesis_actually_ran():
+    """A push can be accepted (findings durably landed) while synthesis
+    silently fails or is skipped -- a provider outage, an exhausted retry,
+    a verdict that fails structural validation. Before this, the response
+    shape made "merged" and "landed but not yet synthesized" look
+    identical: {"accepted": N, "memory_version": <unchanged>} either way.
+    `synthesized` reports whether memory_version actually moved THIS
+    round, so a producer watching pushes -- not just HTTP status codes --
+    can tell the two outcomes apart instead of treating every 200 as a
+    completed merge."""
+    async with _client(FakeProvider(scripts=[])) as client:   # scripts exhausted -> raises
+        sid = (await client.post("/v1/sessions", json={"purpose": "p", "created_by": "s"})
+              ).json()["shared_id"]
+        r = await client.post(f"/v1/sessions/{sid}/findings",
+                              json={"findings": [_finding_json("f-1")]})
+        assert r.json() == {"accepted": 1, "memory_version": 0, "synthesized": False}
 
 
 async def test_watermark_applies_the_same_suppression_rule_as_query():

@@ -69,6 +69,8 @@ def build_app(provider: ModelProvider) -> Starlette:
         except ValidationError as exc:
             return JSONResponse({"error": str(exc)}, status_code=422)
         accepted = store.upsert(sid, findings)
+        version_before = store.get_context(sid).memory_version
+        synthesized = False
         if accepted:
             # `findings` is passed through (not []) so synthesis knows which
             # ids were just pushed and can force them into its candidate
@@ -77,8 +79,18 @@ def build_app(provider: ModelProvider) -> Starlette:
             # upsert of the same list is a harmless no-op. Replays
             # (accepted == 0) never reach the model at all.
             await synthesizer.merge(store, sid, findings)
+            # A provider outage, an exhausted retry, or a verdict that
+            # fails structural validation all make merge() return with
+            # memory_version untouched -- "landed, quality degraded" by
+            # design (synthesis.py's own docstring), but otherwise
+            # indistinguishable from a completed merge in this response.
+            # `synthesized` reports whether the version actually moved
+            # this round so a producer can tell the two apart rather than
+            # treating every 200 as a completed merge.
+            synthesized = store.get_context(sid).memory_version > version_before
         version = store.get_context(sid).memory_version
-        return JSONResponse({"accepted": accepted, "memory_version": version})
+        return JSONResponse({"accepted": accepted, "memory_version": version,
+                             "synthesized": synthesized})
 
     async def watermark(request: Request) -> JSONResponse:
         sid = request.path_params["sid"]
