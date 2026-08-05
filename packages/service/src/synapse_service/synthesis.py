@@ -59,6 +59,20 @@ SYNTH_SYSTEM = (
 )
 
 
+def _resolve_forward(store: InMemoryStore, shared_id: str, finding_id: str) -> str:
+    """Follow merged_into pointers to the live (or most-recently-synthesized)
+    id a Conflict should reference, so it never dangles at a tombstone."""
+    seen: set[str] = set()
+    current = finding_id
+    while current not in seen:
+        seen.add(current)
+        finding = store.get(shared_id, current)
+        if finding is None or finding.merged_into is None:
+            return current
+        current = finding.merged_into
+    return current                                       # cycle guard; should not happen
+
+
 class Synthesizer:
     def __init__(self, provider: ModelProvider) -> None:
         self.provider = provider
@@ -139,10 +153,24 @@ class Synthesizer:
             if finding.merged_into is None:
                 finding.status = FindingStatus.TRIVIAL
 
+        existing_pairs = {frozenset((c.finding_a, c.finding_b)) for c in ctx.conflicts}
         for c in verdicts.get("conflicts", []):
-            if c["a"] in known and c["b"] in known:
-                ctx.conflicts.append(Conflict(finding_a=c["a"], finding_b=c["b"],
-                                              description=c["description"]))
+            if c["a"] not in known or c["b"] not in known:
+                continue
+            # Follow merged_into forward: a source tombstoned by THIS round's
+            # merges loop (above) must not leave the conflict dangling at an
+            # id that no longer appears in retrieval. ADR 0002 names this as
+            # the reason tombstones exist, not an audit nicety.
+            a = _resolve_forward(store, shared_id, c["a"])
+            b = _resolve_forward(store, shared_id, c["b"])
+            if a == b:
+                continue        # both sides converged into the same finding: no conflict
+            key = frozenset((a, b))
+            if key in existing_pairs:
+                continue        # the bounded candidate window re-shows pairs every round
+            existing_pairs.add(key)
+            ctx.conflicts.append(Conflict(finding_a=a, finding_b=b,
+                                          description=c["description"]))
 
         ctx.working_memory = verdicts.get("working_memory", ctx.working_memory)
         store.bump_version(shared_id)                               # 4. exactly once

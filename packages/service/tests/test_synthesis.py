@@ -118,6 +118,50 @@ async def test_text_verdicts_do_not_crash_merge():
     assert ctx.memory_version == 0
 
 
+async def test_conflicts_are_deduplicated_across_merge_rounds():
+    """The bounded candidate window re-shows still-retrievable findings on
+    every push, so the model can (and does) report the same conflict again
+    on a later round. ADR 0002 names dedup as a correctness property, not an
+    audit nicety."""
+    store = InMemoryStore()
+    sid = store.create_session(purpose="p", created_by="s").shared_id
+    a, b = _pair()
+    conflict_script = {"working_memory": "wm", "merges": [], "trivial_ids": [],
+                       "conflicts": [{"a": "f-005a-01", "b": "f-005b-01",
+                                      "description": "disagree on the exact threshold"}]}
+    synth = Synthesizer(FakeProvider(scripts=[conflict_script, conflict_script]))
+    await synth.merge(store, sid, [a, b])
+    ctx = await synth.merge(store, sid, [])          # second round, same verdict again
+    assert len(ctx.conflicts) == 1
+
+
+async def test_conflict_on_a_finding_merged_in_the_same_round_resolves_forward():
+    """A verdict can both merge a finding away AND report a conflict on it in
+    the same round. The stored Conflict must follow merged_into forward to
+    the synthesized finding rather than dangle at the tombstone -- ADR 0002
+    and the Finding contract docstring both require this."""
+    store = InMemoryStore()
+    sid = store.create_session(purpose="p", created_by="s").shared_id
+    a, b = _pair()
+    third = Finding(id="f-c", type="learning", text="an unrelated third finding",
+                    attributions=a.attributions, ts=TS)
+    script = {
+        "working_memory": "wm",
+        "merges": [{"source_ids": ["f-005a-01", "f-005b-01"], "text": "merged text",
+                   "type": "learning"}],
+        "trivial_ids": [],
+        "conflicts": [{"a": "f-005a-01", "b": "f-c", "description": "disagree with the third"}],
+    }
+    ctx = await Synthesizer(FakeProvider(scripts=[script])).merge(store, sid, [a, b, third])
+
+    [synthesized] = [f for f in store.all_findings(sid) if f.provenance == Provenance.SYNTHESIZED]
+    assert store.get(sid, "f-005a-01").merged_into == synthesized.id   # tombstoned this round
+
+    [conflict] = ctx.conflicts
+    assert conflict.finding_a == synthesized.id        # resolved forward, not dangling
+    assert conflict.finding_b == "f-c"
+
+
 async def test_unknown_ids_from_the_model_are_ignored_not_fatal():
     store = InMemoryStore()
     sid = store.create_session(purpose="p", created_by="s").shared_id
