@@ -153,7 +153,7 @@ def test_serve_uses_the_joined_session_when_a_binding_exists(monkeypatch, tmp_pa
     assert "session: sh-joined" in capsys.readouterr().out
 
 
-def test_serve_wires_register_tools_and_the_real_briefing_only_when_bound(
+def test_serve_wires_register_tools_unconditionally_with_a_live_resolver(
     monkeypatch, tmp_path
 ) -> None:
     """Pins Task 4's whole CLI composition as an observable effect, not just a
@@ -161,7 +161,16 @@ def test_serve_wires_register_tools_and_the_real_briefing_only_when_bound(
     test in the suite: cli.main never calling register_tools at all, and
     cli.main handing create_mcp the wrong (or no) briefing — both regress
     silently unless something asserts on what main() actually wires together,
-    not just what it prints."""
+    not just what it prints.
+
+    Round 3 review, finding #11: `register_tools` used to be called only
+    `if binding is not None` — an orchestrator started before any join
+    served a permanently tool-less MCP server, contradicting the very
+    instructions it handed the agent ("run `synapse-worker join` ... to
+    connect one"). It is now called EVERY time, unbound or not, with a
+    `resolve_binding` callable rather than a frozen `binding` value — this
+    test also proves that callable is LIVE (re-reads disk), not a closure
+    over the binding resolved at the moment `main()` ran."""
     monkeypatch.setattr(cli.uvicorn, "run", lambda app, **kw: None)
 
     create_mcp_calls: list[str | None] = []
@@ -173,14 +182,17 @@ def test_serve_wires_register_tools_and_the_real_briefing_only_when_bound(
     monkeypatch.setattr(cli, "register_tools",
                         lambda server, **kw: register_tools_calls.append(kw))
 
-    # Unbound: register_tools must NOT be called, and the briefing handed to
-    # create_mcp must be the plain default — not the joined-session template.
+    # Unbound: register_tools IS still called (unconditionally), and the
+    # briefing handed to create_mcp is the plain default — not the
+    # joined-session template.
     cli.main(["--state-dir", str(tmp_path)])
-    assert register_tools_calls == []
+    assert len(register_tools_calls) == 1
+    assert register_tools_calls[0]["resolve_binding"]() is None
     assert "No session is bound yet" in create_mcp_calls[-1]
 
-    # Bound: register_tools IS called, with the resolved binding — and the
-    # briefing handed to create_mcp is the live, binding-specific one, not a
+    # Bound: register_tools is called again (once per main() run), with a
+    # resolve_binding that reflects the resolved binding — and the briefing
+    # handed to create_mcp is the live, binding-specific one, not a
     # generic/default string a mutated call could smuggle through instead.
     write_binding(
         tmp_path / "bindings" / "claude-code.json",
@@ -192,10 +204,22 @@ def test_serve_wires_register_tools_and_the_real_briefing_only_when_bound(
                                                   "by_type": {"learning": 1}, "conflicts": 0})
     cli.main(["--state-dir", str(tmp_path)], transport=httpx.MockTransport(handler))
 
-    assert len(register_tools_calls) == 1
-    assert register_tools_calls[0]["binding"].shared_id == "sh-wired"
+    assert len(register_tools_calls) == 2
+    assert register_tools_calls[1]["resolve_binding"]().shared_id == "sh-wired"
     assert "sh-wired" in create_mcp_calls[-1]
     assert create_mcp_calls[-1] != create_mcp_calls[0]      # not the same default string
+
+    # LIVE, not a closure over a value already resolved when main() ran:
+    # a join written to disk AFTER this main() call still shows up through
+    # the SAME captured resolve_binding — exactly what lets query/contribute
+    # (server.py) observe a join that happens after registration, no restart.
+    write_binding(
+        tmp_path / "bindings" / "claude-code.json",
+        SessionBinding(agent_session_id="as-1", shared_id="sh-even-later", contributor="aditya",
+                       agent="claude-code", transcript_path="/tmp/t.jsonl",
+                       pinned_at=datetime(2026, 8, 5, tzinfo=timezone.utc)),
+    )
+    assert register_tools_calls[1]["resolve_binding"]().shared_id == "sh-even-later"
 
 
 def test_serve_falls_back_to_unbound_when_the_bindings_dir_has_no_readable_binding(

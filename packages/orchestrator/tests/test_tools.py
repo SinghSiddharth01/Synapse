@@ -10,6 +10,7 @@ from synapse_orchestrator.relay import Relay
 from synapse_orchestrator.server import (
     SENTINEL,
     _DEFAULT_INSTRUCTIONS,
+    _NOT_JOINED,
     create_mcp,
     register_tools,
 )
@@ -116,6 +117,12 @@ async def test_briefing_strips_control_characters_from_service_supplied_values()
     assert SENTINEL in text
 
 
+def _resolver(binding: LocalBinding | None):
+    """A resolve_binding stand-in that always returns the same fixed value —
+    the pre-round-3 behaviour, for tests that don't care about live re-join."""
+    return lambda: binding
+
+
 async def test_query_tool_calls_the_service_and_formats_findings(tmp_path):
     captured_body = {}
     urls_hit = []
@@ -132,8 +139,8 @@ async def test_query_tool_calls_the_service_and_formats_findings(tmp_path):
         raise AssertionError(request.url.path)
     server = create_mcp()
     relay = Relay(tmp_path, "http://svc", "sh-1", transport=httpx.MockTransport(handler))
-    register_tools(server, binding=BINDING, service_url="http://svc", relay=relay,
-                   distiller_factory=lambda: None,
+    register_tools(server, resolve_binding=_resolver(BINDING), service_url="http://svc",
+                   relay=relay, distiller_factory=lambda binding: None,
                    transport=httpx.MockTransport(handler))
     result = await server.call_tool("query", {"question": "timing?"})
     text = str(result)
@@ -163,8 +170,9 @@ async def test_query_tool_credits_every_contributor_on_a_synthesized_finding(tmp
         return httpx.Response(200, json={"findings": [f.model_dump(mode="json")]})
     server = create_mcp()
     relay = Relay(tmp_path, "http://svc", "sh-1", transport=httpx.MockTransport(handler))
-    register_tools(server, binding=BINDING, service_url="http://svc", relay=relay,
-                   distiller_factory=lambda: None, transport=httpx.MockTransport(handler))
+    register_tools(server, resolve_binding=_resolver(BINDING), service_url="http://svc",
+                   relay=relay, distiller_factory=lambda binding: None,
+                   transport=httpx.MockTransport(handler))
     text = str(await server.call_tool("query", {"question": "anything?"}))
     assert "aditya" in text and "akhil" in text and "sid" in text
 
@@ -183,8 +191,9 @@ async def test_query_tool_does_not_report_a_false_negative_on_a_shape_mismatch(t
         return httpx.Response(200, json=body)
     server = create_mcp()
     relay = Relay(tmp_path, "http://svc", "sh-1", transport=httpx.MockTransport(handler))
-    register_tools(server, binding=BINDING, service_url="http://svc", relay=relay,
-                   distiller_factory=lambda: None, transport=httpx.MockTransport(handler))
+    register_tools(server, resolve_binding=_resolver(BINDING), service_url="http://svc",
+                   relay=relay, distiller_factory=lambda binding: None,
+                   transport=httpx.MockTransport(handler))
     text = str(await server.call_tool("query", {"question": "anything?"}))
     assert "Checked — not skipped" not in text
     assert "couldn't parse" in text
@@ -206,8 +215,8 @@ async def test_contribute_round_trips_through_the_distiller_and_relay(tmp_path):
         {"type": "learning", "text": "contributed insight about the retry backoff"}]}])
     server = create_mcp()
     relay = Relay(tmp_path, "http://svc", "sh-1", transport=httpx.MockTransport(handler))
-    register_tools(server, binding=BINDING, service_url="http://svc", relay=relay,
-                   distiller_factory=lambda: Distiller(fake, BINDING),
+    register_tools(server, resolve_binding=_resolver(BINDING), service_url="http://svc",
+                   relay=relay, distiller_factory=lambda binding: Distiller(fake, binding),
                    transport=httpx.MockTransport(handler))
     await server.call_tool("contribute", {"text": "the retry backoff matters because…"})
 
@@ -246,8 +255,8 @@ async def test_contribute_fails_open_when_the_npu_is_unreachable(tmp_path):
     relay = Relay(tmp_path, "http://svc", "sh-1",
                   transport=httpx.MockTransport(egress_handler))
     register_tools(
-        server, binding=BINDING, service_url="http://svc", relay=relay,
-        distiller_factory=lambda: _RaisingDistiller(
+        server, resolve_binding=_resolver(BINDING), service_url="http://svc", relay=relay,
+        distiller_factory=lambda binding: _RaisingDistiller(
             ConnectionError("NPU server not running")),
         transport=httpx.MockTransport(egress_handler),
     )
@@ -266,8 +275,8 @@ async def test_contribute_fails_open_on_a_tripped_prompt_drop_guard(tmp_path):
     relay = Relay(tmp_path, "http://svc", "sh-1",
                   transport=httpx.MockTransport(lambda r: httpx.Response(200)))
     register_tools(
-        server, binding=BINDING, service_url="http://svc", relay=relay,
-        distiller_factory=lambda: _RaisingDistiller(
+        server, resolve_binding=_resolver(BINDING), service_url="http://svc", relay=relay,
+        distiller_factory=lambda binding: _RaisingDistiller(
             PromptDropError("prompt dropped")),
         transport=httpx.MockTransport(lambda r: httpx.Response(200)),
     )
@@ -280,16 +289,93 @@ async def test_contribute_fails_open_on_a_bad_config(tmp_path):
     can raise from `distiller_factory()` itself, before distil() is ever
     called — the try/except must wrap the factory call too, not just the
     distil() call."""
-    def bad_factory():
+    def bad_factory(binding):
         raise FileNotFoundError("synapse.toml missing")
 
     server = create_mcp()
     relay = Relay(tmp_path, "http://svc", "sh-1",
                   transport=httpx.MockTransport(lambda r: httpx.Response(200)))
     register_tools(
-        server, binding=BINDING, service_url="http://svc", relay=relay,
+        server, resolve_binding=_resolver(BINDING), service_url="http://svc", relay=relay,
         distiller_factory=bad_factory,
         transport=httpx.MockTransport(lambda r: httpx.Response(200)),
     )
     result = str(await server.call_tool("contribute", {"text": "the retry backoff…"}))
     assert "not recorded" in result
+
+
+# ── round 3: tools registered unconditionally, resolved live per call ──────
+
+async def test_tools_are_registered_even_when_nothing_is_joined_yet(tmp_path):
+    """Round 3 review, finding #11: `register_tools` used to be called only
+    `if binding is not None`, so an orchestrator started before any join
+    served a permanently tool-less MCP server. Tools now exist regardless —
+    they degrade to a plain "not joined" result instead of not existing."""
+    server = create_mcp()
+    relay = Relay(tmp_path, "http://svc", None,
+                  transport=httpx.MockTransport(lambda r: httpx.Response(200)))
+    register_tools(server, resolve_binding=_resolver(None), service_url="http://svc",
+                   relay=relay, distiller_factory=lambda binding: None,
+                   transport=httpx.MockTransport(lambda r: httpx.Response(200)))
+    assert {"query", "contribute"} <= set(server._tool_manager._tools)
+
+    query_result = str(await server.call_tool("query", {"question": "anything?"}))
+    assert _NOT_JOINED in query_result
+    contribute_result = str(await server.call_tool("contribute", {"text": "a note"}))
+    assert _NOT_JOINED in contribute_result
+    assert not (tmp_path / "findings.jsonl").exists()   # nothing durable while unjoined
+
+
+async def test_query_and_contribute_pick_up_a_join_that_happens_after_registration(tmp_path):
+    """Round 3 review, findings #11 and #3: `query` and `contribute` must
+    both observe a `synapse-worker join` that happens AFTER `register_tools`
+    was called, in the SAME MCP session (no restart), and must agree with
+    EACH OTHER about which Shared Session that is — not one running ahead
+    of the other."""
+    live: dict[str, LocalBinding | None] = {"binding": None}
+
+    def resolve_binding() -> LocalBinding | None:
+        return live["binding"]
+
+    urls_hit: list[str] = []
+    bodies: list[dict] = []
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json as _json
+        urls_hit.append(str(request.url))
+        if request.content:
+            bodies.append(_json.loads(request.content))
+        if request.url.path.endswith("/query"):
+            return httpx.Response(200, json={"findings": []})
+        return httpx.Response(200, json={"accepted": 1, "memory_version": 1})
+
+    from synapse_distiller import Distiller
+    # Only ONE script entry: contribute() before the join returns `_NOT_JOINED`
+    # without ever reaching the distiller (see the assertion below), so
+    # distil() is only actually invoked once, after the join.
+    fake = FakeProvider(scripts=[
+        {"findings": [{"type": "learning", "text": "insight after the rejoin"}]},
+    ])
+
+    server = create_mcp()
+    relay = Relay(tmp_path, "http://svc", None, transport=httpx.MockTransport(handler))
+    register_tools(server, resolve_binding=resolve_binding, service_url="http://svc",
+                   relay=relay, distiller_factory=lambda binding: Distiller(fake, binding),
+                   transport=httpx.MockTransport(handler))
+
+    # Before any join: both tools decline, nothing egresses, nothing is durable.
+    assert _NOT_JOINED in str(await server.call_tool("query", {"question": "x?"}))
+    assert _NOT_JOINED in str(await server.call_tool("contribute", {"text": "x"}))
+    assert urls_hit == []
+
+    # A `synapse-worker join sh-late` happens now — no restart, same `server`.
+    live["binding"] = LocalBinding(agent_session_id="as-1", shared_id="sh-late",
+                                   contributor="aditya", agent="claude-code")
+
+    await server.call_tool("contribute", {"text": "insight after the rejoin"})
+    await server.call_tool("query", {"question": "x?"})
+
+    assert urls_hit == [
+        "http://svc/v1/sessions/sh-late/findings",   # contribute() -> the NEW session
+        "http://svc/v1/sessions/sh-late/query",       # query() -> the SAME session — they agree
+    ]
+    assert bodies[0]["findings"][0]["attributions"][0]["agent_session"] == "as-1"

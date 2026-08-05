@@ -210,10 +210,16 @@ def main(argv: list[str] | None = None, *,
 
     briefing = asyncio.run(build_briefing(binding, args.service_url, transport=transport))
     server = create_mcp(briefing)
-    if binding is not None:
-        register_tools(server, binding=binding, service_url=args.service_url, relay=relay,
-                       distiller_factory=lambda: build_npu_distiller(binding),
-                       transport=transport)
+    # Registered UNCONDITIONALLY, even when nothing is joined yet — round 3
+    # review's fix for the tools-frozen-at-boot blocker. `resolve_binding` is
+    # called fresh inside every `query`/`contribute` invocation (server.py),
+    # so a `synapse-worker join` run after this process started takes effect
+    # on the very next tool call, no restart, same MCP session — matching
+    # what the producer endpoint already did. `build_npu_distiller` already
+    # takes a `LocalBinding` positionally, so it IS the per-call factory
+    # `register_tools` expects — no wrapping lambda needed.
+    register_tools(server, resolve_binding=resolve_binding, service_url=args.service_url,
+                   relay=relay, distiller_factory=build_npu_distiller, transport=transport)
     app = build_app(relay, server, resolve_binding_for_agent=resolve_binding_for_agent)
     print(f"synapse-orchestrator on http://{args.host}:{args.port} "
           f"(mcp at /mcp, producer at /producer/findings, "

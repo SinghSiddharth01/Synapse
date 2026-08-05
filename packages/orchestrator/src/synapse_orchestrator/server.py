@@ -30,6 +30,32 @@ otherwise, is on the path for join to work.
 TRANSPORT IS HTTP, NOT STDIO — ADR 0001. stdio spawns one server process per
 client, which would give one Orchestrator per Agent and dissolve the
 single-egress property the Orchestrator exists to create.
+
+#### Post-review amendment (2026-08-04), round 3
+
+`register_tools` (below) used to close over a single `binding` resolved once
+by `cli.main` at boot, and `cli.main` only called it `if binding is not
+None`. Two consequences, both round 3 review findings: (1) an orchestrator
+started before any `synapse-worker join` served a permanently tool-less MCP
+server — the default `_DEFAULT_INSTRUCTIONS` below tells the agent to join
+in a terminal, but nothing ever registered `query`/`contribute` for it to
+use once it had; (2) even when a binding existed at boot, a LATER
+`synapse-worker join <different_id>` was invisible to `query`/`contribute`
+— they kept using the boot-time binding forever, while the producer
+endpoint (app.py) re-resolved live, so contribute() could push a Finding to
+one Shared Session while query() kept reading another, in the same process
+and the same MCP session.
+
+Fixed by making `register_tools` itself resolve nothing: it now takes
+`resolve_binding`, a callable invoked fresh at the start of every
+`query`/`contribute` call, and `cli.main` calls `register_tools`
+unconditionally, once, at boot — never gated on whether a binding exists
+yet. An unbound `query`/`contribute` call returns a plain "not joined" tool
+result (`_NOT_JOINED` below) instead of not existing at all; the very next
+call, in the same MCP session, after a `synapse-worker join`, picks up the
+new binding with no restart. See `test_tools.py` for the exact
+reproduction and `app.py`'s round 3 amendment note for the equivalent fix
+on the producer path.
 """
 
 import logging
@@ -63,9 +89,29 @@ mcp = create_mcp()
 # `register_tools` below is what the CLI calls once a binding exists.
 
 
-def register_tools(server: FastMCP, *, binding, service_url: str, relay,
+_NOT_JOINED = (
+    "Not joined to a Shared Session yet — run `synapse-worker join <shared_id>` "
+    "in a terminal, then try again. No restart needed once you have: this tool "
+    "re-checks the binding on every call."
+)
+
+
+def register_tools(server: FastMCP, *, resolve_binding, service_url: str, relay,
                    distiller_factory, transport=None) -> None:
-    """Tools speak trigger-voice; bodies stay small. `transport` is test-only."""
+    """Tools speak trigger-voice; bodies stay small. `transport` is test-only.
+
+    `resolve_binding` is called fresh at the START of every `query`/
+    `contribute` invocation — never captured once at registration time. See
+    the module docstring's round 3 amendment note for why: this is what
+    lets `register_tools` be called unconditionally, once, at boot, and
+    still have a `synapse-worker join` run afterwards take effect on the
+    very next tool call, in the SAME MCP session, with no restart.
+    `distiller_factory` mirrors this — it takes the freshly resolved
+    binding as its argument, so `contribute()`'s Distiller (and the
+    Attribution it stamps) always matches whichever Shared Session the
+    Finding is about to be recorded under, never a binding captured at
+    registration time.
+    """
     import httpx as _httpx
 
     from synapse_contracts import Provenance, Segment
@@ -75,6 +121,9 @@ def register_tools(server: FastMCP, *, binding, service_url: str, relay,
         "subsystem, when debugging something a teammate may also be working on, "
         "or before concluding something is a dead end."))
     async def query(question: str) -> str:
+        binding = resolve_binding()
+        if binding is None:
+            return _NOT_JOINED
         url = f"{service_url.rstrip('/')}/v1/sessions/{binding.shared_id}/query"
         try:
             async with _httpx.AsyncClient(transport=transport, timeout=15.0) as client:
@@ -119,6 +168,9 @@ def register_tools(server: FastMCP, *, binding, service_url: str, relay,
         "something non-obvious a teammate would benefit from — a root cause, a "
         "dead end, a decision and its why. A few sentences of plain prose."))
     async def contribute(text: str) -> str:
+        binding = resolve_binding()
+        if binding is None:
+            return _NOT_JOINED
         from datetime import datetime, timezone
         ts = datetime.now(timezone.utc)
         event = {"role": "assistant", "kind": "text", "content": text,
@@ -138,7 +190,7 @@ def register_tools(server: FastMCP, *, binding, service_url: str, relay,
         # would otherwise wrap it as a raw internal exception string handed
         # to the agent, and the contributed prose would simply be gone.
         try:
-            distiller = distiller_factory()
+            distiller = distiller_factory(binding)
             findings, stats = await distiller.distil(segment)
         except Exception as exc:
             logger.warning("contribute: distillation failed (%s: %s)",
@@ -150,7 +202,13 @@ def register_tools(server: FastMCP, *, binding, service_url: str, relay,
             f.provenance = Provenance.CONTRIBUTED
         if not findings:
             return "Nothing durable extracted from that — try stating the insight directly."
-        relay.record(findings)
+        # `shared_id=binding.shared_id` (relay.py's per-call override, round 3
+        # amendment) rather than relaying on `relay.shared_id`: this is the
+        # SAME live-resolved binding query() would use right now, so a
+        # contribute() and a query() issued back-to-back never disagree about
+        # which Shared Session they are talking to, even if the producer
+        # endpoint has rebound `relay.shared_id` in between (round 2/3 review).
+        relay.record(findings, shared_id=binding.shared_id)
         sent, pending = await relay.flush()
         state = "shared with the team" if sent else f"queued ({pending} pending)"
         return f"{len(findings)} finding(s) {state}."
