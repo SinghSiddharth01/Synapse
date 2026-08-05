@@ -64,8 +64,17 @@ async def test_full_flow_push_watermark_query():
         assert r.json() == {"accepted": 1, "memory_version": 1, "synthesized": True}
 
         r = await client.get(f"/v1/sessions/{sid}/watermark", params={"agent_session": "as-9"})
-        assert r.json() == {"version": 1, "new_since": 1,
-                            "by_type": {"learning": 1}, "conflicts": 0}
+        # Exact equality on purpose: this is the ONLY thing pinning the route
+        # contract that briefing.py consumes. `topics`/`purpose`/`members`
+        # joined it in Plan E Task E.8. One finding lands in one topic, and
+        # `_finding_json` gives it the text "insight f-1", which is therefore
+        # its own medoid label.
+        assert r.json() == {
+            "version": 1, "new_since": 1, "by_type": {"learning": 1}, "conflicts": 0,
+            "topics": [{"id": "t0001", "size": 1, "label": "insight f-1"}],
+            "purpose": "fec decode",          # whatever this test created the session with
+            "members": ["aditya"],
+        }
 
         r = await client.post(f"/v1/sessions/{sid}/query",
                               json={"query": "what do we know", "agent_session": "as-9"})
@@ -497,3 +506,92 @@ async def test_a_finding_only_the_asker_produced_never_reaches_the_candidate_set
     assert "insight f-mine" not in prompt          # never offered to the model
     assert "insight f-them" in prompt              # ...and the teammates' were
     assert "f-mine" not in [f["id"] for f in r.json()["findings"]]
+
+
+async def test_watermark_returns_topics_sorted_by_size_with_no_provider_call():
+    provider = _RecordingProvider(scripts=[MERGE_NOOP])
+    async with _client(provider) as client:
+        sid = (await client.post("/v1/sessions",
+                                 json={"purpose": "fec decode", "created_by": "s"})
+               ).json()["shared_id"]
+        await client.post(f"/v1/sessions/{sid}/members", json={"contributor": "aditya"})
+        await client.post(f"/v1/sessions/{sid}/findings", json={"findings": [
+            _finding_json("f-1"), _finding_json("f-2"), _finding_json("f-3")]})
+        calls_before = len(provider.seen)
+
+        body = (await client.get(f"/v1/sessions/{sid}/watermark",
+                                 params={"agent_session": "as-OTHER"})).json()
+
+    assert len(provider.seen) == calls_before          # NO provider call, ever
+    assert body["purpose"] == "fec decode"
+    assert body["members"] == ["aditya"]
+    sizes = [t["size"] for t in body["topics"]]
+    assert sizes == sorted(sizes, reverse=True)
+    assert all(t["label"] for t in body["topics"])
+
+
+async def test_a_topic_whose_members_are_all_merged_away_reports_size_from_the_view():
+    """Topic membership is never pruned on merge, so TopicIndex still reports
+    the pre-merge size -- 'collapse looks like working'. Reading View.members_of
+    is what makes the number honest without fixing the underlying bug."""
+    merge = {"working_memory": "wm",
+             "merges": [{"source_ids": ["f-1", "f-2"], "text": "merged", "type": "learning"}],
+             "trivial_ids": [], "conflicts": []}
+    async with _client(FakeProvider(scripts=[merge])) as client:
+        sid = (await client.post("/v1/sessions", json={"purpose": "p", "created_by": "s"})
+               ).json()["shared_id"]
+        await client.post(f"/v1/sessions/{sid}/findings", json={"findings": [
+            _finding_json("f-1"), _finding_json("f-2")]})
+
+        body = (await client.get(f"/v1/sessions/{sid}/watermark",
+                                 params={"agent_session": "as-OTHER"})).json()
+
+    assert sum(t["size"] for t in body["topics"]) == 1     # not 3, and not 2
+
+
+async def test_topic_labels_are_stable_across_a_rebuild():
+    """`rebuild()` discards every index and recomputes from the log alone. A
+    label that moves across it is derived from something that is not in the
+    log -- a second source of truth hiding as a cache (adr/0004).
+
+    Read what this DOES and does not prove. `rebuild()` re-derives TopicAssigned
+    rather than replaying it (branch store.py:191-192), so what holds this green
+    is that the replay ORDER is identical and assignment is deterministic under
+    HashingEmbedder. It is not proof that the recorded entry is authoritative.
+    Swap in a real Embedder, or start pruning membership, and this becomes a
+    real test of a property the code does not yet have."""
+    # Built explicitly rather than through _client(), because this test needs
+    # the store the app is actually using, and `client._transport.app` is an
+    # httpx internal.
+    app = build_app(FakeProvider(scripts=[MERGE_NOOP]))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                 base_url="http://svc") as client:
+        sid = (await client.post("/v1/sessions", json={"purpose": "p", "created_by": "s"})
+               ).json()["shared_id"]
+        await client.post(f"/v1/sessions/{sid}/findings", json={"findings": [
+            _finding_json(f"f-{i}") for i in range(5)]})
+        before = (await client.get(f"/v1/sessions/{sid}/watermark",
+                                   params={"agent_session": "as-O"})).json()["topics"]
+
+        app.state.store._memories[sid].rebuild()            # the seam added in Step 4
+
+        after = (await client.get(f"/v1/sessions/{sid}/watermark",
+                                  params={"agent_session": "as-O"})).json()["topics"]
+
+    assert before == after
+    assert before != []                                     # not vacuously equal
+
+
+async def test_a_topic_of_only_the_askers_own_findings_contributes_nothing():
+    """`topics` is a CONTENT field and runs through the same all-attributions
+    suppression rule as by_type and /query (invariant 3)."""
+    async with _client(FakeProvider(scripts=[MERGE_NOOP])) as client:
+        sid = (await client.post("/v1/sessions", json={"purpose": "p", "created_by": "s"})
+               ).json()["shared_id"]
+        await client.post(f"/v1/sessions/{sid}/findings", json={"findings": [
+            _finding_json("f-mine", agent_session="as-me")]})
+
+        body = (await client.get(f"/v1/sessions/{sid}/watermark",
+                                 params={"agent_session": "as-me"})).json()
+
+    assert body["topics"] == []

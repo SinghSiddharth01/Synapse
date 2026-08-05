@@ -91,6 +91,27 @@ async def build_briefing(binding: LocalBinding | None, service_url: str, *,
         version = int(w.get("version", 0))
         new_since = int(w.get("new_since", 0))
         conflicts = int(w.get("conflicts", 0))
+
+        # `topics` MISSING is a pre-E5 service: render the rest. `topics`
+        # MALFORMED is a shape nobody should trust, and this is the highest-
+        # trust text surface a connecting agent sees -- fail open.
+        topics_clause = ""
+        raw_topics = w.get("topics")
+        if raw_topics is not None:
+            if not isinstance(raw_topics, list):
+                raise ValueError(f"'topics' was not a list: {raw_topics!r}")
+            labels = []
+            for topic in raw_topics:
+                if not isinstance(topic, dict):
+                    raise ValueError(f"'topics' held a non-object: {topic!r}")
+                label = topic.get("label")
+                if not isinstance(label, str):
+                    raise ValueError(f"topic label was not a string: {label!r}")
+                labels.append(_clean(label))
+            if labels:
+                topics_clause = (" The team is working on: "
+                                 + ", ".join(f"“{label}”" for label in labels) + ".")
+
         text = (
             f"{SENTINEL} You are in Synapse Shared Session {_clean(binding.shared_id)} as "
             f"{_clean(binding.contributor)}. Team memory holds {total} findings ({types}), "
@@ -100,6 +121,7 @@ async def build_briefing(binding: LocalBinding | None, service_url: str, *,
             "teammate may also be working on, or before concluding something is a "
             "dead end. Call `contribute` when you learn something non-obvious a "
             "teammate would benefit from."
+            f"{topics_clause}"
         )
     except Exception as exc:  # FAIL OPEN: nothing escapes this function, ever
         logger.info("Briefing fail-open (%s)", exc.__class__.__name__)

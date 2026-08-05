@@ -24,7 +24,7 @@ from synapse_contracts import (Conflict, Finding, FindingId, FindingStatus,
 
 from synapse_service.fold import SupersessionCycleError, View
 from synapse_service.lanes import DEFAULT_TOP_K, DEFAULT_TOPIC_LANE, CandidateSet
-from synapse_service.memory import SharedMemory
+from synapse_service.memory import SharedMemory, TopicSummary
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +136,10 @@ class InMemoryStore:
         return replace(result, candidates=tuple(
             replace(c, finding=self._project(view, c.finding))
             for c in result.candidates))
+
+    def topic_summaries(self, shared_id: str, *, limit: int = 3,
+                        only: frozenset[FindingId] | None = None) -> list[TopicSummary]:
+        return self._memories[shared_id].topic_summaries(limit=limit, only=only)
 
     def resolve_forward(self, shared_id: str, finding_id: FindingId) -> FindingId:
         """Follow supersession forward to the live id a Conflict should name.

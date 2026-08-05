@@ -168,11 +168,26 @@ def build_app(provider: ModelProvider) -> Starlette:
         conflicts = sum(1 for c in ctx.conflicts
                         if c.finding_a in visible_ids or c.finding_b in visible_ids)
 
+        # `topics`, `purpose` and `members` are CONTENT fields and join
+        # by_type/conflicts under the same suppression rule. `version` and
+        # `new_since` are CHANGE fields and stay global -- they measure how
+        # much the Shared Memory moved, not whether that movement is visible
+        # to this asker. That split is deliberate (E3's round-2 adjudication)
+        # and this task does not touch it.
+        #
+        # `version` is SessionContext.memory_version: VERDICT ROUNDS APPLIED,
+        # not merges completed and not Log.version.
+        topics = store.topic_summaries(sid, only=frozenset(visible_ids))
+
         return JSONResponse({
             "version": ctx.memory_version,
             "new_since": ctx.memory_version - store.last_seen(sid, agent_session),
             "by_type": dict(by_type),
             "conflicts": conflicts,
+            "topics": [{"id": t.topic_id, "size": t.size, "label": t.label}
+                       for t in topics],
+            "purpose": ctx.purpose,
+            "members": list(store.get_session(sid).members),
         })
 
     async def query(request: Request) -> JSONResponse:
@@ -220,7 +235,7 @@ def build_app(provider: ModelProvider) -> Starlette:
         store.mark_seen(sid, agent_session)
         return JSONResponse({"findings": [f.model_dump(mode="json") for f in ranked]})
 
-    return Starlette(routes=[
+    app = Starlette(routes=[
         Route("/v1/sessions", create_session, methods=["POST"]),
         Route("/v1/sessions/{sid}/members", add_member, methods=["POST"]),
         Route("/v1/sessions/{sid}/findings", push_findings, methods=["POST"]),
@@ -228,3 +243,5 @@ def build_app(provider: ModelProvider) -> Starlette:
         Route("/v1/sessions/{sid}/watermark", watermark, methods=["GET"]),
         Route("/v1/sessions/{sid}/query", query, methods=["POST"]),
     ])
+    app.state.store = store          # test seam: no route reads it
+    return app

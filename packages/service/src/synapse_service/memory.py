@@ -53,6 +53,8 @@ from synapse_service.semantic import (
     HashingEmbedder,
     TopicIndex,
     VectorIndex,
+    cosine,
+    mean,
 )
 from synapse_service.symbols import SymbolIndex
 
@@ -62,6 +64,18 @@ from synapse_service.symbols import SymbolIndex
 # is why it is checked rather than trusted.
 MAX_TOPIC_SIZE = 60
 MAX_TOPIC_SHARE = 0.35
+
+# A label is a Topic's NAME, never the Topic (CONTEXT.md). It is cosmetic: a
+# bad label makes the briefing read oddly and changes nothing about what is
+# retrieved, which is exactly where the least reliable component belongs.
+_MAX_LABEL_CHARS = 80
+
+
+@dataclass(frozen=True)
+class TopicSummary:
+    topic_id: TopicId
+    size: int
+    label: str
 
 
 @dataclass(frozen=True)
@@ -195,6 +209,43 @@ class SharedMemory:
             exclude=exclude,
             topic_lane=topic_lane,
         )
+
+    def topic_summaries(self, *, limit: int = 3,
+                        only: frozenset[FindingId] | None = None) -> list[TopicSummary]:
+        """Largest topics first, each labelled by its medoid member's text.
+
+        NO MODEL. Deterministic, and it rebuilds from the log.
+
+        Everything here reads `View.members_of`, which the fold already
+        restricts to VISIBLE ids. That is what makes the sizes honest despite
+        topic membership never being pruned on merge: the un-pruned structure
+        lives in `TopicIndex.topics[].members`, which only `health()` and
+        `split()` read, and neither is ever called. This routes AROUND that
+        bug rather than fixing it -- a deliberate two-days-out call.
+
+        `only` restricts membership to ids the asker is allowed to see, so a
+        topic whose every visible member is the asker's own contributes
+        nothing (invariant 3; `topics` is a CONTENT field).
+        """
+        view = self.view()
+        summaries: list[TopicSummary] = []
+        for topic_id, members in view.members_of.items():
+            eligible = [m for m in members if only is None or m in only]
+            if not eligible:
+                continue
+            vectors = [self.indexes.vectors.vectors[m] for m in eligible
+                       if m in self.indexes.vectors.vectors]
+            if vectors:
+                centre = mean(vectors)
+                medoid = max(eligible,
+                             key=lambda m: (cosine(self.indexes.vectors.vectors[m], centre), m))
+            else:                                   # no vectors: still deterministic
+                medoid = min(eligible)
+            text = view.findings[medoid].text
+            label = text if len(text) <= _MAX_LABEL_CHARS else text[:_MAX_LABEL_CHARS - 1] + "…"
+            summaries.append(TopicSummary(topic_id=topic_id, size=len(eligible), label=label))
+        summaries.sort(key=lambda s: (-s.size, s.topic_id))
+        return summaries[:limit]
 
     def unhealthy_topics(self) -> list[TopicId]:
         """Topics that have stopped discriminating and should be split."""

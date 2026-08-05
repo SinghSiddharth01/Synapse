@@ -33,7 +33,7 @@ from synapse_service.log import (
     TopicId,
     TopicSplit,
 )
-from synapse_service.memory import Appended, SharedMemory
+from synapse_service.memory import Appended, SharedMemory, TopicSummary
 from synapse_service.semantic import (
     Embedder,
     HashingEmbedder,
@@ -70,6 +70,7 @@ __all__ = [
     "TopicId",
     "TopicIndex",
     "TopicSplit",
+    "TopicSummary",
     "VectorIndex",
     "View",
     "cosine",
