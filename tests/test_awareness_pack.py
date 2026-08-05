@@ -668,17 +668,48 @@ def test_fail_open_when_the_binding_file_is_corrupt(tmp_path, watermark):
 
 
 def test_fail_open_when_the_state_file_is_corrupt(tmp_path, watermark):
+    """The docstring's claim ("corrupt state == no baseline == first-check
+    silence") describes a RECOVERY: `_load_state_entry` swallows the
+    corrupt read and returns `{}`, `run()` treats that exactly like "never
+    checked before," and persists a fresh baseline. `returncode == 0` and
+    `stdout == ""` alone can't tell that apart from the hook simply raising
+    on the corrupt JSON and having `main()`'s blanket `except Exception`
+    swallow it -- both produce identical (0, "") on THIS turn, but only the
+    first one leaves the freshness pointer alive afterward. Mutant
+    confirmed surviving on the two asserts above alone: replacing
+    `_load_state_entry`'s `try/except (OSError, json.JSONDecodeError)` with
+    an unguarded `json.loads` still passes them, because the raise
+    propagates out of `run()` and is swallowed by `main()` -- but then
+    `run()` never reaches `_save_state_entry`, so the corrupt file is never
+    replaced and every future turn looks like "first check" again, forever."""
     state_dir = tmp_path / ".synapse"
     _write_binding(state_dir)
     awareness_dir = state_dir / "awareness"
     awareness_dir.mkdir(parents=True)
-    (awareness_dir / "freshness.json").write_text("{not valid json", encoding="utf-8")
+    state_path = awareness_dir / "freshness.json"
+    state_path.write_text("{not valid json", encoding="utf-8")
     watermark.body["version"] = 9
 
     result = _run_hook(state_dir, watermark.url)
 
     assert result.returncode == 0
     assert result.stdout == ""  # corrupt state == no baseline == first-check silence
+
+    # The recovery must be REAL: the corrupt file must have been replaced
+    # with a fresh, valid baseline for this (shared_id, agent_session_id)
+    # pair -- not merely "an exception happened to get swallowed somewhere."
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["sess-a"]["as-1"]["last_notified_version"] == 9
+
+    # And the pointer must actually be alive again: a further move must
+    # surface on the next turn, proving the hook picked back up from the
+    # freshly-written baseline rather than staying permanently wedged on
+    # the old corrupt file.
+    watermark.body["version"] = 10
+    after_recovery = _run_hook(state_dir, watermark.url)
+    assert after_recovery.returncode == 0
+    payload = json.loads(after_recovery.stdout)
+    assert "v10" in payload["hookSpecificOutput"]["additionalContext"]
 
 
 def test_the_notice_still_fires_when_the_state_dir_cannot_be_written(tmp_path, watermark):
