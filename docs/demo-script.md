@@ -108,10 +108,13 @@ Expected: `201`, a `shared_id` string.
 **Beat 2 — push 1 (aditya).**
 
 ```bash
-curl -s -o /dev/null -w '%{http_code}\n' -X POST localhost:8899/v1/sessions/$SID/findings \
+curl -s -w '\nHTTP %{http_code}\n' -X POST localhost:8899/v1/sessions/$SID/findings \
      -H 'content-type: application/json' -d @.measurements/demo-push1.json
 ```
-Expected: `201`, `accepted` count `10`.
+Expected: `HTTP 200`, body `{"accepted": 10, "memory_version": ..., "synthesized": ...}` —
+`push_findings` (api.py) returns a bare `JSONResponse`, i.e. **200**, never `201`. Only
+`POST /v1/sessions` (Beat 1) mints with `201`. `-w` is kept alongside the body, not instead of it
+— `-o /dev/null` on this beat would discard the very `accepted` count the beat is checking.
 
 **Beat 3 — a teammate connects: arrival briefing.**
 
@@ -123,7 +126,7 @@ Expected: `200`; a body with **counts and types**, no `topics` key.
 **Beat 4 — push 2 (akhil), then the three queries from `as-observer`.**
 
 ```bash
-curl -s -o /dev/null -w '%{http_code}\n' -X POST localhost:8899/v1/sessions/$SID/findings \
+curl -s -w '\nHTTP %{http_code}\n' -X POST localhost:8899/v1/sessions/$SID/findings \
      -H 'content-type: application/json' -d @.measurements/demo-push2.json
 for Q in "what do we know about timing" "why does the decode fail" "what should I avoid touching"; do
   curl -s -X POST localhost:8899/v1/sessions/$SID/query \
@@ -132,15 +135,16 @@ for Q in "what do we know about timing" "why does the decode fail" "what should 
   echo
 done
 ```
-Expected: push `accepted` `14` (running total 24, above `TOP_K` — the whole 24-finding log is the
-candidate set on `main`, there is no lane selection to bypass here). Three query responses, each
-with a non-empty `answer` and a `sources` list. **Record the answers verbatim in `docs/STATE.md`
-— they are the `main` half of Task 13's A/B.**
+Expected: push `HTTP 200`, `accepted` `14` (running total 24, above `TOP_K` — the whole 24-finding
+log is the candidate set on `main`, there is no lane selection to bypass here). Three query
+responses, each a body of the shape `{"findings": [...]}` — `/query` (api.py) has no `answer` key
+and no `sources` key; the ranked Findings themselves are the response. **Record the responses
+verbatim in `docs/STATE.md` — they are the `main` half of Task 13's A/B.**
 
 **Beat 5 — push 3, re-query.**
 
 ```bash
-curl -s -o /dev/null -w '%{http_code}\n' -X POST localhost:8899/v1/sessions/$SID/findings \
+curl -s -w '\nHTTP %{http_code}\n' -X POST localhost:8899/v1/sessions/$SID/findings \
      -H 'content-type: application/json' -d @.measurements/demo-push3.json
 curl -s "localhost:8899/v1/sessions/$SID/watermark?agent_session=as-observer" | python3 -m json.tool
 ```
@@ -163,16 +167,25 @@ Identical beats, plus the three the integration buys, each named against the tas
   the `/findings` response carries `synthesized: true` and the merged pair leaves `retrievable`;
 - `/query` sends 14 candidates instead of 24 and the answers are at least as good (**Task 9**, and
   Task 13 Step 2 is where "at least as good" stops being an assumption);
-- kill the service, contribute once more, restart, `synapse-orchestrator resync`, re-query
-  (**Task 11 Step 2**).
+- kill the service, contribute once more (through the orchestrator, not a raw push at the
+  service), restart, `synapse-orchestrator resync`, re-query (**Task 11 Step 2**).
 
 ```bash
 export PATH="/opt/homebrew/bin:$PATH"
 cd /Users/siddharthsingh/Dev/synapse-exec/e5
 git switch feat/brain-integration && uv sync
 uv run synapse-service &
+SVC_PID=$!
+uv run synapse-orchestrator --port 8787 --service-url http://127.0.0.1:8899 --state-dir .synapse &
+ORCH_PID=$!
 sleep 2
 ```
+The orchestrator is started here, alongside the service, even though nothing needs it before Beat
+7 — its producer endpoint is what Beat 7 pushes through, and `register_tools`/`build_app` register
+it unconditionally at boot (cli.py), so starting it early costs nothing and there is no second
+process to remember to bring up mid-beat. `$SVC_PID`/`$ORCH_PID` (not `%1`/`%2`) track the two
+background processes from here on — job numbers get confusing with two backgrounded servers, one
+of which gets killed and restarted mid-script.
 
 **Beats 1–4** are identical to §A's, against the new `$SID`. At beat 4's `/watermark`, expected
 output now additionally carries a `topics` key with at least one label derived from the pushed
@@ -184,9 +197,9 @@ findings (**Task 10**).
 curl -s -X POST localhost:8899/v1/sessions/$SID/findings \
      -H 'content-type: application/json' -d @.measurements/demo-push3.json | python3 -m json.tool
 ```
-Expected: `accepted` `2` (running total 26), and `synthesized: true` — `seg-005b` merged into
-`seg-005a`'s lineage despite being 24 findings apart (**Task 8**: the symbol/lexical lanes, not
-recency, surface the pair).
+Expected: `HTTP 200`, `accepted` `2` (running total 26), and `synthesized: true` — `seg-005b`
+merged into `seg-005a`'s lineage despite being 24 findings apart (**Task 8**: the symbol/lexical
+lanes, not recency, surface the pair).
 
 **Beat 6 — re-query, compare candidate count.**
 
@@ -198,25 +211,73 @@ for Q in "what do we know about timing" "why does the decode fail" "what should 
   echo
 done
 ```
-Expected: each response's prompt is built over **14 candidates**, not the full 26-entry log
-(**Task 9**). Record the three answers verbatim — this is the branch half of Task 13's A/B.
+Expected: each response is `{"findings": [...]}` (no `answer`/`sources` keys — see Beat 4), built
+over **14 candidates**, not the full 26-entry log (**Task 9**). Record the three responses
+verbatim — this is the branch half of Task 13's A/B.
 
-**Beat 7 — kill, contribute, restart, resync, re-query.**
+**Beat 7 — kill, contribute (through the orchestrator), restart, resync, re-query.**
+
+Every push in Beats 1–6 above is a raw `curl` straight at the service (`localhost:8899`) — that is
+correct for demonstrating ingest/synthesis/retrieval, but it means nothing has yet gone through the
+orchestrator's `Relay`, and this beat is the one that specifically needs it: Task 11 Step 2 is
+recoverable-after-restart, and what makes it recoverable is the Finding sitting durably in
+`.synapse/relay/findings.jsonl`, not in the (now-dead) service's memory. A raw `curl` at the
+service, issued while the service is down, writes nothing anywhere and leaves `resync` with an
+empty log to replay — see Task 11's own named fail condition ("`resync` prints `re-pushed 0`").
+
+`localhost:8787` below is the **orchestrator's** producer endpoint (Plan D.1), not the service.
+Reaching it requires a `LocalBinding` on disk for the agent the Finding claims
+(`bindings/claude-code.json` under `--state-dir .synapse`) — ordinarily written by
+`synapse-worker join $SID` from inside a live coding-agent transcript. The one-off snippet below
+writes the identical `SessionBinding` shape directly (same fields `join_session` produces —
+`synapse_contracts.binding.write_binding`, matching `scripts/verify_orchestrator.py`'s own pattern
+for making `join` deterministic in a rehearsal) so this beat does not depend on the narrator's
+terminal happening to be inside a live, freshly-touched transcript at demo time:
 
 ```bash
-kill %1
+python3 - <<PY
+from synapse_contracts.binding import write_binding, SessionBinding
+from datetime import datetime, timezone
+write_binding(".synapse/bindings/claude-code.json", SessionBinding(
+    agent_session_id="as-demo-aditya", shared_id="$SID", contributor="aditya",
+    agent="claude-code", transcript_path="(demo — bound directly, no live transcript needed)",
+    pinned_at=datetime.now(timezone.utc)))
+PY
+
+kill $SVC_PID        # service only — the orchestrator stays up
 sleep 1
-curl -s -o /dev/null -w '%{http_code}\n' -X POST localhost:8899/v1/sessions/$SID/findings \
-     -H 'content-type: application/json' -d @.measurements/demo-push3.json    # service is down: this fails
+curl -s -w '\nHTTP %{http_code}\n' -X POST localhost:8787/producer/findings \
+     -H 'content-type: application/json' -d '{"findings": [{
+       "id": "f-demo-recovery-01", "type": "learning",
+       "text": "The resync recreate pass must run before the retry loop, or queued findings never flush.",
+       "attributions": [{"contributor": "aditya", "agent_session": "as-demo-aditya", "agent": "claude-code"}],
+       "ts": "2026-08-05T09:05:00Z", "refs": [], "provenance": "contributed", "status": "kept",
+       "merged_from": [], "merged_into": null}]}'
+```
+Expected: `HTTP 200`, body `{"accepted": 1, "sent": false}` — the Finding is durably recorded in
+`.synapse/relay/findings.jsonl` (`app.py`'s `producer_findings` calls `relay.record()` before
+attempting `relay.flush()`), then `flush()`'s `_post` gets a connection error against the dead
+service and returns `"retry"`, so nothing is written to `sent.jsonl`. This is what "the failed
+contribute is recorded in the orchestrator's Relay write-ahead log" concretely means — check
+`cat .synapse/relay/findings.jsonl` on stage if there is time.
+
+```bash
 uv run synapse-service &
+SVC_PID=$!
 sleep 2
-uv run synapse-orchestrator resync
+uv run synapse-orchestrator resync --state-dir .synapse --service-url http://127.0.0.1:8899
 curl -s "localhost:8899/v1/sessions/$SID/watermark?agent_session=as-observer" | python3 -m json.tool
 ```
-Expected: the failed contribute is recorded in the worker's write-ahead log; after restart,
-`synapse-orchestrator resync` recreates the session (if needed) and re-pushes the queued finding
-without a human copying anything by hand (**Task 11 Step 2**).
+Expected: the restarted service has a fresh, empty `InMemoryStore` — `$SID` is momentarily unknown
+to it. `resync` prints `resync: re-pushed 1 finding(s) across 1 session(s) (current session:
+'sh-...'; synthesized: [...])` and exits `0` — NOT `re-pushed 0`, which would mean the recreate
+pass never ran (Task 11's named fail condition). Under the hood: `cmd_resync` Step 1 first
+`POST /v1/sessions`s `$SID` back into existence (create-or-return, invariant 4), THEN re-pushes the
+one queued finding to it, THEN calls `/synthesize`. The closing `/watermark` is `200`, not `404`,
+with `by_type: {"learning": 1}` reflecting the recovered finding and `purpose: "(recovered by
+resync)"` — the retained log does not carry the original purpose; that is `docs/STATE.md`'s
+documented, honest gap, not a bug in this beat.
 
 ```bash
-kill %1
+kill $SVC_PID $ORCH_PID
 ```
