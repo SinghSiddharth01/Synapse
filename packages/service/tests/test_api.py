@@ -414,27 +414,54 @@ async def test_the_bypass_boundary_is_where_the_guarantee_stops():
                        recent has NO guarantee. That is the cliff. The
                        pre-agreed response, if it bites at demo scale, is Task
                        13 Step 2's: raise the bypass threshold, do not revert
-                       this task."""
+                       this task.
+
+    The AT-TOP_K case gets its OWN session with `f-odd` placed FIRST (the
+    oldest arrival, never among the two most recent), not appended last as a
+    single growing session would have it. Appending it last is what the AT
+    TOP_K + 1 half needs (see below) -- but it also means the RECENT floor
+    rescues `f-odd` on its own, whether or not the bypass actually fired.
+    Mutating `if len(allowed) <= TOP_K:` to `< TOP_K` (api.py) survived this
+    test entirely with the old, shared-session fixture: at exactly TOP_K,
+    `f-odd` (2nd-most-recent by construction) was rescued by the RECENT
+    floor regardless of the bypass, so the "guaranteed by the bypass, not by
+    the selectors" claim was never actually exercised. With `f-odd` oldest,
+    the RECENT floor cannot save it -- only the bypass can."""
     from synapse_service.api import TOP_K
 
+    # Two sessions now (see the docstring's fixture-placement note), so two
+    # more script entries than the original single-session version: one
+    # merge + one rank call per push/query round, six calls total.
     provider = _RecordingProvider(scripts=[MERGE_NOOP, {"ranked": [0]},
+                                           MERGE_NOOP, {"ranked": [0]},
                                            MERGE_NOOP, {"ranked": [0]}])
     async with _client(provider) as client:
-        sid = (await client.post("/v1/sessions", json={"purpose": "p", "created_by": "s"})
-               ).json()["shared_id"]
-        # exactly TOP_K, one of them lexically disjoint from the query
-        batch = [_finding_json(f"f-{i:03d}") for i in range(TOP_K - 1)]
-        batch.append(_finding_json("f-odd", text="qairt refuses the context binary"))
-        await client.post(f"/v1/sessions/{sid}/findings", json={"findings": batch})
-
-        await client.post(f"/v1/sessions/{sid}/query",
+        at_sid = (await client.post("/v1/sessions", json={"purpose": "p", "created_by": "s"})
+                 ).json()["shared_id"]
+        # exactly TOP_K, one of them lexically disjoint from the query --
+        # and OLDEST, not most recent, so only the bypass can save it.
+        at_batch = [_finding_json("f-odd", text="qairt refuses the context binary")]
+        at_batch += [_finding_json(f"f-{i:03d}") for i in range(TOP_K - 1)]
+        await client.post(f"/v1/sessions/{at_sid}/findings", json={"findings": at_batch})
+        await client.post(f"/v1/sessions/{at_sid}/query",
                           json={"query": "insight", "agent_session": "as-X"})
         at_top_k = provider.prompts[-1]
 
+        # A separate session for TOP_K + 1: `f-odd` appended near the end so
+        # it (and `f-extra`, appended last) are the two most recently
+        # arrived -- this is what demonstrates the RECENT floor rescuing a
+        # lexically disjoint finding once the bypass no longer fires.
+        above_sid = (await client.post("/v1/sessions", json={"purpose": "p", "created_by": "s"})
+                    ).json()["shared_id"]
+        above_batch = [_finding_json(f"f-{i:03d}") for i in range(TOP_K - 1)]
+        above_batch.append(_finding_json("f-odd", text="qairt refuses the context binary"))
+        await client.post(f"/v1/sessions/{above_sid}/findings", json={"findings": above_batch})
+        await client.post(f"/v1/sessions/{above_sid}/query",
+                          json={"query": "insight", "agent_session": "as-X"})
         # one more unrelated finding: now TOP_K + 1 are visible
-        await client.post(f"/v1/sessions/{sid}/findings",
+        await client.post(f"/v1/sessions/{above_sid}/findings",
                           json={"findings": [_finding_json("f-extra")]})
-        await client.post(f"/v1/sessions/{sid}/query",
+        await client.post(f"/v1/sessions/{above_sid}/query",
                           json={"query": "insight", "agent_session": "as-X"})
         above = provider.prompts[-1]
 
