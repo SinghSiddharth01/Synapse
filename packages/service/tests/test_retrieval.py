@@ -49,6 +49,18 @@ async def test_empty_candidates_short_circuits_without_a_model_call():
     assert fake.calls == 0         # proves the model was never reached, not just the result
 
 
+async def test_a_finding_with_zero_attributions_is_never_suppressed():
+    """Invariant 3 suppresses a Finding only when EVERY attribution is the
+    asker's own Agent Session. With zero attributions, `all(...)` over an
+    empty generator is vacuously True, which used to suppress the finding
+    for every possible asker -- the opposite of the invariant."""
+    orphan = _f("f-orphan", "no attributions at all", [])
+    fake = FakeProvider(scripts=[{"ranked": [0]}])
+    ranked = await query_findings(fake, context=CTX, candidates=[orphan],
+                                  query="anything", asking_agent_session="as-anyone")
+    assert [f.id for f in ranked] == ["f-orphan"]
+
+
 async def test_bogus_indices_are_dropped():
     candidates = [_f("f-1", "a", ["as-a"])]
     fake = FakeProvider(scripts=[{"ranked": [0, 7, -2, 0]}])

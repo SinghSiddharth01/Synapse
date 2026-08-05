@@ -30,8 +30,14 @@ RETRIEVER_SYSTEM = (
 
 
 def _visible_to(candidates: list[Finding], asking_agent_session: str) -> list[Finding]:
+    # A Finding is suppressed only when it HAS attributions and every one of
+    # them is the asking agent's own Agent Session. `all(...)` over an empty
+    # attributions list is vacuously True, so without the explicit
+    # `f.attributions and` guard a zero-attribution Finding would be
+    # suppressed for every possible asker -- the opposite of invariant 3.
     return [f for f in candidates
-            if not all(a.agent_session == asking_agent_session for a in f.attributions)]
+            if not (f.attributions
+                    and all(a.agent_session == asking_agent_session for a in f.attributions))]
 
 
 async def query_findings(provider: ModelProvider, *, context: SessionContext,
