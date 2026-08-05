@@ -49,14 +49,17 @@ class FindingSink(ABC):
 class HttpSink(FindingSink):
     """POSTs to the orchestrator's producer endpoint."""
 
-    def __init__(self, url: str, timeout: float = 30.0) -> None:
+    def __init__(self, url: str, timeout: float = 30.0, *,
+                 transport: httpx.AsyncBaseTransport | None = None) -> None:
         self.url = url
         self.timeout = timeout
+        self._transport = transport
 
     async def send(self, findings: list[Finding]) -> bool:
         payload = {"findings": [f.model_dump(mode="json") for f in findings]}
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            async with httpx.AsyncClient(timeout=self.timeout,
+                                         transport=self._transport) as client:
                 response = await client.post(self.url, json=payload)
                 response.raise_for_status()
             return True
