@@ -417,6 +417,14 @@ _PAGE = """<!doctype html>
 
   var activeTags = new Set(["llm", "query", "synthesis"]);
   var currentSid = null;
+  // Keys of currently-expanded feed entries, surviving the 1s poll's full
+  // innerHTML rebuild -- without this, clicking an entry open only lasts
+  // until the next refresh (up to 1s), never long enough to read a preview.
+  var expandedKeys = new Set();
+
+  function entryKey(tag, ts) {
+    return tag + "|" + ts;
+  }
 
   function esc(s) {
     var d = document.createElement("div");
@@ -431,6 +439,7 @@ _PAGE = """<!doctype html>
 
   document.getElementById("session-select").addEventListener("change", function (ev) {
     currentSid = ev.target.value;
+    expandedKeys.clear();
     refresh();
   });
 
@@ -452,7 +461,10 @@ _PAGE = """<!doctype html>
   document.getElementById("feed").addEventListener("click", function (ev) {
     var entry = ev.target.closest(".entry[data-tag]");
     if (!entry) return;
-    entry.classList.toggle("expanded");
+    var key = entry.getAttribute("data-key");
+    var nowExpanded = entry.classList.toggle("expanded");
+    if (!key) return;
+    if (nowExpanded) { expandedKeys.add(key); } else { expandedKeys.delete(key); }
   });
 
   function renderLogTail(logTail) {
@@ -478,15 +490,23 @@ _PAGE = """<!doctype html>
     session.merges.forEach(function (e) { merged.push({ tag: "synthesis", ts: e.ts_iso, data: e }); });
     merged.sort(function (a, b) { return a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0; });
 
+    // Drop any expanded key whose entry fell out of this snapshot (the
+    // bounded feed, or a session switch) -- otherwise expandedKeys would
+    // grow forever across a long session.
+    var liveKeys = new Set(merged.map(function (m) { return entryKey(m.tag, m.ts); }));
+    expandedKeys.forEach(function (k) { if (!liveKeys.has(k)) expandedKeys.delete(k); });
+
     if (!merged.length) { el.innerHTML = '<div class="empty">waiting for the first event…</div>'; return; }
 
     var html = "";
     for (var i = merged.length - 1; i >= 0; i--) {
       var m = merged[i];
+      var key = entryKey(m.tag, m.ts);
+      var cls = "entry" + (expandedKeys.has(key) ? " expanded" : "");
       if (m.tag === "llm") {
         var c = m.data;
         var ok = c.ok ? "ok" : "FAILED";
-        html += '<div class="entry" data-tag="llm">';
+        html += '<div class="' + cls + '" data-tag="llm" data-key="' + esc(key) + '">';
         html += '<span class="ts">' + esc(hhmmss(c.ts_iso)) + '</span>';
         html += '<span class="tag">llm</span>';
         html += '<span class="summary">' + esc(c.component) + " · " + esc(ok) + " · " +
@@ -499,7 +519,7 @@ _PAGE = """<!doctype html>
           "output:\\n" + esc(c.output_preview) + '</div>';
       } else {
         var e = m.data;
-        html += '<div class="entry" data-tag="' + esc(m.tag) + '">';
+        html += '<div class="' + cls + '" data-tag="' + esc(m.tag) + '" data-key="' + esc(key) + '">';
         html += '<span class="ts">' + esc(hhmmss(e.ts_iso)) + '</span>';
         html += '<span class="tag">' + esc(m.tag) + '</span>';
         html += '<span class="summary">' + esc(e.summary) + '</span>';
@@ -508,7 +528,9 @@ _PAGE = """<!doctype html>
     }
     el.innerHTML = html;
     // Re-parent each just-emitted .detail block under the .entry right
-    // before it, same trick as the worker page, so the click toggle finds it.
+    // before it, same trick as the worker page, so the click toggle finds
+    // it. The "expanded" class was already set above from expandedKeys, so
+    // a re-render mid-poll doesn't collapse an entry the user has open.
     el.querySelectorAll('.entry[data-tag="llm"]').forEach(function (entry) {
       var next = entry.nextElementSibling;
       if (next && next.classList.contains("detail")) entry.appendChild(next);

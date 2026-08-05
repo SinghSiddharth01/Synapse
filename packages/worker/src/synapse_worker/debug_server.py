@@ -261,6 +261,14 @@ _PAGE = """<!doctype html>
 
   var activeTags = new Set(["tick", "triage", "render", "llm", "push", "error"]);
   var heldSince = null; // client-side clock: when pending_events last became > 0
+  // Keys of currently-expanded llm entries, surviving the 1s poll's full
+  // innerHTML rebuild -- without this, clicking an entry open only lasts
+  // until the next refresh (up to 1s), never long enough to read a preview.
+  var expandedKeys = new Set();
+
+  function llmKey(c) {
+    return c.ts_iso + "|" + c.component;
+  }
 
   function esc(s) {
     var d = document.createElement("div");
@@ -305,7 +313,10 @@ _PAGE = """<!doctype html>
   document.getElementById("feed").addEventListener("click", function (ev) {
     var entry = ev.target.closest(".entry[data-tag='llm']");
     if (!entry) return;
-    entry.classList.toggle("expanded");
+    var key = entry.getAttribute("data-key");
+    var nowExpanded = entry.classList.toggle("expanded");
+    if (!key) return;
+    if (nowExpanded) { expandedKeys.add(key); } else { expandedKeys.delete(key); }
   });
 
   function renderFeed(events) {
@@ -332,6 +343,10 @@ _PAGE = """<!doctype html>
     // first, using each call's own timestamp — same visual language, and
     // clicking one expands its previews/tokens/latency.
     var feed = document.getElementById("feed");
+    // Drop any expanded key whose call fell out of the (bounded) ring buffer
+    // -- otherwise expandedKeys would grow forever across a long session.
+    var liveKeys = new Set(calls.map(llmKey));
+    expandedKeys.forEach(function (k) { if (!liveKeys.has(k)) expandedKeys.delete(k); });
     var merged = events.map(function (e) { return { kind: "event", ts: e.ts_iso, data: e }; });
     calls.forEach(function (c) {
       merged.push({ kind: "llm", ts: c.ts_iso, data: c });
@@ -355,7 +370,9 @@ _PAGE = """<!doctype html>
       } else {
         var c = m.data;
         var ok = c.ok ? "ok" : "FAILED";
-        html += '<div class="entry" data-tag="llm">';
+        var key = llmKey(c);
+        var cls = "entry" + (expandedKeys.has(key) ? " expanded" : "");
+        html += '<div class="' + cls + '" data-tag="llm" data-key="' + esc(key) + '">';
         html += '<span class="ts">' + esc(hhmmss(c.ts_iso)) + '</span>';
         html += '<span class="tag">llm</span>';
         html += '<span class="summary">' + esc(c.component) + " · " + esc(ok) +
@@ -372,7 +389,10 @@ _PAGE = """<!doctype html>
     }
     feed.innerHTML = html;
     // The detail block just emitted belongs to the .entry right before it in
-    // DOM order; re-attach it as a child so the expand toggle finds it.
+    // DOM order; re-attach it as a child so the expand toggle finds it. The
+    // "expanded" class (and thus the detail's visibility) was already set
+    // above from expandedKeys, so a re-render mid-poll doesn't collapse an
+    // entry the user has open.
     var entries = feed.querySelectorAll('.entry[data-tag="llm"]');
     entries.forEach(function (entry) {
       var next = entry.nextElementSibling;
