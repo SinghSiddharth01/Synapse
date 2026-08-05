@@ -20,10 +20,6 @@ import synapse_orchestrator.cli as cli
 from synapse_contracts.binding import SessionBinding, write_binding
 
 
-def _never_called(request: httpx.Request) -> httpx.Response:
-    raise AssertionError(f"no real network call expected, got {request.url}")
-
-
 def test_defaults_to_localhost_8787(monkeypatch, tmp_path) -> None:
     calls = []
     monkeypatch.setattr(cli.uvicorn, "run", lambda app, **kw: calls.append(kw))
@@ -283,7 +279,10 @@ def test_resync_fails_loudly_when_the_push_does_not_succeed(tmp_path, capsys) ->
                        pinned_at=datetime(2026, 8, 4, tzinfo=timezone.utc)),
     )
     # Seed the relay's durable log directly, as if a finding had been recorded
-    # by an earlier producer POST and never acknowledged.
+    # by an earlier producer POST and never acknowledged. Envelope format per
+    # relay.py's post-review partition amendment: {"shared_id": ..., "finding": ...}.
+    import json as _json
+
     from synapse_contracts import Attribution, Finding
     relay_dir = tmp_path / "relay"
     relay_dir.mkdir(parents=True)
@@ -291,7 +290,8 @@ def test_resync_fails_loudly_when_the_push_does_not_succeed(tmp_path, capsys) ->
                       attributions=[Attribution(contributor="aditya", agent_session="as-1",
                                                 agent="claude-code")],
                       ts=datetime(2026, 8, 4, tzinfo=timezone.utc))
-    (relay_dir / "findings.jsonl").write_text(finding.model_dump_json() + "\n")
+    envelope = {"shared_id": "sh-joined", "finding": _json.loads(finding.model_dump_json())}
+    (relay_dir / "findings.jsonl").write_text(_json.dumps(envelope) + "\n")
 
     def down(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("down")
@@ -304,23 +304,46 @@ def test_resync_fails_loudly_when_the_push_does_not_succeed(tmp_path, capsys) ->
     assert "re-pushed 0 finding(s)" not in out
 
 
-def test_resync_with_nothing_bound_never_egresses_to_a_fabricated_session(tmp_path, capsys) -> None:
-    """No binding at all + something pending: resync must not invent a session
-    id ('unbound') to post real Findings to."""
+def test_resync_pushes_a_previously_recorded_session_even_when_now_unbound(
+    tmp_path, capsys
+) -> None:
+    """Post-review amendment (2026-08-04): resync() pushes each retained
+    Finding to the Shared Session it was RECORDED under (relay.py), never to
+    whatever happens to be currently bound (or unbound). No bindings/ dir
+    exists in this test at all -- yet the Finding tagged with a real,
+    previously-recorded session ("sh-old") still goes out; a Finding tagged
+    None (recorded while genuinely unbound) never can and is excluded from
+    both the push and the 'total retained' count."""
+    import json as _json
+
     from synapse_contracts import Attribution, Finding
     relay_dir = tmp_path / "relay"
     relay_dir.mkdir(parents=True)
-    finding = Finding(id="f-stuck", type="learning", text="insight",
-                      attributions=[Attribution(contributor="aditya", agent_session="as-1",
-                                                agent="claude-code")],
-                      ts=datetime(2026, 8, 4, tzinfo=timezone.utc))
-    (relay_dir / "findings.jsonl").write_text(finding.model_dump_json() + "\n")
+
+    def _envelope(shared_id, fid):
+        finding = Finding(id=fid, type="learning", text="insight",
+                          attributions=[Attribution(contributor="aditya", agent_session="as-1",
+                                                    agent="claude-code")],
+                          ts=datetime(2026, 8, 4, tzinfo=timezone.utc))
+        return _json.dumps({"shared_id": shared_id, "finding": _json.loads(finding.model_dump_json())})
+
+    lines = [_envelope("sh-old", "f-old"), _envelope(None, "f-never-bound")]
+    (relay_dir / "findings.jsonl").write_text("\n".join(lines) + "\n")
+
+    hit = []
+    def up(request: httpx.Request) -> httpx.Response:
+        hit.append(str(request.url))
+        return httpx.Response(200, json={"accepted": 1, "memory_version": 1})
 
     exit_code = cli.main(["--state-dir", str(tmp_path), "resync"],
-                         transport=httpx.MockTransport(_never_called))
+                         transport=httpx.MockTransport(up))
 
-    assert exit_code == 1
-    assert "unbound" in capsys.readouterr().out
+    assert exit_code == 0
+    assert hit == ["http://127.0.0.1:8899/v1/sessions/sh-old/findings"]  # NOT a fabricated
+                                                                          # "unbound" session
+    out = capsys.readouterr().out
+    assert "re-pushed 1 finding(s)" in out
+    assert "current session: 'unbound'" in out
 
 
 def test_build_npu_distiller_matches_the_workers_config_pack_and_model(monkeypatch) -> None:

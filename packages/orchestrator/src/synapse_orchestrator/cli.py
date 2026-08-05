@@ -111,21 +111,31 @@ def build_parser() -> argparse.ArgumentParser:
 
 async def cmd_resync(args: argparse.Namespace, *,
                      transport: httpx.AsyncBaseTransport | None = None) -> int:
+    """`resync()` itself is a bare int — the plan's documented signature,
+    restored post-review (relay.py's module docstring). The distinction
+    between "nothing to push" and "push failed" that a prior pass had baked
+    into `resync()`'s return type instead comes from comparing it against
+    `retained_count()` — the count of everything in the log that COULD be
+    pushed (i.e. was ever recorded under a real Shared Session, across every
+    session in the backlog, not just the one currently bound)."""
     state_dir = Path(args.state_dir)
     binding = _resolve_binding(state_dir)
     shared_id = binding.shared_id if binding is not None else None
     relay = Relay(state_dir / "relay", args.service_url, shared_id, transport=transport)
-    pushed, total = await relay.resync()
+    total = relay.retained_count()
+    pushed = await relay.resync()
     label = shared_id or "unbound"
-    # (pushed, total) tells "nothing to push" (0, 0) apart from "push failed"
-    # (0, N>0) — collapsing both into one number reported a failed resync
-    # (service down, or no Shared Session bound) as indistinguishable success.
+    # total==0 means nothing was ever recorded — trivially "successful".
+    # pushed < total means something WAS recorded but didn't fully make it
+    # out — collapsing both into one number reported a failed resync
+    # (service down, or the recorded session unreachable) as indistinguishable
+    # from success.
     if total and pushed < total:
-        print(f"resync: FAILED — 0 of {total} finding(s) re-pushed for session {label!r}; "
-              "is the service reachable, and is a Shared Session joined "
-              "(`synapse-worker join <shared_id>`)?")
+        print(f"resync: FAILED — {pushed} of {total} finding(s) re-pushed across the "
+              f"retained log (current session: {label!r}); is the service reachable, "
+              "and is a Shared Session joined (`synapse-worker join <shared_id>`)?")
         return 1
-    print(f"resync: re-pushed {pushed} finding(s) for session {label!r}")
+    print(f"resync: re-pushed {pushed} finding(s) (current session: {label!r})")
     return 0
 
 
