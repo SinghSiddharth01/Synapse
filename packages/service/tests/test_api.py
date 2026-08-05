@@ -1,4 +1,6 @@
 """Full-surface test over ASGITransport — no sockets, FakeProvider scripted."""
+import re
+
 import httpx
 import pytest
 from synapse_providers import FakeProvider
@@ -6,6 +8,24 @@ from synapse_providers import FakeProvider
 from synapse_service.api import build_app
 
 MERGE_NOOP = {"working_memory": "wm-1", "merges": [], "trivial_ids": [], "conflicts": []}
+
+
+class _RecordingProvider(FakeProvider):
+    """Records the finding ids listed in each merge prompt, so a test can
+    assert on WHICH candidates synthesis was offered -- not just on the
+    verdict it returned. Mirrors test_synthesis.py's helper of the same
+    name; duplicated rather than imported so this suite stays a pure
+    over-ASGI black-box test with no reach into synthesis's own test
+    module."""
+
+    def __init__(self, scripts):
+        super().__init__(scripts=scripts)
+        self.seen: list[list[str]] = []
+
+    async def complete(self, messages, response_schema=None):
+        listing = messages[-1]["content"]
+        self.seen.append(re.findall(r"\[([^\]]+)\]", listing))
+        return await super().complete(messages, response_schema)
 
 
 def _finding_json(fid: str, agent_session: str = "as-1") -> dict:
@@ -177,3 +197,27 @@ async def test_every_route_returns_422_on_a_missing_required_field_not_500():
         r = await client.post(f"/v1/sessions/{sid}/query",
                               json={"agent_session": "as-x"})           # missing query
         assert r.status_code == 422 and "error" in r.json()
+
+
+async def test_push_larger_than_candidate_window_reaches_the_merge_prompt_via_the_route():
+    """API-level pin for the CANDIDATE_WINDOW starvation fix (E3 residual,
+    Finding #10). synthesis.py's own unit tests already pin this at the
+    Synthesizer level (test_a_push_larger_than_the_candidate_window_is_not_
+    starved); this test pins it at the ROUTE api.py actually calls.
+    api.py's `await synthesizer.merge(store, sid, findings)` -- findings,
+    not [] -- is the fix; before this test, nothing at the API level
+    failed if that call regressed back to `merge(store, sid, [])` (the
+    verifier confirmed the full service+synthesis suite passed either
+    way)."""
+    from synapse_service.synthesis import CANDIDATE_WINDOW
+
+    provider = _RecordingProvider(scripts=[MERGE_NOOP])
+    async with _client(provider) as client:
+        sid = (await client.post("/v1/sessions", json={"purpose": "p", "created_by": "s"})
+               ).json()["shared_id"]
+        batch_size = CANDIDATE_WINDOW + 5
+        findings = [_finding_json(f"f-{i:02d}") for i in range(batch_size)]
+        r = await client.post(f"/v1/sessions/{sid}/findings", json={"findings": findings})
+        assert r.json()["accepted"] == batch_size
+
+    assert set(provider.seen[0]) == {f["id"] for f in findings}   # every pushed id offered, none starved
