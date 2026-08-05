@@ -5,7 +5,9 @@ import re
 import pytest
 
 from synapse_contracts import Finding, Segment
+from synapse_distiller.config import load_config
 from synapse_distiller.fixtures import available_fixtures, fixtures_root, load_goldens, load_segment
+from synapse_distiller.prompt import render_segment
 
 EXPECTED_IDS = ["seg-001", "seg-002", "seg-003", "seg-004",
                 "seg-005a", "seg-005b", "seg-006", "seg-007"]
@@ -45,6 +47,42 @@ def test_seg003_error_is_buried_in_an_oversized_tool_result():
     assert 0.3 < pos < 0.7, "the error must be buried mid-log, not at head or tail"
     types = {f.type.value for f in load_goldens("seg-003")}
     assert "dead_end" in types
+
+
+def test_seg003_buried_error_reaches_the_model_only_via_prose_under_shipped_config():
+    """The test above pins that seg-003's tool_result *file* is oversized with
+    a buried error, but asserted nothing about system behaviour on it. Under
+    the shipped config (config/synapse.toml: distil_kinds = ("text",)),
+    tool_result events never reach the model at all — so the buried
+    ConnectionResetError line is not truncated or split by a budget, it is
+    simply absent, and the dead_end golden is only reachable because the
+    assistant's own prose (event 5) restates the failure in words. That means
+    seg-003 exercises the same code path as seg-002 today; no compaction or
+    budget-splitting behaviour is pinned by this fixture until distil_kinds
+    is widened and/or A.5 (compaction) lands. This test pins the current,
+    honest state so that claim cannot silently go stale in either direction."""
+    segment = load_segment("seg-003")
+    config = load_config()
+    rendered = render_segment(segment, config.distil_kinds, config.render_style)
+    assert "ConnectionResetError" not in rendered, (
+        "if this now fails, distil_kinds/render config changed such that the "
+        "buried tool_result reaches the model — update this test and stop "
+        "saying the dead_end survives only via prose restatement"
+    )
+    assert "connection reset during the response flush" in rendered, (
+        "the dead_end must still be recoverable via the assistant's own "
+        "prose even though the raw tool_result is excluded by default"
+    )
+    # Even widening to every kind, this fixture does not reach the derived
+    # budget, so no truncation/compaction path exists for it to pin yet.
+    full = render_segment(segment, kinds=None, style=config.render_style)
+    estimated_tokens = len(full) / 3.5
+    assert estimated_tokens < config.segment_budget, (
+        "seg-003 now exceeds the derived budget even including every event "
+        "kind; if that's intentional, wire compaction (A.5) rather than "
+        "relying on distil_kinds filtering to avoid truncation, and flip "
+        "this assertion to pin the new boundary deliberately"
+    )
 
 
 def test_seg005_pair_is_a_merge_candidate():
