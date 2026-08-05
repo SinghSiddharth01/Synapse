@@ -407,6 +407,29 @@ async def test_unknown_ids_from_the_model_are_ignored_not_fatal():
     assert ctx.memory_version == 1                                # merge() still completed
 
 
+async def test_a_merge_verdict_with_ALL_ghost_source_ids_lands_nothing():
+    """The `if not sources: continue` guard's own regression pin -- the
+    sibling above (`..._are_ignored_not_fatal`) covers one-valid-plus-one-
+    ghost, which still has a live source and so never exercises the empty
+    branch. Delete the `continue` (fall through with `sources == []`) and
+    this landed a phantom `Finding(attributions=[], merged_from=[])`:
+    unattributed, untraceable to any Contributor, and -- because
+    `retrieval.visible_to`'s suppression guard is `f.attributions and ...`
+    -- un-suppressible for every asker forever. Exactly the adr/0003
+    invented-finding failure mode, one `continue` away from Shared Memory."""
+    store = InMemoryStore()
+    sid = store.create_session(purpose="p", created_by="s").shared_id
+    script = {"working_memory": "wm",
+              "merges": [{"source_ids": ["f-GHOST-1", "f-GHOST-2"], "text": "invented",
+                         "type": "learning"}],
+              "trivial_ids": [], "conflicts": []}
+    ctx = await Synthesizer(FakeProvider(scripts=[script])).merge(store, sid, _pair())
+
+    merged = [f for f in store.all_findings(sid) if f.provenance == Provenance.SYNTHESIZED]
+    assert merged == []
+    assert ctx.memory_version == 1                                # verdict round still applied
+
+
 async def test_an_old_near_duplicate_outside_the_last_twenty_is_a_merge_candidate():
     """THE product claim. Impossible on main today: `others` was a pure
     recency slice, so in a 40-finding session findings 1-20 were permanently
