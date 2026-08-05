@@ -341,21 +341,47 @@ def test_fail_open_when_the_state_file_is_corrupt(tmp_path, watermark):
 
 
 # ---------------------------------------------------------------------------
-# Binding resolution mirrors synapse_orchestrator.cli._resolve_binding: most
-# recently pinned product wins, and CLAUDE_PROJECT_DIR is honoured when the
-# test-only SYNAPSE_STATE_DIR override is absent.
+# Binding resolution is scoped to THIS pack's own product only
+# (bindings/claude-code.json) -- never "whichever product was pinned most
+# recently", the mistake `synapse_orchestrator.cli._resolve_binding_for_agent`
+# already fixed once on the egress side. CLAUDE_PROJECT_DIR is honoured when
+# the test-only SYNAPSE_STATE_DIR override is absent.
 # ---------------------------------------------------------------------------
 
-def test_the_most_recently_pinned_product_wins_when_two_are_bound(tmp_path, watermark):
+def test_only_the_claude_code_binding_is_used_even_when_codex_was_pinned_more_recently(tmp_path, watermark):
+    """This hook lives in packs/claude-code/ and speaks only for a Claude
+    Code agent. A machine with both products joined -- Plan D.2's
+    explicitly supported "Claude Code and Codex can sit in different
+    Shared Sessions" -- must never let a later Codex join change what THIS
+    hook reports, even though `codex.json`'s `pinned_at` is newer."""
     state_dir = tmp_path / ".synapse"
-    _write_binding(state_dir, agent="claude-code", shared_id="sess-old",
-                   agent_session_id="as-old", pinned_at="2026-08-05T09:00:00.000000Z")
-    _write_binding(state_dir, agent="codex", shared_id="sess-new",
-                   agent_session_id="as-new", pinned_at="2026-08-05T10:00:00.000000Z")
+    _write_binding(state_dir, agent="claude-code", shared_id="sess-claude",
+                   agent_session_id="as-claude", pinned_at="2026-08-05T09:00:00.000000Z")
+    _write_binding(state_dir, agent="codex", shared_id="sess-codex",
+                   agent_session_id="as-codex", pinned_at="2026-08-05T10:00:00.000000Z")
 
     _run_hook(state_dir, watermark.url)
 
-    assert watermark.paths[0].startswith("/v1/sessions/sess-new/watermark")
+    assert len(watermark.paths) == 1
+    assert watermark.paths[0].startswith("/v1/sessions/sess-claude/watermark")
+    assert "agent_session=as-claude" in watermark.paths[0]
+
+
+def test_silent_when_only_codex_is_bound(tmp_path, watermark):
+    """A Codex-only join must not leak into this Claude Code hook just
+    because it is the only binding on disk -- the same wrong-product
+    failure mode as above, minus the distractor of a second binding, and
+    the shape a fresh Codex-only machine actually has."""
+    state_dir = tmp_path / ".synapse"
+    _write_binding(state_dir, agent="codex", shared_id="sess-codex",
+                   agent_session_id="as-codex")
+
+    result = _run_hook(state_dir, watermark.url)
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert result.stderr == ""
+    assert len(watermark.paths) == 0  # never even reached the network
 
 
 def test_state_dir_resolves_from_claude_project_dir_when_no_override_is_set(tmp_path, watermark):

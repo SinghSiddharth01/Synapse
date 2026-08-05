@@ -89,38 +89,52 @@ def _state_dir() -> Path:
     return Path(project_dir if project_dir else os.getcwd()) / ".synapse"
 
 
+# This pack lives in packs/claude-code/, is installed into a project's own
+# .claude/, and emits UserPromptSubmit output for a Claude Code agent only
+# -- see `_load_binding`.
+_AGENT_PRODUCT = "claude-code"
+
+
 def _load_binding(state_dir: Path) -> dict | None:
-    """The most recently pinned binding across every Agent product — same
-    "most recently joined wins" rule as
-    `synapse_orchestrator.cli._resolve_binding`, reimplemented by hand
-    here (no `synapse_contracts` import: see module docstring). Comparing
-    `pinned_at` as a plain string is safe because
-    `SessionBinding.model_dump_json` always writes it as fixed-width-
-    microsecond UTC ISO-8601 (`...T10:00:00.000000Z`), which sorts
-    correctly without parsing it as a datetime.
+    """This pack's OWN product's binding, `bindings/claude-code.json`, and
+    only that — deliberately NOT "the most recently pinned binding across
+    every Agent product" the way `synapse_orchestrator.cli._resolve_binding`
+    picks for its single "current MCP connection" context. That pick is
+    correct for the orchestrator, which serves exactly one live connection
+    at a time and needs one answer to "which binding is current"; it is
+    wrong here, because this hook is a per-PRODUCT artifact that can only
+    ever legitimately speak for its own product's Agent Session.
+
+    Divergence across products is explicitly supported, not hypothetical
+    (Plan D.2: "one laptop holds several bindings -- one per Agent Session;
+    Claude Code and Codex can sit in different Shared Sessions"), and
+    `join_session` (`synapse_worker.discovery`) writes to exactly one
+    product's binding file per invocation, never touching the other's. A
+    hook that read across products would, on a machine with both joined,
+    inject a DIFFERENT session's version, `new_since` count and topic
+    labels into this Claude Code agent's context the moment a teammate ran
+    `synapse-worker join` for Codex more recently than this project's own
+    Claude Code join -- the same class of cross-Shared-Session leak
+    `synapse_orchestrator.cli._resolve_binding_for_agent`'s docstring
+    records fixing on the egress side (round 3 review), mirrored here on
+    ingress.
 
     Returns the raw dict, not a `SessionBinding` — no pydantic dependency
-    here — or None if no binding is readable. One corrupt or
-    partially-written file is skipped, not fatal to the others.
+    here (see module docstring) — or None if the file is missing, corrupt,
+    or not the expected shape.
     """
-    bindings_dir = state_dir / "bindings"
-    if not bindings_dir.is_dir():
+    path = state_dir / "bindings" / f"{_AGENT_PRODUCT}.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
         return None
-    best: dict | None = None
-    for path in sorted(bindings_dir.glob("*.json")):
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        if not isinstance(data, dict):
-            continue
-        if not (isinstance(data.get("shared_id"), str)
-                and isinstance(data.get("agent_session_id"), str)
-                and isinstance(data.get("pinned_at"), str)):
-            continue
-        if best is None or data["pinned_at"] > best["pinned_at"]:
-            best = data
-    return best
+    if not isinstance(data, dict):
+        return None
+    if not (isinstance(data.get("shared_id"), str)
+            and isinstance(data.get("agent_session_id"), str)
+            and isinstance(data.get("pinned_at"), str)):
+        return None
+    return data
 
 
 def _fetch_watermark(service_url: str, shared_id: str, agent_session_id: str) -> dict:
