@@ -281,6 +281,58 @@ async def test_replay_with_nothing_pending(capsys) -> None:
     assert "sent 0, still pending 0" in capsys.readouterr().out
 
 
+async def test_replay_skipped_redistils_and_archives(tmp_path, monkeypatch, capsys) -> None:
+    """A triage-skipped segment can be forced through the pipeline later.
+
+    Deviation from the plan's literal test body: this file has no `invoke_cli`
+    helper and no existing FakeProvider-backed CLI test, so the arrange block
+    follows this file's actual pattern instead — call `cli.cmd_replay(_ns(...))`
+    directly (same as every other test in this section) and monkeypatch
+    `cli.build_distiller` (the construction path extracted below) to return a
+    FakeProvider-backed Distiller rather than reaching a real NPU.
+    """
+    from synapse_contracts import AgentEvent, LocalBinding, Segment
+    from synapse_distiller import Distiller, load_pack_by_name
+    from synapse_providers import FakeProvider
+    from synapse_worker.triage_log import TriageLog
+
+    state_dir = tmp_path / ".synapse"  # config default, relative to the isolated cwd
+    ts = datetime(2026, 8, 4, tzinfo=timezone.utc)
+    seg = Segment(id="s-skipped", agent_session_id="as-t",
+                  events=[AgentEvent(role="assistant", kind="text",
+                                     content="ruff run, all clean", ts=ts,
+                                     agent_session_id="as-t")],
+                  started_at=ts, ended_at=ts)
+    TriageLog(state_dir).record_skip(seg, "lint-clean")
+
+    fake_distiller = Distiller(
+        FakeProvider(scripts=[{"findings": [{"type": "learning", "text": "redistilled"}]}]),
+        LocalBinding(agent_session_id="replay", shared_id="local-dev",
+                     contributor="aditya", agent=cli.DEFAULT_AGENT),
+        load_pack_by_name("v2-hardened"),
+        ["text"],
+        "labelled",
+    )
+    monkeypatch.setattr(cli, "build_distiller", lambda config, binding: fake_distiller)
+
+    exit_code = await cli.cmd_replay(_ns(skipped=True))
+
+    assert exit_code == 0
+    assert TriageLog(state_dir).load_skipped() == []          # archived
+    archives = list(state_dir.glob("triage-skips.replayed-*.jsonl"))
+    assert len(archives) == 1
+    sink_file = state_dir / "upstream.jsonl"                  # findings flowed
+    assert sink_file.exists() and sink_file.read_text().strip()
+    assert "Replayed 1 skipped segments -> 1 findings" in capsys.readouterr().out
+
+
+async def test_replay_skipped_with_nothing_pending(tmp_path, capsys) -> None:
+    exit_code = await cli.cmd_replay(_ns(skipped=True))
+
+    assert exit_code == 0
+    assert "No triage-skipped segments to replay." in capsys.readouterr().out
+
+
 async def test_replay_delivers_queued_findings(tmp_path, capsys) -> None:
     """cmd_replay builds its own Producer from config's default paths
     (.synapse/wal, .synapse/upstream.jsonl, both relative to cwd) -- seed the
@@ -385,6 +437,7 @@ class _Namespace:
         self.interval = None
         self.ticks = 1
         self.from_start = False
+        self.skipped = False
         for key, value in kwargs.items():
             setattr(self, key, value)
 

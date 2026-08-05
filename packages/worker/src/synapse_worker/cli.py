@@ -42,8 +42,32 @@ from synapse_worker.discovery import (
 )
 from synapse_worker.loop import WorkerLoop
 from synapse_worker.producer import FileSink, HttpSink, Producer
+from synapse_worker.triage_log import TriageLog
 
 DEFAULT_AGENT = "claude-code"  # the only Source adapter that exists (Plan A.3)
+
+
+def build_distiller(config, binding: LocalBinding) -> Distiller:
+    """One construction path for a config-driven Distiller.
+
+    Shared by `cmd_run` (via `_build`) and `cmd_replay --skipped` (Task 3) so
+    there is exactly one place that turns a `SynapseConfig` into a live
+    NPU-backed `Distiller` — the binding is the only thing that varies.
+    """
+    provider = NPUProvider(
+        base_url=config.provider.base_url,
+        model=config.model,
+        max_tokens=config.provider.max_tokens,
+        temperature=config.provider.temperature,
+        timeout=config.provider.timeout_s,
+    )
+    return Distiller(
+        provider,
+        binding,
+        load_pack_by_name(config.prompt_pack_name),
+        config.distil_kinds,
+        config.render_style,
+    )
 
 
 def _build(args: argparse.Namespace):
@@ -77,20 +101,7 @@ def _build(args: argparse.Namespace):
             contributor=args.contributor,
             agent=DEFAULT_AGENT,
         )
-    provider = NPUProvider(
-        base_url=config.provider.base_url,
-        model=config.model,
-        max_tokens=config.provider.max_tokens,
-        temperature=config.provider.temperature,
-        timeout=config.provider.timeout_s,
-    )
-    distiller = Distiller(
-        provider,
-        binding,
-        load_pack_by_name(config.prompt_pack_name),
-        config.distil_kinds,
-        config.render_style,
-    )
+    distiller = build_distiller(config, binding)
     loop = WorkerLoop(
         transcript=transcript,
         distiller=distiller,
@@ -218,7 +229,11 @@ async def cmd_status(args: argparse.Namespace) -> int:
 
 
 async def cmd_replay(args: argparse.Namespace) -> int:
-    """Drain anything the sink rejected earlier. Idempotent by Finding.id."""
+    """Drain anything the sink rejected earlier. Idempotent by Finding.id.
+
+    `--skipped` re-distils every segment triage skipped and archives the skip
+    log — a wrong triage skip is recoverable, not permanent loss.
+    """
     config = load_config()
     state_dir = Path(config.worker.state_dir)
     sink = (
@@ -227,6 +242,35 @@ async def cmd_replay(args: argparse.Namespace) -> int:
         else FileSink(Path(config.worker.sink_file))
     )
     producer = Producer(state_dir / "wal", sink)
+
+    if args.skipped:
+        log = TriageLog(state_dir)
+        skipped = log.load_skipped()
+        if not skipped:
+            print("No triage-skipped segments to replay.")
+            return 0
+        # One binding for the whole batch, same shape as `_build`'s but with no
+        # transcript to resolve one from — the original per-segment
+        # agent_session_id is not preserved here, only the segment content.
+        binding = LocalBinding(
+            agent_session_id="replay",
+            shared_id=args.shared_id,
+            contributor=args.contributor,
+            agent=DEFAULT_AGENT,
+        )
+        distiller = build_distiller(config, binding)
+        replayed = 0
+        for segment, reason in skipped:
+            findings, stats = await distiller.distil(segment)
+            if not stats.skipped_empty and findings:
+                producer.record(findings)
+                replayed += len(findings)
+        sent, pending = await producer.flush()
+        archived = log.archive()
+        print(f"Replayed {len(skipped)} skipped segments -> {replayed} findings "
+              f"({sent} sent, {pending} queued). Log archived to {archived.name}.")
+        return 0
+
     sent, still_pending = await producer.flush()
     print(f"sent {sent}, still pending {still_pending}")
     return 0 if still_pending == 0 else 1
@@ -261,6 +305,12 @@ def build_parser() -> argparse.ArgumentParser:
     status.set_defaults(func=cmd_status)
 
     replay = sub.add_parser("replay", help="retry undelivered findings")
+    replay.add_argument(
+        "--skipped", action="store_true",
+        help="re-distil segments triage skipped, then archive the skip log",
+    )
+    replay.add_argument("--contributor", default="aditya")
+    replay.add_argument("--shared-id", default="local-dev")
     replay.set_defaults(func=cmd_replay)
 
     return parser
