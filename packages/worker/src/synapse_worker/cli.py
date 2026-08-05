@@ -49,16 +49,17 @@ from synapse_worker.discovery import (
     resolve_transcript,
 )
 from synapse_worker.loop import WorkerLoop
-from synapse_worker.producer import FileSink, HttpSink, Producer
+from synapse_worker.producer import FileSink, HttpSink, Producer, read_last_bound_shared_id
 from synapse_worker.stats import StatsBuffer
 from synapse_worker.triage_log import TriageLog
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_AGENT = "claude-code"  # the only Source adapter that exists (Plan A.3)
-DEFAULT_SHARED_ID = "local-dev"  # `run`'s un-joined fallback; also what a Producer
-# built outside a WorkerLoop (`status`, plain `replay`) treats as "current" when
-# nothing has been joined — see `_current_shared_id`.
+DEFAULT_SHARED_ID = "local-dev"  # `run`'s un-joined fallback; also what
+# `_current_shared_id` treats as "current" when NEITHER a join binding NOR
+# the WAL's last-bound marker have ever recorded anything — a genuinely
+# fresh install.
 DEFAULT_DEBUG_PORT = 8790
 
 
@@ -66,13 +67,22 @@ def _current_shared_id(state_dir: Path) -> str:
     """The Shared Session a Producer built OUTSIDE a WorkerLoop should treat
     as "current" for the re-join envelope's held/deliverable split
     (producer.py's module docstring, STATE.md trap #8): the pinned binding
-    if `join` has been run for this agent, else the same fallback `_build`
-    uses when nothing has been joined yet. `WorkerLoop.__init__` handles this
-    itself (`producer.rebind(binding.shared_id)`); `cmd_status` and
-    `cmd_replay` build their own Producer with no loop around it, so they
-    call this directly."""
+    if `join` has been run for this agent; else whatever `rebind()` last
+    bound this WAL to LIVE (`producer.py`'s `read_last_bound_shared_id` —
+    an un-joined `run --shared-id X` calls `rebind("X")` once at startup
+    regardless of whether that run ever produces a finding worth `record()`ing,
+    so this reflects the most recently LIVE binding, not merely the most
+    recently WRITTEN one — see producer.py's AMENDMENT for why that
+    distinction is load-bearing); else `DEFAULT_SHARED_ID`, for a WAL never
+    bound to anything at all. `WorkerLoop.__init__` handles the
+    joined/running case itself (`producer.rebind(binding.shared_id)`);
+    `cmd_status` and `cmd_replay` build their own Producer with no loop
+    around it, so they call this directly."""
     joined = read_binding(binding_path_for_agent(state_dir, DEFAULT_AGENT))
-    return joined.shared_id if joined is not None else DEFAULT_SHARED_ID
+    if joined is not None:
+        return joined.shared_id
+    last = read_last_bound_shared_id(state_dir / "wal")
+    return last if last is not None else DEFAULT_SHARED_ID
 
 
 def build_distiller(config, binding: LocalBinding) -> Distiller:

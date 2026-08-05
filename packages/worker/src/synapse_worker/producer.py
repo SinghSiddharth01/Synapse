@@ -62,6 +62,41 @@ instead of being silently stranded by a partitioning rule it predates. A
 Finding explicitly recorded while unbound (`self.shared_id is None`) gets
 the same treatment for the same reason — it can never be mistaken for a
 wrong real session, so it stays deliverable under whatever binds next.
+
+AMENDMENT (fixer pass, major): the envelope above assumes something else
+knows what "the current binding" is when a fresh `Producer` is constructed
+with no `WorkerLoop` around it (`synapse-worker status` / `replay`'s plain
+path — `cli._current_shared_id`). Before this fix, that CLI helper only ever
+consulted the `join`ed binding file, falling back to a hardcoded
+`DEFAULT_SHARED_ID` ("local-dev") when nothing was joined. But `run
+--shared-id X` with no prior `join` still tags every envelope it writes with
+`X` (`WorkerLoop.__init__` -> `rebind(binding.shared_id)`) — that binding
+lives only in THAT process's memory, not on disk anywhere `_current_shared_id`
+looked. A later `status`/`replay` in a fresh process would then resolve
+"current" to "local-dev", see every entry tagged `X` as a mismatch, and
+report the run's own findings as `held (other session)` — held from itself,
+undeliverable until the user happened to `join X` even though nothing was
+ever actually re-targeted.
+
+A first attempt at this fix (re-deriving "current" from the `shared_id` tag
+on the WAL's own most recently WRITTEN envelope) turned out to just move the
+leak rather than close it: it only ever updated when a NEW finding was
+recorded, so a SECOND un-joined `run --shared-id Y` that never happened to
+produce a finding of its own left the WAL's last line — and therefore
+"current" — reading as the FIRST run's `X`, even though `Y` was the actually
+live session. A `replay` in a third process would then read "current" as
+`X`, treat `X`-tagged entries as deliverable, and ship them — while the
+live Shared Session was really `Y`. That is a real wrong-session delivery,
+worse than the cosmetic mis-report it replaced, and STATE.md trap #8 names
+exactly this class of bug.
+
+`rebind()` now persists the binding it is called with to a small marker file
+in `log_dir` (`_last_bound_path`), and `read_last_bound_shared_id()` below
+reads it back. This closes the gap `last_recorded_shared_id` (removed in
+this pass) did not: `rebind()` runs every time a real binding goes live
+(`WorkerLoop.__init__`, once per `run`), whether or not that run's segments
+ever produce a finding worth `record()`ing, so the marker always reflects
+the most recently LIVE binding rather than the most recently WRITTEN one.
 """
 
 from __future__ import annotations
@@ -76,6 +111,41 @@ import httpx
 from synapse_contracts import Finding
 
 logger = logging.getLogger(__name__)
+
+
+def _last_bound_path(log_dir: Path) -> Path:
+    return Path(log_dir) / "last-bound.json"
+
+
+def read_last_bound_shared_id(log_dir: Path) -> str | None:
+    """The `shared_id` the most recent real `rebind()` on this WAL directory
+    was actually bound to — durable across processes, unlike the in-memory
+    binding itself. `None` if `rebind()` has never run against this
+    `log_dir`, or the marker is corrupt.
+
+    See the module docstring's AMENDMENT: this is `cli._current_shared_id`'s
+    fallback of last resort when nothing has been `join`ed.
+    """
+    path = _last_bound_path(log_dir)
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        logger.warning("Last-bound marker at %s is unreadable; treating as unset", path)
+        return None
+    return data.get("shared_id")
+
+
+def _write_last_bound_shared_id(log_dir: Path, shared_id: str | None) -> None:
+    """Atomic, mirroring `synapse_contracts.binding.write_binding`'s
+    temp-then-replace pattern — a crash mid-write must never leave a corrupt
+    marker behind for `read_last_bound_shared_id` to trip over."""
+    path = _last_bound_path(log_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"shared_id": shared_id}), encoding="utf-8")
+    tmp.replace(path)
 
 
 class FindingSink(ABC):
@@ -159,8 +229,15 @@ class Producer:
         docstring's re-join guarantee hold: a still-queued Finding stays
         addressed to the session it was actually produced under, not
         whatever's bound when `flush()` next runs.
+
+        AMENDMENT (fixer pass, major): also persists `shared_id` to this
+        `log_dir`'s last-bound marker (`_write_last_bound_shared_id`) — see
+        the module docstring's AMENDMENT for why this, and not the WAL's own
+        content, is what `cli._current_shared_id` must read as its un-joined
+        fallback.
         """
         self.shared_id = shared_id
+        _write_last_bound_shared_id(self.log_dir, shared_id)
 
     def record(self, findings: list[Finding], *, shared_id: str | None = _UNSET) -> None:
         """Persist before any send is attempted. Call this first, always.

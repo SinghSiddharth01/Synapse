@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 from synapse_contracts import Attribution, Finding, FindingType
 
-from synapse_worker.producer import FileSink, FindingSink, Producer
+from synapse_worker.producer import FileSink, FindingSink, Producer, read_last_bound_shared_id
 
 TS = datetime(2026, 8, 4, 9, 0, tzinfo=timezone.utc)
 
@@ -234,3 +234,78 @@ async def test_a_finding_recorded_while_unbound_matches_any_binding(tmp_path) ->
     sent, pending = await producer.flush()
 
     assert (sent, pending) == (1, 0)
+
+
+# ---------------------------------------------------------------------------
+# The last-bound marker (fixer-major regression). `cli._current_shared_id`'s
+# un-joined fallback needs a durable trace of what an un-joined `run
+# --shared-id X`'s in-memory binding actually was -- `rebind()` is the only
+# place that ever changes it, so it is the only place that can durably
+# record it. See producer.py's module-docstring AMENDMENT for why the first
+# attempt (re-deriving "current" from the WAL's own last WRITTEN envelope)
+# reopened trap #8 rather than closing it.
+# ---------------------------------------------------------------------------
+
+async def test_rebind_persists_the_live_binding_for_a_fresh_producer_to_read(tmp_path) -> None:
+    """A fresh `Producer` built with no `shared_id` (simulating a new
+    process -- `synapse-worker status`/`replay`) must be able to read back
+    what the last real `rebind()` on this WAL directory bound to, without
+    needing anything to have been `record()`ed."""
+    producer = Producer(tmp_path, RecordingSink())
+    producer.rebind("team-a")
+
+    assert read_last_bound_shared_id(tmp_path) == "team-a"
+
+
+async def test_last_bound_marker_survives_a_rebind_that_records_nothing(tmp_path) -> None:
+    """The exact fixer-major scenario this closes. Two sequential un-joined
+    `run --shared-id ...` invocations share one WAL directory; the SECOND
+    run produces no finding of its own. A log-inspection fallback (the
+    superseded `last_recorded_shared_id`) would still read the FIRST run's
+    tag off the WAL's last-written line, since nothing new was ever written
+    under the second session -- a later `replay` would then flush the first
+    run's queued finding as though it were still current, while the live
+    session had actually moved on to the second. `rebind()` persisting on
+    every call, whether or not a `record()` follows it, is what fixes it."""
+    producer_a = Producer(tmp_path, FailingSink(), "team-a")
+    producer_a.rebind("team-a")             # WorkerLoop.__init__, run 1
+    producer_a.record([finding("f-1")])     # queued -- sink is down
+    await producer_a.flush()                # still queued after this
+
+    producer_b = Producer(tmp_path, FailingSink())  # a second process/run
+    producer_b.rebind("team-b")             # WorkerLoop.__init__, run 2
+    # Run 2 produces nothing durable of its own -- no record() call.
+
+    # A THIRD process (e.g. `synapse-worker replay`), un-joined, must read
+    # "team-b" -- the most recently LIVE binding -- not "team-a", the most
+    # recently WRITTEN one.
+    current = read_last_bound_shared_id(tmp_path)
+    assert current == "team-b"
+
+    replaying = Producer(tmp_path, RecordingSink(), current)
+    sent, pending = await replaying.flush()
+
+    assert (sent, pending) == (0, 0)          # f-1 was NOT wrongly delivered
+    assert replaying.pending_count() == (0, 1)  # visible as held, not lost or misrouted
+
+
+async def test_last_bound_marker_absent_when_nothing_has_ever_rebound(tmp_path) -> None:
+    """No `rebind()` call at all (e.g. a Producer built and used entirely
+    unbound) leaves no marker -- `cli._current_shared_id` must fall through
+    to `DEFAULT_SHARED_ID` in this case, not crash or invent a value."""
+    Producer(tmp_path, RecordingSink())  # constructor alone never calls rebind()
+
+    assert read_last_bound_shared_id(tmp_path) is None
+
+
+async def test_last_bound_marker_survives_a_process_restart(tmp_path) -> None:
+    """The marker is what makes `rebind()`'s binding durable ACROSS
+    processes, not just across calls on the same Producer instance."""
+    first = Producer(tmp_path, RecordingSink())
+    first.rebind("team-a")
+    del first  # simulate the process exiting
+
+    restarted = Producer(tmp_path, RecordingSink())  # a fresh process's Producer
+    assert read_last_bound_shared_id(tmp_path) == "team-a"
+    assert restarted.shared_id is None  # the constructor itself doesn't auto-read it --
+    # `cli._current_shared_id` is what wires the two together
