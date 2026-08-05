@@ -210,11 +210,21 @@ def test_custom_tool_call_and_output_resolve_tool_name_from_call_id() -> None:
 
 def test_custom_tool_call_output_prefers_its_own_name_field() -> None:
     """CustomToolCallOutput carries an optional `name` directly on the wire,
-    unlike function_call_output -- prefer it over the call_id map."""
+    unlike function_call_output -- prefer it over the call_id map.
+
+    The call_id map is deliberately seeded with a DIFFERENT name than the
+    output's own `name` field, so the two disagree: if the map ever won this
+    would assert "renamed_mid_flight" instead. (An earlier version of this
+    test registered the SAME name on both sides, so the call_id fallback
+    produced an identical answer and the branch under test -- `tool_name =
+    str(name) if name else None` -- was never actually distinguished; a
+    mutant that deleted the name-preference entirely still passed.)"""
     source = CodexSource()
     source.parse_line(session_meta())
     source.parse_line(
-        response_item({"type": "custom_tool_call", "name": "apply_patch", "call_id": "call_1", "input": "patch"})
+        response_item(
+            {"type": "custom_tool_call", "name": "renamed_mid_flight", "call_id": "call_1", "input": "patch"}
+        )
     )
 
     (event,) = source.parse_line(
