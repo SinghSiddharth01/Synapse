@@ -35,10 +35,10 @@ from synapse_contracts import AgentEvent, LocalBinding
 from synapse_distiller import Distiller
 from synapse_distiller.guards import PromptDropError
 
+from synapse_worker.discovery import AGENT_REGISTRY
 from synapse_worker.follower import TranscriptFollower
 from synapse_worker.producer import Producer
 from synapse_worker.segmenter import Segmenter
-from synapse_worker.sources.claude_code import ClaudeCodeSource
 from synapse_worker.stats import StatsBuffer
 from synapse_worker.triage import triage
 from synapse_worker.triage_log import TriageLog
@@ -94,6 +94,7 @@ class WorkerLoop:
         state_dir: Path,
         budget_tokens: int,
         *,
+        agent: str = "claude-code",
         idle_flush_seconds: float = 120.0,
         triage_enabled: bool = True,
         stats: StatsBuffer | None = None,
@@ -105,9 +106,16 @@ class WorkerLoop:
         self.state_dir = Path(state_dir)
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.stats = stats
+        self.agent = agent
 
         self.follower = TranscriptFollower(self.state_dir / "follow-state.json")
-        self.source = ClaudeCodeSource()
+        # Dispatched through AGENT_REGISTRY rather than hard-coded, so a
+        # transcript resolved (or explicitly requested) for a registered
+        # agent other than Claude Code is actually parsed by ITS adapter —
+        # without this, a bindings/codex.json produced by `join` would still
+        # be fed to ClaudeCodeSource, which yields zero events on Codex's
+        # rollout lines (its own `type` values are never "user"/"assistant").
+        self.source = AGENT_REGISTRY[agent].source_class()
         self.segmenter = Segmenter(
             budget_tokens=budget_tokens,
             agent_session_id=binding.agent_session_id,

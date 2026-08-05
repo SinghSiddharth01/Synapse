@@ -5,11 +5,11 @@ detected Agent Session tagged [agent]; two agents' trees yield two; an
 unregistered directory yields none; a stale (non-growing) transcript is not
 treated as active.'
 
-`join_session` itself is deliberately NOT extended to auto-detect Codex in
-this pass -- see the module docstring note in discovery.py and this chain's
-deviations. These tests exercise the registry and per-agent detection/
-resolution directly instead, which is the piece Chain A's acceptance
-("detection finds a Codex fixture tree") actually asks for.
+`join_session` loops over `AGENT_REGISTRY` -- see
+test_join_binds_two_agents_at_once below and the module docstring in
+discovery.py. These tests exercise the registry and per-agent detection/
+resolution directly, which is the piece Chain A's acceptance ("detection
+finds a Codex fixture tree") actually asks for.
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ from synapse_worker.discovery import (
     AGENT_REGISTRY,
     binding_path_for_agent,
     find_codex_transcripts,
+    join_session,
     project_slug,
     resolve_transcript,
 )
@@ -251,3 +252,60 @@ def test_binding_storage_holds_independent_claude_code_and_codex_pins(tmp_path) 
     # Both files exist independently, keyed by product -- no collision.
     assert read_binding(binding_path_for_agent(state_dir, "claude-code")).agent == "claude-code"
     assert read_binding(binding_path_for_agent(state_dir, "codex")).agent == "codex"
+
+
+# ---------------------------------------------------------------------------
+# join_session loops over AGENT_REGISTRY -- Plan D.2's first failing test
+# ---------------------------------------------------------------------------
+
+def test_join_binds_two_agents_at_once(tmp_path, monkeypatch) -> None:
+    """Plan D.2's first failing test, verbatim: 'joining with two agents
+    detected produces two bindings.' Each registered agent's own finder sees
+    only its own dialect's default root, monkeypatched here the same way
+    test_status_lists_detected_transcripts_with_liveness (test_cli.py)
+    isolates CLAUDE_PROJECTS -- no real machine state is touched."""
+    import synapse_worker.discovery as discovery
+
+    cwd = tmp_path / "repo"
+    cwd.mkdir()
+    claude_root = tmp_path / "claude-projects"
+    codex_root = tmp_path / "codex-sessions"
+    monkeypatch.setattr(discovery, "CLAUDE_PROJECTS", claude_root)
+    monkeypatch.setattr(discovery, "CODEX_SESSIONS", codex_root)
+
+    claude_path = _make_claude_transcript(claude_root, cwd, "sess-1")
+    codex_uuid = "1c9b6d8e-27ac-4f1e-9f2c-8a2b1e6d4c11"
+    codex_path = _make_codex_transcript(codex_root, "2026/08/05", "2026-08-05T10-00-00", codex_uuid)
+
+    bindings = join_session("team-standup", "akhil", cwd, tmp_path / "state")
+
+    assert len(bindings) == 2
+    by_agent = {b.agent: b for b in bindings}
+    assert set(by_agent) == {"claude-code", "codex"}
+    assert by_agent["claude-code"].transcript_path == str(claude_path)
+    assert by_agent["claude-code"].agent_session_id == "sess-1"
+    assert by_agent["codex"].transcript_path == str(codex_path)
+    assert by_agent["codex"].agent_session_id == codex_uuid
+
+    # Each product's binding was actually persisted, independently.
+    assert read_binding(binding_path_for_agent(tmp_path / "state", "claude-code")).agent == "claude-code"
+    assert read_binding(binding_path_for_agent(tmp_path / "state", "codex")).agent == "codex"
+
+
+def test_join_binds_only_the_live_agent_when_the_other_has_nothing(tmp_path, monkeypatch) -> None:
+    """A Claude-Code-only machine (the common case today) must still bind
+    exactly one -- looping over the registry must not require every agent to
+    be live."""
+    import synapse_worker.discovery as discovery
+
+    cwd = tmp_path / "repo"
+    cwd.mkdir()
+    claude_root = tmp_path / "claude-projects"
+    codex_root = tmp_path / "codex-sessions"  # left empty
+    monkeypatch.setattr(discovery, "CLAUDE_PROJECTS", claude_root)
+    monkeypatch.setattr(discovery, "CODEX_SESSIONS", codex_root)
+    _make_claude_transcript(claude_root, cwd, "sess-1")
+
+    bindings = join_session("team-standup", "akhil", cwd, tmp_path / "state")
+
+    assert [b.agent for b in bindings] == ["claude-code"]

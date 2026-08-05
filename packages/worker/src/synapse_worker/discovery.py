@@ -18,21 +18,23 @@ for the full trail against github.com/openai/codex primary source):
     ~/.codex/sessions/<YYYY>/<MM>/<DD>/rollout-<timestamp>-<uuid>.jsonl
 
 `AGENT_REGISTRY` is Task A.1's "static registry: agent name → transcript
-root(s) → transcript dialect → Source class" — `find_live_transcript` and
-`resolve_transcript` dispatch through it, so a third adapter needs a registry
-entry and a `find_*_transcripts` function, not a rewrite of either.
+root(s) → transcript dialect → Source class" — `find_live_transcript`,
+`resolve_transcript`, and `join_session` all dispatch through it, so a third
+adapter needs a registry entry and a `find_*_transcripts` function, not a
+rewrite of any of them.
 
-**`join_session` is deliberately NOT wired through the registry.** Its
-existing tests monkeypatch `find_live_transcript` as a single, whole-function
-substitute (no `agent` param) to keep `synapse-worker join` deterministic
-under test without touching real machine state; looping it over every
-registered agent would mean probing the *real* `~/.codex/sessions` by
-default on every `join` in a test that never overrides it, which is a live,
-not hypothetical, flakiness risk on any developer machine that actually uses
-Codex. `join_session` binding only Claude Code today is a scoped, recorded
-gap (Chain A deviations), not silent — `resolve_transcript`/
-`find_live_transcript` are fully agent-aware and tested per agent below, and
-that is the seam a future, deliberate `join_session` change would extend.
+`join_session` loops over `AGENT_REGISTRY`, binding every currently-live
+Agent Session it finds, one per Agent product — Plan D.2's "one laptop holds
+several bindings ... Claude Code and Codex can sit in different Shared
+Sessions." An earlier pass here left this loop out, reasoning that the
+existing `join` tests monkeypatch `find_live_transcript` as a whole-function
+substitute and looping would mean probing the real `~/.codex/sessions` by
+default under test. That reasoning did not hold up: those tests already
+override `find_live_transcript` in full (not per-agent), so looping never
+touches disk under test either — it only needed the same substitute
+function to accept the `agent` keyword the real signature already has
+(`agent: str = "claude-code"`, keyword-only, so every un-widened lambda in
+this codebase already breaks on it the same way).
 """
 
 from __future__ import annotations
@@ -255,15 +257,16 @@ def join_session(
     """`synapse join <shared_id>` — Plan A.7 / Plan D.2.
 
     Binds every currently-detected LIVE Agent Session to `shared_id`, one
-    binding per Agent product. Still only ever probes `claude-code` today —
-    `CodexSource` and its registry entry exist (Chain A), but this function
-    was deliberately not looped over `AGENT_REGISTRY` in that pass; see the
-    module docstring's "`join_session` is deliberately NOT wired through the
-    registry" note for why, and Chain A's deviations for the record of the
-    call. The shape (returning a *list* of bindings, one per detected agent)
-    is already ready for that loop without a reshape, matching Plan D.2's
-    first failing test: "joining with two agents detected produces two
-    bindings" — only the detection loop itself is still single-agent.
+    binding per Agent product — looped over `AGENT_REGISTRY`, so a third
+    registered agent needs no reshape here. Matches Plan D.2's first failing
+    test: "joining with two agents detected produces two bindings."
+
+    `projects_root`, when given, is passed to every registered agent's finder
+    the same way — it exists for tests that isolate a single product's
+    fixture tree (in which case every *other* agent's finder simply finds
+    nothing there, since each dialect's directory layout differs) and for
+    real callers there is no such override, so each finder falls back to its
+    own default root (`CLAUDE_PROJECTS`/`CODEX_SESSIONS`) independently.
 
     Detection is unchanged: this does not let a human pick a specific
     transcript file. Plan D.3 is explicit that there is no `attach(shared_id)`
@@ -278,8 +281,10 @@ def join_session(
     """
     bound: list[SessionBinding] = []
 
-    transcript = find_live_transcript(cwd, projects_root)
-    if transcript is not None:
+    for agent in AGENT_REGISTRY:
+        transcript = find_live_transcript(cwd, projects_root, agent=agent)
+        if transcript is None:
+            continue
         binding = SessionBinding(
             agent_session_id=transcript.session_id,
             shared_id=shared_id,

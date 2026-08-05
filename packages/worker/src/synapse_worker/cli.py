@@ -43,6 +43,8 @@ from synapse_providers import CallLog, NPUProvider, RecordingProvider
 
 from synapse_worker.debug_server import DebugServer
 from synapse_worker.discovery import (
+    AGENT_REGISTRY,
+    ResolvedTranscript,
     binding_path_for_agent,
     find_claude_code_transcripts,
     join_session,
@@ -55,7 +57,11 @@ from synapse_worker.triage_log import TriageLog
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_AGENT = "claude-code"  # the only Source adapter that exists (Plan A.3)
+DEFAULT_AGENT = "claude-code"  # `_build`'s fallback for an explicit --transcript
+# whose dialect nothing infers; `status`/`replay --skipped` also still only
+# ever look at the claude-code binding -- a narrower, still-disclosed gap
+# `run`'s multi-agent resolution (_resolve_agent_and_transcript) does not
+# share, since `run` is the half that had to reach CodexSource at all.
 DEFAULT_DEBUG_PORT = 8790
 
 
@@ -95,16 +101,50 @@ def _resolve_debug_port(args: argparse.Namespace) -> int:
     return DEFAULT_DEBUG_PORT
 
 
+def _resolve_agent_and_transcript(
+    args: argparse.Namespace, state_dir: Path
+) -> tuple[str | None, ResolvedTranscript | None]:
+    """Which Agent product's transcript to follow, and which registered
+    Source it therefore needs.
+
+    Without this, `resolve_transcript` was always called with its
+    `agent="claude-code"` default, so `run` could never reach a hand-authored
+    `bindings/codex.json` even after `WorkerLoop` learned to read
+    `AGENT_REGISTRY` -- nothing upstream ever asked for anything but
+    Claude Code. An explicit `--agent` wins outright; otherwise every
+    registered agent is tried, in `AGENT_REGISTRY` order (Claude Code first,
+    preserving today's behavior when it is the only agent in play): a
+    `join`-pinned binding for ANY agent wins over every agent's heuristic,
+    and the heuristic is only consulted once nothing anywhere is pinned.
+    """
+    requested = getattr(args, "agent", None)
+    candidates = [requested] if requested else list(AGENT_REGISTRY)
+
+    first_heuristic: tuple[str, ResolvedTranscript] | None = None
+    for agent in candidates:
+        resolved = resolve_transcript(Path.cwd(), state_dir, agent=agent)
+        if resolved is None:
+            continue
+        if resolved.source == "pinned":
+            return agent, resolved
+        if first_heuristic is None:
+            first_heuristic = (agent, resolved)
+    return first_heuristic if first_heuristic is not None else (None, None)
+
+
 def _build(args: argparse.Namespace, debug_port: int = 0):
     config = load_config()
     worker_cfg = config.worker
     state_dir = Path(worker_cfg.state_dir)
 
     resolved = None
+    agent = DEFAULT_AGENT
     if getattr(args, "transcript", None):
         transcript = Path(args.transcript)
     else:
-        resolved = resolve_transcript(Path.cwd(), state_dir) or _no_transcript()
+        agent, resolved = _resolve_agent_and_transcript(args, state_dir)
+        if resolved is None:
+            _no_transcript()
         transcript = resolved.path
 
     sink = (
@@ -124,7 +164,7 @@ def _build(args: argparse.Namespace, debug_port: int = 0):
             agent_session_id=resolved.agent_session_id if resolved else transcript.stem,
             shared_id=args.shared_id,
             contributor=args.contributor,
-            agent=DEFAULT_AGENT,
+            agent=agent,
         )
     distiller = build_distiller(config, binding)
 
@@ -147,6 +187,11 @@ def _build(args: argparse.Namespace, debug_port: int = 0):
         budget_tokens=config.segment_budget,
         idle_flush_seconds=worker_cfg.idle_flush_seconds,
         stats=stats,
+        # binding.agent is authoritative regardless of which branch above set
+        # it -- a pinned binding's own `.agent`, the detected `agent` from
+        # heuristic resolution, or DEFAULT_AGENT for an explicit --transcript
+        # path whose dialect nothing here inferred.
+        agent=binding.agent,
     )
     source = resolved.source if resolved is not None else "explicit --transcript"
     return config, loop, transcript, producer, source, stats
@@ -436,6 +481,12 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--ticks", type=int, help="stop after N ticks (default: forever)")
     run.add_argument("--contributor", default="aditya")
     run.add_argument("--shared-id", default="local-dev")
+    run.add_argument(
+        "--agent", choices=list(AGENT_REGISTRY), default=None,
+        help="which Agent product to follow (default: auto-detect -- a "
+             "`join`-pinned binding for any registered agent wins, else the "
+             "first agent's live-transcript heuristic, tried in registry order)",
+    )
     run.add_argument(
         "--from-start",
         action="store_true",

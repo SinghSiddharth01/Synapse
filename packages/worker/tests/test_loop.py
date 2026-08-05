@@ -187,6 +187,34 @@ async def test_pending_turn_survives_a_restart(tmp_path) -> None:
     assert result.findings == 1
 
 
+def test_agent_param_selects_the_source_via_the_registry(tmp_path) -> None:
+    """WorkerLoop must actually read AGENT_REGISTRY[agent].source_class --
+    without this, a Codex-bound session would still be parsed by
+    ClaudeCodeSource, which yields zero events on Codex's rollout lines."""
+    from synapse_worker.sources.claude_code import ClaudeCodeSource
+    from synapse_worker.sources.codex import CodexSource
+
+    (tmp_path / "a").mkdir()
+    default_loop, _ = build(tmp_path / "a", [])
+    assert isinstance(default_loop.source, ClaudeCodeSource)
+
+    transcript = tmp_path / "b" / "t.jsonl"
+    transcript.parent.mkdir()
+    transcript.touch()
+    producer = Producer(tmp_path / "b" / "wal", FileSink(tmp_path / "b" / "upstream.jsonl"))
+    codex_loop = WorkerLoop(
+        transcript=transcript,
+        distiller=Distiller(FakeProvider(scripts=[]), BINDING, PACK, ["text"], "labelled"),
+        producer=producer,
+        binding=BINDING,
+        state_dir=tmp_path / "b" / "state",
+        budget_tokens=5000,
+        agent="codex",
+    )
+
+    assert isinstance(codex_loop.source, CodexSource)
+
+
 async def test_attach_at_end_primes_the_source_from_the_header(tmp_path) -> None:
     """CodexSource's session_meta is written once, near the top of the file
     -- unlike Claude Code, which repeats cwd/gitBranch on every record.
