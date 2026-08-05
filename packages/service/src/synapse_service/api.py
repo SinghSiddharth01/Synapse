@@ -12,9 +12,11 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from synapse_contracts import Finding
-from synapse_providers import ModelProvider
+from synapse_providers import CallLog, ModelProvider, RecordingProvider
 
+from synapse_service.debug import Feed, debug_routes
 from synapse_service.lanes import DEFAULT_TOP_K
+from synapse_service.log import MarkedTrivial, Merged
 from synapse_service.retrieval import query_findings, visible_to
 from synapse_service.store import InMemoryStore
 from synapse_service.synthesis import Synthesizer
@@ -42,10 +44,41 @@ def _missing(body: dict, *required: str) -> JSONResponse | None:
 
 def build_app(provider: ModelProvider) -> Starlette:
     store = InMemoryStore()
-    synthesizer = Synthesizer(provider)
+
+    # E6: one CallLog, one Feed, for the whole service instance -- wrapping
+    # per component (not per session) is deliberate. RecordingProvider is
+    # transparent (same result, exceptions re-raised), so this changes
+    # nothing about what synthesis or retrieval actually do; it only gives
+    # /debug something to read.
+    call_log = CallLog()
+    feed = Feed()
+    synthesis_provider = RecordingProvider(provider, "synthesis", call_log)
+    retrieval_provider = RecordingProvider(provider, "retrieval", call_log)
+    synthesizer = Synthesizer(synthesis_provider)
 
     def _session_or_404(sid: str):
         return store.get_session(sid)
+
+    def _record_synthesis_feed(sid: str, log_before: int) -> None:
+        """Diff the log around the `merge()` call just made, rather than
+        having synthesis.py report counts itself -- keeps this instrumentation
+        entirely in api.py, matching the plan's Files list for this task."""
+        entries = store.log_entries(sid)[log_before:]
+        merged = [e for e in entries if isinstance(e, Merged)]
+        trivial = [e for e in entries if isinstance(e, MarkedTrivial)]
+        trivial_count = sum(len(e.finding_ids) for e in trivial)
+        ctx = store.get_context(sid)
+        feed.event(
+            "synthesis",
+            f"{sid}: {len(merged)} merge(s), {trivial_count} trivial, "
+            f"{len(ctx.conflicts)} conflict(s) (v{ctx.memory_version})",
+            session=sid,
+            new_ids=[e.result.id for e in merged],
+            merges=len(merged),
+            trivial=trivial_count,
+            conflicts=len(ctx.conflicts),
+            version=ctx.memory_version,
+        )
 
     async def create_session(request: Request) -> JSONResponse:
         body = await request.json()
@@ -97,7 +130,9 @@ def build_app(provider: ModelProvider) -> Starlette:
             # A THIRD upsert would cost another N. Removing merge()'s is the
             # real fix and needs all 19 direct call sites in test_synthesis.py
             # to upsert first -- post-demo.
+            log_before = len(store.log_entries(sid))
             await synthesizer.merge(store, sid, findings)
+            _record_synthesis_feed(sid, log_before)
             # A provider outage, an exhausted retry, or a verdict that
             # fails structural validation all make merge() return with
             # memory_version untouched -- "landed, quality degraded" by
@@ -127,7 +162,9 @@ def build_app(provider: ModelProvider) -> Starlette:
         if _session_or_404(sid) is None:
             return JSONResponse({"error": f"unknown session {sid}"}, status_code=404)
         version_before = store.get_context(sid).memory_version
+        log_before = len(store.log_entries(sid))
         await synthesizer.merge(store, sid, [])
+        _record_synthesis_feed(sid, log_before)
         version = store.get_context(sid).memory_version
         return JSONResponse({"memory_version": version,
                              "synthesized": version > version_before})
@@ -230,13 +267,21 @@ def build_app(provider: ModelProvider) -> Starlette:
             candidates = [c.finding for c in cands.candidates]
 
         ranked = await query_findings(
-            provider,
+            retrieval_provider,
             context=store.get_context(sid),
             candidates=candidates,
             query=body["query"],
             asking_agent_session=agent_session,
         )
         store.mark_seen(sid, agent_session)
+        feed.event(
+            "query",
+            f"{sid}: '{body['query'][:60]}' -> {len(candidates)} candidates, "
+            f"{len(ranked)} ranked",
+            session=sid,
+            candidates=len(candidates),
+            ranked=len(ranked),
+        )
         return JSONResponse({"findings": [f.model_dump(mode="json") for f in ranked]})
 
     app = Starlette(routes=[
@@ -246,6 +291,7 @@ def build_app(provider: ModelProvider) -> Starlette:
         Route("/v1/sessions/{sid}/synthesize", synthesize, methods=["POST"]),
         Route("/v1/sessions/{sid}/watermark", watermark, methods=["GET"]),
         Route("/v1/sessions/{sid}/query", query, methods=["POST"]),
+        *debug_routes(store, call_log, feed),
     ])
     app.state.store = store          # test seam: no route reads it
     return app
