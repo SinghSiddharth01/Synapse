@@ -561,7 +561,22 @@ async def test_run_wraps_the_distiller_provider_when_debug_enabled(
 # status
 # ---------------------------------------------------------------------------
 
-async def test_status_with_nothing_joined_and_no_transcripts(capsys) -> None:
+def _isolate_agent_roots(monkeypatch, tmp_path) -> None:
+    """`cmd_status` now walks BOTH registered agents' finders directly (not
+    only through a mockable `resolve_transcript`), so every status test needs
+    an isolated CLAUDE_PROJECTS/CODEX_SESSIONS the same way the join/discovery
+    tests already do -- otherwise it depends on whether the machine running
+    the suite happens to have a real `~/.codex/sessions` (join_session's own
+    module docstring documents exactly this hazard for the analogous loop)."""
+    import synapse_worker.discovery as discovery
+
+    monkeypatch.setattr(discovery, "CLAUDE_PROJECTS", tmp_path / "no-claude-projects")
+    monkeypatch.setattr(discovery, "CODEX_SESSIONS", tmp_path / "no-codex-sessions")
+
+
+async def test_status_with_nothing_joined_and_no_transcripts(tmp_path, monkeypatch, capsys) -> None:
+    _isolate_agent_roots(monkeypatch, tmp_path)
+
     exit_code = await cli.cmd_status(_ns())
 
     out = capsys.readouterr().out
@@ -573,6 +588,7 @@ async def test_status_with_nothing_joined_and_no_transcripts(capsys) -> None:
 async def test_status_reports_a_joined_session(tmp_path, monkeypatch, capsys) -> None:
     from synapse_contracts import LocalBinding
 
+    _isolate_agent_roots(monkeypatch, tmp_path)
     transcript = tmp_path / "sess.jsonl"
     _write_transcript(transcript)
     joined = LocalBinding(
@@ -581,8 +597,16 @@ async def test_status_reports_a_joined_session(tmp_path, monkeypatch, capsys) ->
     )
     monkeypatch.setattr(
         cli, "resolve_transcript",
-        lambda cwd, state_dir: ResolvedTranscript(
-            path=transcript, agent_session_id="as-joined", source="pinned", local_binding=joined
+        # cmd_status now tries every registered agent -- only claude-code
+        # resolves to the pinned binding here, so codex must fall through to
+        # None the same way it would for a real, un-joined product.
+        lambda cwd, state_dir, *, agent=None: (
+            ResolvedTranscript(
+                path=transcript, agent_session_id="as-joined", source="pinned",
+                local_binding=joined,
+            )
+            if agent == "claude-code"
+            else None
         ),
     )
 
@@ -594,11 +618,47 @@ async def test_status_reports_a_joined_session(tmp_path, monkeypatch, capsys) ->
     assert "as-joined" in out
 
 
+async def test_status_reports_a_codex_only_joined_session(tmp_path, monkeypatch, capsys) -> None:
+    """MAJOR regression pin: a Codex-only join (Claude Code never joined or
+    live) must not make `status` print 'joined session none' -- that directly
+    contradicts what `join` itself just reported."""
+    from synapse_contracts import LocalBinding
+
+    _isolate_agent_roots(monkeypatch, tmp_path)
+    transcript = tmp_path / "codex-sess.jsonl"
+    _write_transcript(transcript)
+    joined = LocalBinding(
+        agent_session_id="codex-joined", shared_id="team-standup",
+        contributor="akhil", agent="codex",
+    )
+    monkeypatch.setattr(
+        cli, "resolve_transcript",
+        lambda cwd, state_dir, *, agent=None: (
+            ResolvedTranscript(
+                path=transcript, agent_session_id="codex-joined", source="pinned",
+                local_binding=joined,
+            )
+            if agent == "codex"
+            else None
+        ),
+    )
+
+    exit_code = await cli.cmd_status(_ns())
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "joined session   none" not in out
+    assert "[codex]" in out
+    assert "team-standup" in out
+    assert "codex-joined" in out
+
+
 async def test_status_lists_detected_transcripts_with_liveness(
     tmp_path, monkeypatch, capsys
 ) -> None:
     import synapse_worker.discovery as discovery
 
+    _isolate_agent_roots(monkeypatch, tmp_path)
     fake_projects = tmp_path / "claude-projects"
     slug_dir = fake_projects / discovery.project_slug(tmp_path)
     slug_dir.mkdir(parents=True)
@@ -611,12 +671,14 @@ async def test_status_lists_detected_transcripts_with_liveness(
     assert exit_code == 0
     assert "sess-live.jsonl" in out
     assert "[LIVE]" in out
+    assert "[claude-code]" in out
 
 
-async def test_status_reports_unsent_findings(tmp_path, capsys) -> None:
+async def test_status_reports_unsent_findings(tmp_path, monkeypatch, capsys) -> None:
     from synapse_contracts import Attribution, Finding, FindingType
     from synapse_worker.producer import FileSink, Producer
 
+    _isolate_agent_roots(monkeypatch, tmp_path)
     producer = Producer(tmp_path / ".synapse" / "wal", FileSink(tmp_path / "upstream.jsonl"))
     producer.record([
         Finding(

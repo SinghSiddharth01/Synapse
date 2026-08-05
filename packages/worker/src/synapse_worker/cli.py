@@ -46,7 +46,6 @@ from synapse_worker.discovery import (
     AGENT_REGISTRY,
     ResolvedTranscript,
     binding_path_for_agent,
-    find_claude_code_transcripts,
     join_session,
     resolve_transcript,
 )
@@ -332,33 +331,46 @@ async def cmd_run(args: argparse.Namespace) -> int:
 
 
 async def cmd_status(args: argparse.Namespace) -> int:
+    """`join` now loops over `AGENT_REGISTRY` and can bind several agents in
+    one call (Plan D.2) -- this must too, for both halves below, or a
+    Codex-only join (Claude Code never live) leaves `status` printing
+    "joined session none" right after `join` printed the opposite.
+    """
     config = load_config()
     print(config.describe())
     print(f"\npoll interval    {config.worker.poll_interval_seconds}s")
 
-    resolved = resolve_transcript(Path.cwd(), Path(config.worker.state_dir))
+    state_dir = Path(config.worker.state_dir)
+    cwd = Path.cwd()
     print()
-    if resolved is not None and resolved.source == "pinned":
-        binding = resolved.local_binding
-        print(f"joined session   shared_id={binding.shared_id!r} "
-              f"agent_session_id={binding.agent_session_id} "
-              f"transcript={resolved.path} (exists)")
-    else:
-        binding_path = binding_path_for_agent(Path(config.worker.state_dir), DEFAULT_AGENT)
-        print(f"joined session   none (checked {binding_path}) — run "
+    joined_any = False
+    for agent in AGENT_REGISTRY:
+        resolved = resolve_transcript(cwd, state_dir, agent=agent)
+        if resolved is not None and resolved.source == "pinned":
+            binding = resolved.local_binding
+            print(f"joined session   [{agent}] shared_id={binding.shared_id!r} "
+                  f"agent_session_id={binding.agent_session_id} "
+                  f"transcript={resolved.path} (exists)")
+            joined_any = True
+    if not joined_any:
+        checked = ", ".join(
+            str(binding_path_for_agent(state_dir, agent)) for agent in AGENT_REGISTRY
+        )
+        print(f"joined session   none (checked {checked}) — run "
               f"`synapse-worker join <shared_id>`, or the worker falls back to "
               f"the most-recently-active-transcript heuristic")
 
-    transcripts = find_claude_code_transcripts(Path.cwd())
-    print(f"\ntranscripts for {Path.cwd()}:")
-    if not transcripts:
+    print(f"\ntranscripts for {cwd}:")
+    any_transcripts = False
+    for agent, registration in AGENT_REGISTRY.items():
+        for t in registration.finder(cwd, None):
+            any_transcripts = True
+            live = "LIVE" if t.age_seconds <= 1800 else "idle"
+            print(f"  [{live}] [{agent}] {t.path.name}  {t.size/1e6:.1f} MB  "
+                  f"{t.age_seconds/60:.0f} min since last write")
+    if not any_transcripts:
         print("  none found")
-    for t in transcripts:
-        live = "LIVE" if t.age_seconds <= 1800 else "idle"
-        print(f"  [{live}] {t.path.name}  {t.size/1e6:.1f} MB  "
-              f"{t.age_seconds/60:.0f} min since last write")
 
-    state_dir = Path(config.worker.state_dir)
     producer = Producer(state_dir / "wal", FileSink(Path(config.worker.sink_file)))
     pending = producer.unsent()
     print(f"\nwrite-ahead log  {producer.findings_path}")
