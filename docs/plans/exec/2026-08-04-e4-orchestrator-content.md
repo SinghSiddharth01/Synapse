@@ -30,7 +30,7 @@ Amendment F Q11 put the arrival briefing in the agent-agnostic floor **on the as
 **Interfaces:**
 - Produces: `create_mcp(instructions: str | None = None) -> FastMCP` — module-level `mcp = create_mcp()` stays for the CLI. Tasks 3–4 pass computed instructions into this factory.
 
-- [ ] **Step 1: Write the failing unit test**
+- [x] **Step 1: Write the failing unit test**
 
 Append to `packages/orchestrator/tests/test_server.py`:
 
@@ -47,12 +47,12 @@ def test_default_instructions_contain_the_sentinel():
     assert SENTINEL in create_mcp().instructions
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `uv run pytest packages/orchestrator/tests/test_server.py -v`
 Expected: FAIL — `create_mcp` and `SENTINEL` don't exist.
 
-- [ ] **Step 3: Refactor server.py into a factory**
+- [x] **Step 3: Refactor server.py into a factory**
 
 Keep the module docstring; replace the construction:
 
@@ -77,7 +77,7 @@ def create_mcp(instructions: str | None = None) -> FastMCP:
 mcp = create_mcp()
 ```
 
-- [ ] **Step 4: Write the live probe**
+- [x] **Step 4: Write the live probe**
 
 ```python
 # scripts/verify_instructions.py
@@ -118,7 +118,7 @@ if __name__ == "__main__":
     sys.exit(asyncio.run(main()))
 ```
 
-- [ ] **Step 5: Run both, then commit**
+- [x] **Step 5: Run both, then commit**
 
 Run: `uv run pytest packages/orchestrator -q` → PASS.
 Run the live probe against a booted shell → expect `PROVEN` (record the outcome either way in `docs/STATE.md`).
@@ -145,7 +145,7 @@ git commit -m "feat(orchestrator): instructions factory + live sentinel probe (a
   `pending_count() -> int`.
   Task 3's endpoint and Task 4's contribute call `record` + `flush`; the CLI exposes `resync`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 # packages/orchestrator/tests/test_relay.py
@@ -224,12 +224,12 @@ async def test_flush_with_nothing_pending_is_free(tmp_path):
     assert await relay.flush() == (0, 0)
 ```
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
 Run: `uv run pytest packages/orchestrator/tests/test_relay.py -v`
 Expected: FAIL with `ModuleNotFoundError`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```python
 # packages/orchestrator/src/synapse_orchestrator/relay.py
@@ -334,7 +334,7 @@ class Relay:
 
 Add to `packages/orchestrator/pyproject.toml` dependencies: `"synapse-contracts"`, `"httpx>=0.27"` (with the matching `[tool.uv.sources]` workspace entry), then `uv sync`.
 
-- [ ] **Step 4: Run, then commit**
+- [x] **Step 4: Run, then commit**
 
 Run: `uv run pytest packages/orchestrator/tests/test_relay.py -v` → PASS.
 
@@ -342,6 +342,65 @@ Run: `uv run pytest packages/orchestrator/tests/test_relay.py -v` → PASS.
 git add packages/orchestrator pyproject.toml uv.lock
 git commit -m "feat(orchestrator): Relay — write-ahead egress with retained-log resync (Plan D.4)"
 ```
+
+#### Post-review amendment (2026-08-04)
+
+Round 2 review found a blocker in the implementation this task's Step 3
+produced: `findings.jsonl` was one undifferentiated append-only stream, and
+`flush()`/`resync()` sent everything pending to `self.shared_id` — whatever
+Shared Session happened to be bound *at send time*, not the one the Finding
+was actually produced under. A `synapse-worker join <other_shared_id>`
+between a failed flush and the next attempt silently retargeted the whole
+backlog, including Findings queued under a completely different, unrelated
+Shared Session — a cross-Shared-Session leak.
+
+**Fix, superseding this task's Step 3 code as shipped:** every line in
+`findings.jsonl` is now an envelope, `{"shared_id": <the Shared Session
+bound WHEN record() was called>, "finding": {...}}`, not a bare `Finding`.
+`flush()` and `resync()` group pending/retained entries by that recorded
+`shared_id` and POST each group to *its own* `/v1/sessions/{id}/...` —
+never to whatever `rebind()` most recently set. A Finding recorded while
+genuinely unbound (`shared_id` is `None`) has no session to go to and stays
+queued forever, rather than being guessed at on the next join.
+
+Also corrected here: `resync()`'s return type is `-> int` (this task's own
+Interfaces section, above) — a mid-review pass had changed it to
+`tuple[int, int]` to let a caller distinguish "nothing to push" from "push
+failed". That distinction now comes from a new `Relay.retained_count()`
+(entries recorded under a real Shared Session, sent or not) compared
+against `resync()`'s plain int result, rather than being baked into the
+return type — restoring the signature this task originally specified. See
+`relay.py`'s module docstring and `cli.cmd_resync` for the full mechanism,
+and `test_relay.py`'s re-join tests for the exact reproduction.
+
+#### Post-review amendment (2026-08-04), round 3
+
+Round 3 review found the partition above closes the leak only for whatever
+reaches `Relay.record()` — a NARROWER claim than "the cross-Shared-Session
+leak is closed," which is how the paragraph above reads on its own.
+`record()` also gained a `shared_id` keyword override in this pass (`def
+record(self, findings, *, shared_id=<unset>)`): a caller that already
+resolved its own target (app.py's per-agent routing, below; `contribute()`
+in server.py) can tag a batch explicitly instead of going through the
+mutable `self.shared_id` / `rebind()`, which removes a live concurrency
+hazard (two coroutines sharing one `Relay` could otherwise have one's
+`record()` observe the other's `rebind()` between call and `await
+flush()`).
+
+**What is still open, in scope terms.** A Finding can still be delivered
+to the wrong Shared Session if it is sitting in the WORKER's own
+write-ahead log (`synapse_worker.producer.Producer`, a *different* durable
+log than this one) at the moment of a `synapse-worker join <new_id>` for
+the SAME Agent product. That log's envelope carries no Shared Session
+identity, the Agent Session id does not change across a re-join, and
+Attribution does not carry a `shared_id` either — so nothing on the wire
+lets this process tell "a stale retry from before the re-join" apart from
+"a Finding produced fresh after it." Closing this needs the producer to
+declare its Shared Session on the wire, which is Task 5 / worker package
+territory and an authorized skip on this branch. It is NOT closed by this
+task or by Task 3's round 3 fix below, and should not be read as closed —
+see `relay.py`'s own module docstring for the full statement of what is and
+isn't fixed.
 
 ---
 
@@ -356,7 +415,7 @@ git commit -m "feat(orchestrator): Relay — write-ahead egress with retained-lo
 - Consumes: `create_mcp` (Task 1), `Relay` (Task 2), `read_binding` from `synapse_contracts.binding`.
 - Produces: `build_app(relay: Relay, mcp_server: FastMCP | None = None) -> Starlette` exposing MCP at `/mcp` **and** `POST /producer/findings` → `{accepted, sent}` / 422 on non-Finding payloads. The worker's `HttpSink` default URL (`http://127.0.0.1:8787/producer/findings` in `config/synapse.toml`) matches this route — keep them aligned.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 # packages/orchestrator/tests/test_producer_endpoint.py
@@ -419,12 +478,12 @@ def test_mcp_surface_is_mounted_on_the_same_app(tmp_path):
     assert any(p.startswith("/mcp") for p in paths)          # one process, one port
 ```
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
 Run: `uv run pytest packages/orchestrator/tests/test_producer_endpoint.py -v`
 Expected: FAIL with `ModuleNotFoundError: synapse_orchestrator.app`.
 
-- [ ] **Step 3: Implement `app.py`**
+- [x] **Step 3: Implement `app.py`**
 
 ```python
 # packages/orchestrator/src/synapse_orchestrator/app.py
@@ -476,7 +535,7 @@ def build_app(relay: Relay, mcp_server=None) -> Starlette:
     return app
 ```
 
-- [ ] **Step 4: Rewire the CLI**
+- [x] **Step 4: Rewire the CLI**
 
 In `cli.py`: replace the `mcp.run(transport="streamable-http")` block with:
 
@@ -504,7 +563,7 @@ and in `main()` after parsing (new args: `--state-dir` default `.synapse`, `--se
 
 Also add a `resync` subcommand — mirror the existing argparse pattern; it builds the same `Relay` and prints `await relay.resync()`. Update `tests/test_cli.py` following its existing invocation pattern so CLI coverage stays 100%.
 
-- [ ] **Step 5: Run, then commit**
+- [x] **Step 5: Run, then commit**
 
 Run: `uv run pytest packages/orchestrator -q` → PASS.
 
@@ -512,6 +571,93 @@ Run: `uv run pytest packages/orchestrator -q` → PASS.
 git add packages/orchestrator
 git commit -m "feat(orchestrator): producer endpoint on the shared app + resync CLI (Plan D.1)"
 ```
+
+#### Post-review amendment (2026-08-04)
+
+Round 2 review found two design problems in how this task's producer
+endpoint (as it evolved through the round-1 fix pass) handled the
+producer/binding trust boundary. Both are corrected, superseding the
+behavior described in this task's Step 3/Step 4 code as shipped:
+
+1. **Attribution is no longer re-stamped from `resolve_binding()`.** A
+   round-1 fix had the endpoint overwrite every incoming Finding's
+   `attributions` with the single binding `resolve_binding()` currently
+   resolves to. Per Plan D.2's global constraint, one binding file exists
+   *per Agent product* (`bindings/claude-code.json`, `bindings/codex.json`)
+   — more than one can be joined on the same machine at once — and
+   `_resolve_binding` picks ONE across all of them ("most recently joined
+   wins"). Stamping that single binding over every Finding silently
+   relabelled a DIFFERENT product's Finding with the wrong
+   Contributor/Agent Session/Agent whenever two products were joined
+   simultaneously — a correctness regression, since the worker already
+   stamps Attribution correctly from its own `LocalBinding` (`distiller.py`)
+   before the Finding ever reaches this endpoint. Attribution now passes
+   through exactly as the producer sent it, matching this task's *original*
+   Step 3 code. Producer trust is enforced on shape and on the
+   service-written fields instead: `attributions` must be non-empty, and a
+   producer that sets `status`, `merged_from`, `merged_into` away from their
+   defaults, or claims `provenance: synthesized`, is rejected with 422 —
+   those fields are written by synthesis, service-side (`schemas.py`), and
+   accepting them from a producer would let a local process manufacture a
+   tombstone or forge merge lineage.
+2. **An unbound orchestrator now returns 503, not 200 accept-and-queue.**
+   A local producer POSTing to an orchestrator with no Shared Session
+   joined used to get `{"accepted": N, "sent": false}` with the Finding
+   durably written to `findings.jsonl` and nowhere to ever send it. It now
+   gets a 503 with a "not joined" body, and nothing is durably recorded
+   here at all in that case. The worker's own `HttpSink` already treats any
+   non-2xx as "stay queued, retry later" (`producer.py`) — that IS the
+   designed fail-open path, so this process no longer needs to take custody
+   of a Finding it has nowhere real to route.
+
+See `app.py`'s module docstring and `test_producer_endpoint.py`'s
+`test_unbound_producer_returns_503_and_never_invents_a_session` and
+`test_producer_endpoint_preserves_producer_supplied_attribution` for the
+exact behavior and its tests.
+
+**Deviation, unrecorded until now (round 3 review, nit):** this amendment's
+point 1 above describes `resolve_binding` as a parameter without ever
+stating that it changed `build_app`'s signature away from this task's own
+Interfaces line (`build_app(relay: Relay, mcp_server: FastMCP | None =
+None) -> Starlette`, above). As shipped after round 2, the real signature
+was `build_app(relay, mcp_server=None, *, resolve_binding:
+Callable[[], LocalBinding | None] | None = None)`. Stated explicitly here
+per round 3's nit finding; the Interfaces line itself is left as originally
+written (plan history is not rewritten).
+
+#### Post-review amendment (2026-08-04), round 3
+
+Round 3 review found the fix above closed attribution trust but not
+routing: preserving `attributions` as the producer sent them means nothing
+if the endpoint still tags/routes every Finding in a POST to the SAME
+single `resolve_binding()` result. With two products joined to two
+different Shared Sessions, a correctly-attributed codex-produced Finding
+was still egressing to whatever session claude-code happened to be joined
+to (or vice versa) — a live cross-Shared-Session leak, reproduced
+end-to-end in `test_producer_endpoint.py::test_producer_endpoint_routes_
+each_agent_to_its_own_shared_session`.
+
+**Fix, further superseding `build_app`'s signature from the round 2
+amendment above:** `resolve_binding` (single, called once per request) is
+replaced with `resolve_binding_for_agent: Callable[[str], LocalBinding |
+None] | None`, called once PER FINDING with that Finding's
+`attributions[0].agent` — never with a single request-wide pick. Each
+Finding is grouped by the Shared Session its OWN Agent resolves to and
+`relay.record(group, shared_id=...)` (relay.py's new override) tags it
+accordingly; a Finding whose Agent has no matching binding — including
+"nothing joined at all" — 503s, naming the unmatched agent(s), with the
+same all-or-nothing "nothing durably recorded on a 503" guarantee the
+round 2 fix had. `cli.py` gained `_resolve_binding_for_agent`, reading
+`bindings/<agent>.json` directly rather than `_resolve_binding`'s "most
+recently joined across every product" pick — that pick is still correct
+and unchanged for the surfaces that need exactly one "current" binding
+(the briefing, the banner, `query`/`contribute` — see Task 4's round 3
+amendment).
+
+This does NOT close the sibling gap for a Finding queued in the WORKER's
+own write-ahead log across a re-join of the SAME Agent product — see Task
+2's round 3 amendment note and `relay.py`'s module docstring for why that
+one needs a worker-side (Task 5) change this branch does not make.
 
 ---
 
@@ -527,7 +673,7 @@ git commit -m "feat(orchestrator): producer endpoint on the shared app + resync 
 - Consumes: E3's `/watermark` and `/query` routes; `synapse_distiller.Distiller` + `synapse_providers.NPUProvider` (contribute's round-trip — same model, same pack, same gate as the passive path: this **is** the "one distiller" of the hybrid amendment, invoked in-process); `SessionBinding.to_local_binding()`.
 - Produces: `register_tools(server, *, binding, service_url, relay, distiller_factory) -> None` and `async build_briefing(binding, service_url, *, transport=None) -> str`. The CLI composes: `briefing = await build_briefing(...)`; `server = create_mcp(briefing)`; `register_tools(server, ...)`; `build_app(relay, server)`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 # packages/orchestrator/tests/test_tools.py
@@ -611,12 +757,12 @@ async def test_contribute_round_trips_through_the_distiller_and_relay(tmp_path):
 
 `server.call_tool(name, args)` is FastMCP's programmatic invocation in `mcp==1.9.4`; if its return shape differs from plain text, unwrap per its type (`list[TextContent]` → `result[0].text`) — adjust the two assertions, not the architecture. If the distiller's output-parsing rejects the fake's script shape, copy a working script literal from `packages/distiller/tests/` (the distiller tests already script `FakeProvider` for exactly this call).
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
 Run: `uv run pytest packages/orchestrator/tests/test_tools.py -v`
 Expected: FAIL — `briefing` module and `register_tools` don't exist.
 
-- [ ] **Step 3: Implement `briefing.py`**
+- [x] **Step 3: Implement `briefing.py`**
 
 ```python
 # packages/orchestrator/src/synapse_orchestrator/briefing.py
@@ -671,7 +817,7 @@ async def build_briefing(binding: LocalBinding | None, service_url: str, *,
 
 Note the test asserts `"5 findings"` (4+1) and `"1 conflict"` — the f-string above produces both.
 
-- [ ] **Step 4: Implement `register_tools` in server.py**
+- [x] **Step 4: Implement `register_tools` in server.py**
 
 Append:
 
@@ -744,7 +890,7 @@ CLI composition in `main()` (replacing Task 3's `build_app(relay)` line):
 
 where `build_npu_distiller()` constructs `Distiller(NPUProvider(...), binding.to_local_binding())` from `synapse_distiller.load_config()` exactly the way `synapse_worker.cli`'s run command does — same config, same pack, same model: the one-distiller property.
 
-- [ ] **Step 5: Run everything, then commit**
+- [x] **Step 5: Run everything, then commit**
 
 Run: `uv run pytest packages/orchestrator -q` → PASS.
 
@@ -752,6 +898,89 @@ Run: `uv run pytest packages/orchestrator -q` → PASS.
 git add packages/orchestrator
 git commit -m "feat(orchestrator): query/contribute tools + watermark-driven briefing (Plan D.3)"
 ```
+
+#### Post-review amendment (2026-08-04)
+
+Round 2 review found two gaps in this task's Step 3/Step 4 code as shipped,
+both fixed without changing the Interfaces section above:
+
+- `build_briefing`'s docstring claimed "Hard-capped ... by design" and
+  "FAIL OPEN" with neither enforced: the exception guard was a hand-picked
+  tuple rather than covering the whole build, there was no length cap on
+  the composed string, and service-supplied `by_type` values were
+  interpolated into `instructions` (the highest-trust text surface a
+  connecting agent sees) without stripping control characters. Now the
+  entire build — HTTP round trip, JSON parse, and string composition — is
+  one `except Exception` fail-open, the result is hard-capped to 1200 chars
+  with an ellipsis, and every service-supplied value is run through a
+  `_clean()` that collapses control characters/newlines before
+  interpolation. See `briefing.py`.
+- `contribute()` had no error handling at all — an unreachable NPU, a
+  tripped prompt-drop guard (`synapse_distiller.guards.PromptDropError`),
+  or a bad on-disk config raised straight out of the MCP tool as a raw
+  internal exception string. `distiller_factory()` and `distil()` are now
+  both inside one try/except that returns a calm one-line result in
+  `query()`'s voice, matching the Global Constraints' "Fail open, always."
+  See `server.py`'s `contribute`.
+
+**Two more deviations, unrecorded until now (round 3 review, nit) — both
+improvements, both tested, neither breaking or changing the Interfaces
+section above:**
+
+- `cli.main(argv: list[str] | None = None, *, transport:
+  httpx.AsyncBaseTransport | None = None) -> int` gained a test-only
+  `transport` keyword, threaded into every httpx call `main` makes (Relay,
+  `build_briefing`, `register_tools`) so the CLI's own tests never open a
+  real socket to the default `--service-url`. See `test_cli.py`'s module
+  docstring.
+- `query()` (commit `96c5012`) changed in two ways beyond what this task's
+  Step 3 code shipped: it distinguishes a response that fails to parse
+  (raises, logs, and returns a "couldn't parse" message) from a
+  well-formed empty result (`{"findings": []}`, the honest "checked, found
+  nothing" case) — the original code's `.get("findings", [])` collapsed
+  both into the same confident negative; and it credits EVERY contributor
+  on a Synthesized Finding's `attributions` list, not just
+  `attributions[0]` — crediting only the first would make a pooled,
+  multi-source insight read as one person's, in the common case the asking
+  agent's own. See `test_query_tool_does_not_report_a_false_negative_on_a_
+  shape_mismatch` and `test_query_tool_credits_every_contributor_on_a_
+  synthesized_finding` in `test_tools.py`.
+
+#### Post-review amendment (2026-08-04), round 3
+
+Round 3 review found two findings sharing one root cause: `register_tools`
+closed over a single `binding` resolved once by `cli.main` at boot
+(Interfaces line above: `register_tools(server, *, binding, ...)`), and
+`cli.main` only called it `if binding is not None`. Consequence 1: an
+orchestrator started before any `synapse-worker join` served a
+permanently tool-less MCP server for the life of the process — proven live
+against the real MCP `initialize`/`tools/list` surface
+(`scripts/verify_instructions.py`-style probe). Consequence 2: even when a
+binding existed at boot, a LATER `synapse-worker join <different_id>` was
+invisible to `query`/`contribute` — they kept using the boot-time binding
+forever, while the producer endpoint (Task 3) re-resolved live, so
+`contribute()` could push a Finding to one Shared Session while `query()`
+kept reading another, in the same process and the same MCP session.
+
+**Fix, further superseding this task's Interfaces line:**
+`register_tools(server, *, resolve_binding: Callable[[], LocalBinding |
+None], service_url, relay, distiller_factory: Callable[[LocalBinding],
+Distiller], transport=None) -> None` — `binding` is gone;
+`resolve_binding` is called fresh at the start of every `query`/
+`contribute` invocation, and `distiller_factory` now takes the freshly
+resolved binding as its argument (so `contribute()`'s Distiller — and the
+Attribution it stamps — always matches the Shared Session the Finding is
+about to be recorded under). `cli.main` calls `register_tools`
+unconditionally, once, at boot, never gated on whether a binding exists
+yet. An unbound `query`/`contribute` call now returns a plain "not joined"
+tool result instead of the tool not existing at all. `contribute()` also
+passes its freshly-resolved `binding.shared_id` straight into
+`relay.record()`'s new override (Task 2's round 3 amendment) instead of
+relying on the mutable `relay.shared_id`, so it can no longer disagree
+with a concurrent producer POST about which session it's recording under.
+See `server.py`'s module docstring and `test_tools.py`'s
+`test_query_and_contribute_pick_up_a_join_that_happens_after_registration`
+for the exact reproduction and fix.
 
 ---
 

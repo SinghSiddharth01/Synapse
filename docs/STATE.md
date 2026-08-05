@@ -4,6 +4,8 @@
 
 Full detail: **[`2026-08-04-implementation-report.md`](./2026-08-04-implementation-report.md)**. This file is the summary and the pointer.
 
+**E4 Task 1 — amendment F Q11 verified live: PROVEN.** `scripts/verify_instructions.py` against a real `synapse-orchestrator` process (booted on `127.0.0.1:8787`) received the `initialize` response's `instructions` field containing `SENTINEL` (183 chars). A real MCP client (`mcp.client.streamable_http.streamablehttp_client` + `ClientSession`) does surface `instructions` over the wire — the agent-agnostic-floor tier assignment for the arrival briefing stands; no fallback to a per-agent pack is needed.
+
 ---
 
 ## Start here tomorrow
