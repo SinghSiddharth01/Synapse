@@ -45,6 +45,10 @@ scripts/                run_npu_eval · trace_one · calibrate_prompt · dump_pr
 - [ ] **Decide the worker-side WAL re-join gap:** a Finding queued in the worker's own write-ahead log across a re-join of the SAME Agent product still gets retargeted to the new Shared Session on retry (`relay.py` round-3 note names this as needing a worker-side envelope change). Explicitly not closed by any merged branch — needs a prioritization call.
 - [ ] **Real-socket, two-machine run before the demo:** the closed-loop tests are in-process ASGI by design ("zero sockets"); run worker → orchestrator → a teammate-hosted service over real HTTP at least once, and remember the `mcp==1.9.4` pin trap for any ARM64 Windows teammate.
 
+## The topic lane is on notice
+
+It surfaced **zero** partners at 422 findings and zero at 2,022, none uniquely. The governing band it exists for sits at 25%. Some of that is the offline embedder; some is a corpus artifact. But it is the piece the design leaned on hardest and it is currently the weakest thing in it. Lane yield on a real corpus decides whether it stays, and the design is arranged so that deleting it changes nothing else.
+
 ## Traps worth re-reading
 
 Five of the six numbered traps from 2026-08-04 still stand; #6 is now closed. Q3 ("who builds the orchestrator"), previously tracked on its own as "Open, unchanged," is also closed as of E4's merge — folded in here as #7 rather than kept as a separate section. Two more traps, #8 and #9, earned during this merge.

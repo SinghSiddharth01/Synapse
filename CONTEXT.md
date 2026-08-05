@@ -86,6 +86,24 @@ _Avoid_: the context, the memory (unqualified)
 Two Findings synthesis judged to disagree, surfaced rather than silently resolved.
 _Avoid_: contradiction, disagreement, discrepancy
 
+### Storage and retrieval
+
+**View**:
+What Shared Memory currently looks like, obtained by folding the log in order. Always derived, never stored — discard it and fold again at any time.
+_Avoid_: state, snapshot, the database, current findings
+
+**Lane**:
+One way of finding Candidates — symbols, term overlap, vectors, topic, recency. Lanes are unioned, never intersected. A Finding records which Lanes surfaced it, which is what makes lane yield measurable.
+_Avoid_: retriever, index, strategy, search
+
+**Candidate**:
+An existing Finding offered to the model for comparison against a new one, or against a teammate's question. Candidates are the *only* thing the model sees of the Finding Log — bounded regardless of how large the log is.
+_Avoid_: result, hit, match, neighbour
+
+**Lane yield**:
+Of the Candidates a Lane surfaced, the fraction that ended in an accepted merge. The only honest measure of whether a Lane earns its cost.
+_Avoid_: precision, accuracy, hit rate
+
 ## Notes
 
 - **The shape of Shared Memory is a deliberate first pass and is expected to evolve.** It is where most of the system's future value lives, so it sits behind a storage seam and should not be over-frozen. Splitting Working Memory from Finding Log is the current best structure, not a settled one.
@@ -96,3 +114,5 @@ _Avoid_: contradiction, disagreement, discrepancy
 - Suppression is scoped to the Agent Session, not the Contributor — the justification is "already in that context window", so one Contributor's two agents still learn from each other. A Finding is suppressed only when *every* Attribution on it is that same Agent Session; a Synthesized Finding carrying a teammate's contribution is always shown.
 - Semantic sameness is synthesis's judgement, not an id comparison. Ids exist for idempotent ingest and for referencing (`merged_from`, `merged_into`, `Conflict`) — never for deciding whether two Findings mean the same thing.
 - `Finding.provenance` (`distilled | contributed`) is a separate axis from Attribution: it records *how* a Finding was produced, not *who* by.
+- **A Tombstone is a derived condition, not a written field** (`adr/0004`). A Finding leaves the View because a later `Merged` entry names it as a source — nothing is written onto the original. Everything the term means is unchanged: text and Attribution retained, excluded from retrieval, reachable by id, reversible. `Finding.merged_into` and `Finding.status` are **not written by the service**; read visibility from the View until the team decides whether the ingest API projects them on egress.
+- **The Finding Log is append-only.** This is why a Producer may safely re-push its entire durable log after a service restart: a replayed append is inert rather than a write that resurrects merged-away Findings. "Idempotent ingest" is still the external property; it is now guaranteed by structure rather than by careful write logic.

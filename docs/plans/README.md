@@ -60,7 +60,7 @@ Still parked: Codex adapter, compaction (A.5), A/B measurement (B.8), freshness 
    never pushed
 ```
 
-**Five invariants every plan must preserve:**
+**Six invariants every plan must preserve:**
 
 1. **Egress rule.** Nothing reaches the Synapse Service that has not passed through the distiller. The orchestrator hosts MCP, so agent-authored prose lands in it transiently — that is permitted. Transcript-derived raw content must never enter it at all.
 2. **Retrieval reads the Finding Log, not the Working Memory.** The prose is bounded and read only by the next merge. If `query()` ranks over raw pushed findings, synthesis's dedup and trivia filter protect nothing a teammate sees.
