@@ -192,28 +192,42 @@ class Synthesizer:
             logger.warning("Synthesis verdict's 'conflicts' was %s, not a list; ignoring",
                            type(raw_conflicts).__name__)
             raw_conflicts = []
-        existing_pairs = {frozenset((c.finding_a, c.finding_b)) for c in ctx.conflicts}
         for c in raw_conflicts:
             if (not isinstance(c, dict) or not isinstance(c.get("a"), str)
                     or not isinstance(c.get("b"), str) or not isinstance(c.get("description"), str)):
                 logger.warning("Malformed conflict verdict entry %r; skipping", c)
                 continue
-            if c["a"] not in known or c["b"] not in known:
+            if c["a"] not in known or c["b"] not in known or c["a"] == c["b"]:
                 continue
-            # Follow merged_into forward: a source tombstoned by THIS round's
-            # merges loop (above) must not leave the conflict dangling at an
-            # id that no longer appears in retrieval. ADR 0002 names this as
-            # the reason tombstones exist, not an audit nicety.
-            a = _resolve_forward(store, shared_id, c["a"])
-            b = _resolve_forward(store, shared_id, c["b"])
-            if a == b:
-                continue        # both sides converged into the same finding: no conflict
-            key = frozenset((a, b))
-            if key in existing_pairs:
-                continue        # the bounded candidate window re-shows pairs every round
-            existing_pairs.add(key)
-            ctx.conflicts.append(Conflict(finding_a=a, finding_b=b,
+            ctx.conflicts.append(Conflict(finding_a=c["a"], finding_b=c["b"],
                                           description=c["description"]))
+
+        # Resolve EVERY stored conflict -- old rounds' and this round's new
+        # ones alike -- forward through merged_into, then dedup. Resolving
+        # only THIS round's newly-reported pairs (and leaving conflicts
+        # already sitting in ctx.conflicts untouched) left a Conflict
+        # recorded in an EARLIER round dangling at a tombstone the moment a
+        # LATER round merged that finding away -- exactly the case ADR 0002
+        # names tombstones as needing to survive for ("Conflicts must
+        # follow it forward" is not an audit nicety). Dedup runs on the
+        # RESOLVED ids, after this pass, so a re-reported pair naming the
+        # old id collides with the entry already resolved to the live id
+        # instead of accumulating a duplicate -- the bounded candidate
+        # window makes re-reporting the expected case, not a rare one.
+        resolved: list[Conflict] = []
+        seen_pairs: set[frozenset[str]] = set()
+        for conflict in ctx.conflicts:
+            ra = _resolve_forward(store, shared_id, conflict.finding_a)
+            rb = _resolve_forward(store, shared_id, conflict.finding_b)
+            if ra == rb:
+                continue                  # both sides converged into the same finding
+            key = frozenset((ra, rb))
+            if key in seen_pairs:
+                continue
+            seen_pairs.add(key)
+            resolved.append(Conflict(finding_a=ra, finding_b=rb,
+                                     description=conflict.description))
+        ctx.conflicts = resolved
 
         ctx.working_memory = verdicts.get("working_memory", ctx.working_memory)
         store.bump_version(shared_id)                               # 4. exactly once

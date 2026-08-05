@@ -235,6 +235,69 @@ async def test_a_second_valid_merge_still_applies_after_a_malformed_one_before_i
     assert ctx.memory_version == 1
 
 
+async def test_conflict_recorded_in_an_earlier_round_resolves_forward_when_merged_later():
+    """A Conflict recorded in round 1 must not dangle at a tombstone once a
+    LATER round merges that finding away. ADR 0002 names 'Conflicts must
+    follow it forward' as a reason tombstones exist at all -- that isn't
+    optional just because the merge happened in a different round than the
+    conflict was recorded in. _resolve_forward is only useful if it's ever
+    applied to conflicts already sitting in ctx.conflicts, not just to a
+    verdict's own newly-reported pairs."""
+    store = InMemoryStore()
+    sid = store.create_session(purpose="p", created_by="s").shared_id
+    a, b = _pair()
+    c = Finding(id="f-c", type="learning", text="a third finding",
+               attributions=a.attributions, ts=TS)
+
+    round1 = {"working_memory": "wm", "merges": [], "trivial_ids": [],
+             "conflicts": [{"a": "f-005a-01", "b": "f-c", "description": "disagree"}]}
+    round2 = {"working_memory": "wm",
+             "merges": [{"source_ids": ["f-005a-01", "f-005b-01"], "text": "merged",
+                        "type": "learning"}],
+             "trivial_ids": [], "conflicts": []}
+
+    synth = Synthesizer(FakeProvider(scripts=[round1, round2]))
+    await synth.merge(store, sid, [a, b, c])            # round 1: records the conflict
+    ctx = await synth.merge(store, sid, [])              # round 2: merges f-005a-01 away
+
+    [synthesized] = [f for f in store.all_findings(sid) if f.provenance == Provenance.SYNTHESIZED]
+    [conflict] = ctx.conflicts
+    assert conflict.finding_a == synthesized.id     # resolved forward, not left at the tombstone
+    assert conflict.finding_b == "f-c"
+
+
+async def test_conflicts_dedup_after_resolving_forward_not_before():
+    """The bounded candidate window makes re-reporting the same disagreement
+    the expected case (per test_conflicts_are_deduplicated_across_merge_rounds's
+    own docstring). If the model re-reports a conflict using the ORIGINAL id
+    after it has since been merged away, dedup keyed on the RAW (unresolved)
+    ids misses the collision with the already-resolved entry and the same
+    disagreement is recorded twice."""
+    store = InMemoryStore()
+    sid = store.create_session(purpose="p", created_by="s").shared_id
+    a, b = _pair()
+    c = Finding(id="f-c", type="learning", text="a third finding",
+               attributions=a.attributions, ts=TS)
+
+    round1 = {"working_memory": "wm", "merges": [], "trivial_ids": [],
+             "conflicts": [{"a": "f-005a-01", "b": "f-c", "description": "disagree"}]}
+    round2 = {"working_memory": "wm",
+             "merges": [{"source_ids": ["f-005a-01", "f-005b-01"], "text": "merged",
+                        "type": "learning"}],
+             "trivial_ids": [], "conflicts": []}
+    round3 = {"working_memory": "wm", "merges": [], "trivial_ids": [],
+             # the model re-reports the SAME disagreement, still naming the
+             # now-tombstoned original id -- the bounded window re-shows it
+             "conflicts": [{"a": "f-005a-01", "b": "f-c", "description": "disagree"}]}
+
+    synth = Synthesizer(FakeProvider(scripts=[round1, round2, round3]))
+    await synth.merge(store, sid, [a, b, c])
+    await synth.merge(store, sid, [])
+    ctx = await synth.merge(store, sid, [])
+
+    assert len(ctx.conflicts) == 1                        # not doubled
+
+
 async def test_unknown_ids_from_the_model_are_ignored_not_fatal():
     """An unknown id in a verdict must not crash the merge -- but a verdict
     that resolves to a single live source must not mint a Synthesized
