@@ -126,8 +126,26 @@ def register_tools(server: FastMCP, *, binding, service_url: str, relay,
         segment = Segment(id=f"contrib-{ts.strftime('%H%M%S')}",
                           agent_session_id=binding.agent_session_id,
                           events=[event], started_at=ts, ended_at=ts)
-        distiller = distiller_factory()
-        findings, stats = await distiller.distil(segment)
+        # Post-review amendment (2026-08-04): "Fail open, always" (Global
+        # Constraints) applies to contribute() exactly as it does to query()
+        # above — an unreachable NPU, a tripped prompt-drop guard
+        # (synapse_distiller.guards.PromptDropError), or a bad on-disk config
+        # (missing synapse.toml, an unknown prompt pack — build_npu_distiller,
+        # cli.py) are all real, expected failure modes of a laptop-local
+        # model. Both `distiller_factory()` itself and `distil()` are inside
+        # this guard: a bad config can raise from the factory before distil()
+        # is ever called. Nothing may raise out of this MCP tool — FastMCP
+        # would otherwise wrap it as a raw internal exception string handed
+        # to the agent, and the contributed prose would simply be gone.
+        try:
+            distiller = distiller_factory()
+            findings, stats = await distiller.distil(segment)
+        except Exception as exc:
+            logger.warning("contribute: distillation failed (%s: %s)",
+                           exc.__class__.__name__, exc)
+            return (f"Couldn't process that right now ({exc.__class__.__name__}) — "
+                    "your note was not recorded. Try again in a moment, or mention it "
+                    "to a teammate directly.")
         for f in findings:
             f.provenance = Provenance.CONTRIBUTED
         if not findings:

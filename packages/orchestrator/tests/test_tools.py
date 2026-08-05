@@ -219,3 +219,77 @@ async def test_contribute_round_trips_through_the_distiller_and_relay(tmp_path):
     # point of it landing in team memory at all — pin the exact URL (round 2
     # review: a hardcoded WRONG-SESSION url survived every test).
     assert urls_hit == ["http://svc/v1/sessions/sh-1/findings"]
+
+
+class _RaisingDistiller:
+    """A distiller whose distil() always raises — stands in for an
+    unreachable NPU (ConnectError), a tripped prompt-drop guard
+    (PromptDropError), or any other real failure mode of a laptop-local
+    model."""
+
+    def __init__(self, exc: BaseException) -> None:
+        self._exc = exc
+
+    async def distil(self, segment):
+        raise self._exc
+
+
+async def test_contribute_fails_open_when_the_npu_is_unreachable(tmp_path):
+    """Post-review amendment (2026-08-04): 'Fail open, always' (Global
+    Constraints) must apply to contribute() exactly as it does to query() —
+    an unreachable NPU used to raise straight out of the MCP tool as a raw
+    internal exception string, with the agent's contributed prose simply
+    gone."""
+    def egress_handler(request):
+        raise AssertionError("nothing should egress when distillation failed")
+    server = create_mcp()
+    relay = Relay(tmp_path, "http://svc", "sh-1",
+                  transport=httpx.MockTransport(egress_handler))
+    register_tools(
+        server, binding=BINDING, service_url="http://svc", relay=relay,
+        distiller_factory=lambda: _RaisingDistiller(
+            ConnectionError("NPU server not running")),
+        transport=httpx.MockTransport(egress_handler),
+    )
+    result = str(await server.call_tool("contribute", {"text": "the retry backoff…"}))
+    assert "not recorded" in result
+    assert not (tmp_path / "findings.jsonl").exists()   # nothing durable from a failed distil
+
+
+async def test_contribute_fails_open_on_a_tripped_prompt_drop_guard(tmp_path):
+    """guards.py's PromptDropError: the model didn't condition on its prompt,
+    so any output would be invented. Must degrade to a calm tool result too,
+    never raise."""
+    from synapse_distiller import PromptDropError
+
+    server = create_mcp()
+    relay = Relay(tmp_path, "http://svc", "sh-1",
+                  transport=httpx.MockTransport(lambda r: httpx.Response(200)))
+    register_tools(
+        server, binding=BINDING, service_url="http://svc", relay=relay,
+        distiller_factory=lambda: _RaisingDistiller(
+            PromptDropError("prompt dropped")),
+        transport=httpx.MockTransport(lambda r: httpx.Response(200)),
+    )
+    result = str(await server.call_tool("contribute", {"text": "the retry backoff…"}))
+    assert "not recorded" in result
+
+
+async def test_contribute_fails_open_on_a_bad_config(tmp_path):
+    """A bad on-disk config (missing synapse.toml, an unknown prompt pack)
+    can raise from `distiller_factory()` itself, before distil() is ever
+    called — the try/except must wrap the factory call too, not just the
+    distil() call."""
+    def bad_factory():
+        raise FileNotFoundError("synapse.toml missing")
+
+    server = create_mcp()
+    relay = Relay(tmp_path, "http://svc", "sh-1",
+                  transport=httpx.MockTransport(lambda r: httpx.Response(200)))
+    register_tools(
+        server, binding=BINDING, service_url="http://svc", relay=relay,
+        distiller_factory=bad_factory,
+        transport=httpx.MockTransport(lambda r: httpx.Response(200)),
+    )
+    result = str(await server.call_tool("contribute", {"text": "the retry backoff…"}))
+    assert "not recorded" in result
