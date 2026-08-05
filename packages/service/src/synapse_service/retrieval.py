@@ -29,7 +29,7 @@ RETRIEVER_SYSTEM = (
 )
 
 
-def _visible_to(candidates: list[Finding], asking_agent_session: str) -> list[Finding]:
+def visible_to(candidates: list[Finding], asking_agent_session: str) -> list[Finding]:
     # A Finding is suppressed only when it HAS attributions and every one of
     # them is the asking agent's own Agent Session. `all(...)` over an empty
     # attributions list is vacuously True, so without the explicit
@@ -43,7 +43,7 @@ def _visible_to(candidates: list[Finding], asking_agent_session: str) -> list[Fi
 async def query_findings(provider: ModelProvider, *, context: SessionContext,
                          candidates: list[Finding], query: str,
                          asking_agent_session: str) -> list[Finding]:
-    visible = _visible_to(candidates, asking_agent_session)
+    visible = visible_to(candidates, asking_agent_session)
     if not visible:
         return []
 

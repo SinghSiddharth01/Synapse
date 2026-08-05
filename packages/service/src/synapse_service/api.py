@@ -14,7 +14,7 @@ from starlette.routing import Route
 from synapse_contracts import Finding
 from synapse_providers import ModelProvider
 
-from synapse_service.retrieval import query_findings
+from synapse_service.retrieval import query_findings, visible_to
 from synapse_service.store import InMemoryStore
 from synapse_service.synthesis import Synthesizer
 
@@ -63,7 +63,12 @@ def build_app(provider: ModelProvider) -> Starlette:
             return JSONResponse({"error": f"unknown session {sid}"}, status_code=404)
         agent_session = request.query_params.get("agent_session", "")
         ctx = store.get_context(sid)
-        by_type = Counter(f.type.value for f in store.retrievable(sid))
+        # Invariant 3 governs the whole awareness layer, not just /query:
+        # suppress a Finding here too, or watermark advertises "new team
+        # knowledge" built entirely from the asker's own findings that
+        # /query then correctly refuses to show.
+        visible = visible_to(store.retrievable(sid), agent_session)
+        by_type = Counter(f.type.value for f in visible)
         return JSONResponse({
             "version": ctx.memory_version,
             "new_since": ctx.memory_version - store.last_seen(sid, agent_session),

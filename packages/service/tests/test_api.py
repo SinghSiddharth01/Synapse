@@ -67,6 +67,26 @@ async def test_replayed_push_is_a_noop_and_skips_the_model():
     assert provider.calls == 1     # the replay must never reach the provider a 2nd time
 
 
+async def test_watermark_applies_the_same_suppression_rule_as_query():
+    """Invariant 3 governs the whole awareness layer, not just /query. An
+    asker whose own Agent Session produced every attribution on a Finding
+    must not see it counted in by_type either -- otherwise watermark
+    advertises 'new team knowledge' that /query then refuses to show."""
+    provider = FakeProvider(scripts=[MERGE_NOOP])
+    async with _client(provider) as client:
+        sid = (await client.post("/v1/sessions", json={"purpose": "p", "created_by": "s"})
+               ).json()["shared_id"]
+        findings = [_finding_json(f"f-{i}", agent_session="as-me") for i in range(3)]
+        r = await client.post(f"/v1/sessions/{sid}/findings", json={"findings": findings})
+        assert r.json()["accepted"] == 3
+
+        r = await client.get(f"/v1/sessions/{sid}/watermark", params={"agent_session": "as-me"})
+        assert r.json()["by_type"] == {}                  # all three are the asker's own
+
+        r = await client.get(f"/v1/sessions/{sid}/watermark", params={"agent_session": "as-other"})
+        assert r.json()["by_type"] == {"learning": 3}      # a teammate sees all three
+
+
 async def test_unknown_session_404_and_bad_payload_422():
     async with _client(FakeProvider(scripts=[])) as client:
         assert (await client.get("/v1/sessions/nope/watermark")).status_code == 404
