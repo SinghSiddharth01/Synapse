@@ -8,6 +8,13 @@
 
 **Why this track is safe to parallelise:** every stage is deterministic plumbing testable against committed fixtures. Nothing here waits on a model or a device.
 
+> **⟨STATUS 2026-08-04⟩** Most of this track is **built and running end to end on real Claude Code data** — see `docs/2026-08-04-implementation-report.md`. Built: detection, follower with durable offset, `ClaudeCodeSource`, segmenter, producer with write-ahead log, worker loop, CLI (`join`/`run`/`status`/`replay`). **Not built: A.5 compaction, and A.5b triage — which is new and now load-bearing.** `CodexSource` is also still missing, and it is demo-path.
+>
+> Three properties the implementation established that this plan did not anticipate, all worth preserving:
+> - **The open turn is held back.** A timer fires whenever it fires; at one instant `seg-001`'s transcript contains only *"I'll add pgbouncer in transaction pooling mode"* and condensing it yields the opposite of what happened, because the reversal had not been written yet. The segmenter emits a turn only once the next begins, with an idle flush so the final turn is not stranded.
+> - **Crash ordering fails toward duplication, never loss.** Findings hit the write-ahead log *before* any send; the offset and the pending-turn buffer are persisted together, *after*. The pending buffer must be persisted with the offset — otherwise the offset advances past events still held in the segmenter, which is silent loss.
+> - **Ticks never overlap.** `run()` awaits a full tick before sleeping, so the interval is a gap *between* ticks. Natural backpressure, and no concurrent NPU calls contending for the single resident model.
+
 ---
 
 ## Task A.1 — Agent registry and detection
@@ -62,6 +69,25 @@ Deterministic code, not a model. Runs before prompt rendering.
 
 **First failing tests:** `seg-003` (oversized `tool_result`) compacts within budget **and the error line survives**; binary content is stripped; a trivial call is dropped; compaction is idempotent.
 
+## Task A.5b — Triage ⟨NEW 2026-08-04, load-bearing⟩
+
+**Status: does not exist. Nothing filters triviality today, at either end.**
+
+`adr/0003` removed durability judgment from the distiller — measured, a 4B invented a finding from an all-noise segment in **6 of 6** prompt configurations. That judgment moved to two places: **triage here** (deterministic code, upstream) and synthesis downstream. Triage was never built, so trivia flows straight to the sink: the first real end-to-end run condensed an API rate-limit notice into a `learning`.
+
+Deterministic code in the worker, between compaction and distillation. Decides whether a segment reaches the NPU at all. No contract change.
+
+- **Keep on:** errors, non-zero exits, `thinking` blocks, compaction summaries, decision language (*"instead"*, *"rather than"*, *"dead end"*, *"switching to"*).
+- **Skip:** read-only runs that all succeeded; lint/format with nothing remaining.
+
+> **Tune for recall.** A false positive costs NPU time. A false negative is knowledge permanently lost *and silent* — the follower never re-reads a position. **Log every skip with its reason**, or the false-negative rate cannot be measured at all.
+
+> **Triage must read the full Segment, not the distiller's filtered view.** `distil_kinds` defaults to `["text"]` and the filter is applied at *render* time inside the distiller, so the `Segment` arriving here still carries every kind. That is load-bearing: triage keys on errors, exit codes and `thinking` blocks — precisely the kinds the distiller never sees. Filtering earlier "for efficiency" would blind triage to its own signals.
+
+> **Record the byte range on every skip.** The report calls false negatives unrecoverable because the follower never re-reads. That is a property of the current implementation, not a physical one — the transcript is immutable and still on disk. If the skip log carries `(start_offset, end_offset, reason)`, a wrong skip becomes re-runnable via `replay --skipped` instead of permanent loss. Cheap now, impossible to retrofit once offsets are gone.
+
+**First failing tests:** an all-noise segment (`seg-004`) is skipped and never reaches the model; a segment containing a non-zero exit is kept; a segment whose only signal is a `thinking` block is kept **even though `distil_kinds` excludes thinking**; every skip appears in the log with a reason and a byte range; recall is measurable from the log alone.
+
 ## Task A.6 — Producer client + durable log
 
 POSTs `Finding[]` to the orchestrator's producer endpoint. Worker-initiated — the worker owns the transcript, so it owns the trigger, and passivity is preserved end to end.
@@ -75,9 +101,13 @@ POSTs `Finding[]` to the orchestrator's producer endpoint. Worker-initiated — 
 
 **First failing tests:** a finding is durable on disk *before* the first POST; unsent findings replay after a worker restart; a replayed POST carries identical ids; findings survive the orchestrator being down and drain when it returns; sends never block distillation.
 
-## Task A.7 — Worker orchestration + CLI
+## Task A.7 — Worker orchestration + CLI ⟨BUILT⟩
 
-Wires detection → follow → adapt → segment → compact → distil → POST, plus a minimal CLI (`synapse join <shared_id>`, status, run).
+Wires detection → follow → adapt → segment → compact → **triage** → distil → POST, plus the CLI: `join <shared_id>` · `run --interval` · `status` · `replay`.
+
+**Session binding landed here, not in the orchestrator.** Plan D.2 said the orchestrator writes the binding; in practice it needs only detection (already here) and no MCP server has to be running for a developer to bind a session. `SessionBinding` lives in `synapse_contracts` so the read and write sides need no dependency on each other. Storage is keyed by Agent product (`bindings/claude-code.json`), so a second adapter needs no reshape. Revisit if Plan D.1's producer endpoint ever has to stamp Attribution from a binding it cannot otherwise see.
+
+**Still missing from `join`:** Plan D.2's "register the Contributor with the service (`POST /members`)". No service exists; `cmd_join` logs the skip rather than omitting it silently.
 
 **First failing test:** given a fixture tree and a `FakeProvider` distiller, running the worker POSTs the golden findings to a mock producer endpoint.
 

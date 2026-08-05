@@ -37,6 +37,10 @@ fixtures/
 
 Authoritative source: the schema block in `docs/brainstorming/2026-07-25-plan-0-foundation.md` Task 2, plus its contract-revision table. Copy it into `synapse_contracts/schemas.py` verbatim; do not re-derive it from prose.
 
+> ⟨2026-08-04⟩ **Built.** One bug found and fixed at the source: that document's `__init__.py` listed `Attribution`, `FindingId`, `FindingStatus` and `Provenance` in `__all__` without importing them, so `from synapse_contracts import Attribution` raised `ImportError`. Corrected in the source doc.
+>
+> One addition beyond the freeze: **`SessionBinding`** — the on-disk form of `LocalBinding`, plus which transcript it pins and when. It lives in `synapse_contracts` so the write side (worker `join`) and the read side (`resolve_transcript`) need no dependency on each other.
+
 Types: `AgentEvent` · `Segment` · `Attribution` · `Finding` (+`FindingId`, `FindingType`, `Provenance`, `FindingStatus`) · `SynapseSession` · `LocalBinding` · `Conflict` · `SessionContext` · `ModelUsage` · `ModelResult`, plus the ingest/producer request-response pairs.
 
 **First failing tests:**
@@ -64,6 +68,14 @@ The single most valuable artefact in this plan. Hand-author, co-authored by all 
 **Done when:** every fixture parses into `Segment`, every golden parses into `Finding[]`, and a loader test proves it.
 
 **Do not shortcut this.** The goldens *are* the eval target and the quality bar. Plan A's segmenter must reproduce the segments exactly; Plan B's distiller is measured against the findings.
+
+> **⟨STATUS 2026-08-04 — the biggest gap in the project⟩** Two of five exist (`seg-001`, `seg-004`), **both written by one person, and one was contaminated** by a few-shot that duplicated it. Every measurement in the implementation report rests on n=2 and cannot distinguish *"v4 fixed the prompt"* from *"v4 fits `seg-001`"*. It also cannot produce a triage recall rate, which gates Plan A.5b, which gates the trivia problem. **This is the cross-track blocker.**
+>
+> `seg-002`, `seg-003` (oversized `tool_result`) and `seg-005` (near-duplicates across Contributors) are missing. **`seg-005` is the only test of semantic merge — ADR 0002, the most intricate decision in the design — so Plan C cannot meet its exit criteria without it.**
+>
+> Four cases that would actually test something, beyond the original five: **insight with no error** (a decision reached conversationally, nothing for a keyword filter to catch — the hardest triage case); **an error that is not insight** (a typo, fixed immediately); **a `dead_end` whose pivot lands in the next segment**; **noise that superficially looks like signal**.
+>
+> `seg-004`'s golden empty array has **changed meaning**: under `adr/0003` it encodes a *triage* expectation, not a distiller one. The distiller should emit notes for it; triage should never have sent it.
 
 ## Task 0.4 — `ModelProvider` + `FakeProvider`
 

@@ -21,6 +21,8 @@
 > | *(none)* | `Finding.provenance`, `.status`, `.merged_from`, `.merged_into` | Synthesis merges *semantically* — two findings meaning the same thing produce a **new** `SYNTHESIZED` Finding capturing the essence of both, carrying both attributions. Never discard-one, or the second half of a pooled insight is lost; never rewrite an original in place either, or its id points at text its author never wrote. Originals become **tombstones**: `merged_into` set, text retained, excluded from retrieval. Tombstones rather than deletes for three correctness reasons — ingest upserts by id so a 5xx retry must find a known id; `Conflict` holds ids and must follow `merged_into` forward; and the merge is an 8B model's judgement performing the only irreversible action in the system. `RETRIEVABLE == merged_into is None and status is KEPT`. |
 > | *(none)* | `SessionContext.memory_version: int` | Increments once per merge. The entire staleness calculation for the awareness layer. |
 >
+> **⟨FIX 2026-08-04⟩** The `__init__.py` below originally listed `Attribution`, `FindingId`, `FindingStatus` and `Provenance` in `__all__` without adding them to the import list, so `from synapse_contracts import Attribution` raised `ImportError`. Corrected here. Caught during implementation — see `docs/2026-08-04-implementation-report.md` Part 1.
+>
 > **Two rules that fall out and are easy to get wrong:**
 > 1. **Retrieval reads the Finding Log, not `working_memory`.** The prose is bounded and exists to keep the merge prompt fixed-cost; it is read by the next merge and nothing else. If `query()` ranks over raw pushed findings instead of the curated Log, synthesis's dedup and trivia filter protect nothing a teammate ever sees.
 > 2. **Awareness suppresses a Finding only when *every* attribution is the asking agent's own Agent Session** — scoped to Agent Session, not Contributor. One person's two agents must still learn from each other, and a Synthesized Finding carrying a teammate's contribution is always shown.
@@ -692,12 +694,16 @@ Overwrite `packages/contracts/src/synapse_contracts/__init__.py`:
 
 from synapse_contracts.schemas import (
     AgentEvent,
+    Attribution,
     Conflict,
     Finding,
+    FindingId,
+    FindingStatus,
     FindingType,
     LocalBinding,
     ModelResult,
     ModelUsage,
+    Provenance,
     Segment,
     SessionContext,
     SynapseSession,
@@ -1370,12 +1376,16 @@ from synapse_contracts.ingest_api import (
 )
 from synapse_contracts.schemas import (
     AgentEvent,
+    Attribution,
     Conflict,
     Finding,
+    FindingId,
+    FindingStatus,
     FindingType,
     LocalBinding,
     ModelResult,
     ModelUsage,
+    Provenance,
     Segment,
     SessionContext,
     SynapseSession,

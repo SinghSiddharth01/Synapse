@@ -8,6 +8,7 @@
 **Amended:** 2026-08-03 — agent auto-detection, pre-recorded A/B demo, per-model segment budget, shared-memory storage seam; see `2026-08-03-agent-detection-demo-storage-amendment.md`. Amended sections marked ⟨D⟩.
 **Amended:** 2026-08-03 — measured NPU/GenieX evidence folded in (benchmarks taken 2026-07-30, superseding ⟨A⟩ where they disagree); see `2026-07-30-npu-llm-benchmarks-and-geniex-findings.md`. Amended sections marked ⟨E⟩.
 **Amended:** 2026-08-03 — domain-model + architecture revision: **local Orchestrator** (§4 rewritten; the old "MCP transport is remote HTTP/SSE" is retired), Attribution, Finding identity, semantic merge with tombstones, two-store Shared Memory, write-ahead durability. See `2026-08-03-local-orchestrator-domain-model-amendment.md`, `/CONTEXT.md`, and `docs/adr/`. Amended sections marked ⟨F⟩.
+**Amended:** 2026-08-04 — first implementation. The on-device distiller **compresses; it does not judge** (`docs/adr/0003`), so a **triage** stage joins the edge pipeline; `qairt` is live and `usable_context = 4096` measured; `native_structured_output = False` proved by control probe; AI-100 is entitled to 70B/32B but capacity-blocked. See `docs/2026-08-04-implementation-report.md`. Amended sections marked ⟨G⟩.
 **Event:** Snapdragon Multiverse internal hackathon (build week Aug 3–7 2026; prep week ~Jul 27–31)
 **Team:** Siddsing (architect/integration), Akhil (edge worker / low-level), Aditya (ML/distillation, owns NPU laptop)
 
@@ -53,7 +54,9 @@ A teammate creates an opt-in shared session from their Copilot+ PC, declaring it
         │                            Agent detect (registry of transcript roots) ⟨D⟩
         │                            Follower → Source adapter → AgentEvent
         │                            Segmenter → Segment (turn boundary + per-model budget)
+        │                            Triage ⟨G⟩ — deterministic; is this worth the NPU?
         │                            Distiller ── ModelProvider(SLM on NPU) → Finding[]
+        │                              compresses and abstracts; does NOT judge ⟨G⟩
         │                            Durable log (write-ahead) ── POST findings
    ─ ─ ─│─ ─ device boundary: only Findings cross · ONE egress point ─ ─ ─
         ▼
@@ -174,6 +177,9 @@ synthesizer: claude                   synthesizer: aic100
 | Shared-memory store is naive (in-memory + LLM-as-retriever) ⟨D⟩ | acceptable at hackathon scale; a narrow storage interface isolates the choice; RAG / graph / hierarchy evaluated as the scaling story |
 | Distiller & synthesis prompts are first-pass Claude drafts ⟨D⟩ | explicitly not contracts; eval loop + prompt-optimizer (hybrid amendment) is the tuning mechanism |
 | Findings lost on a transient failure — NPU work is expensive and unrepeatable ⟨F⟩ | write-ahead durable log at worker and orchestrator: persist on produce, before any send; replay unsent on restart |
+| **A 4B reverses a fact stated in its own prompt, passing every guard** ⟨G⟩ | highest-severity risk now. Fidelity rule in the prompt fixed it on n=1; needs a real corpus. An inverted finding is indistinguishable from a correct one downstream |
+| **The privacy metric cannot see the leaks that occur** ⟨G⟩ | 8-gram overlap reports 0.00 on a finding containing `default_pool_size=25`. Needs an identifier-shaped-token check. **Do not report the current number — it reads as proof and is not** |
+| **Nothing filters triviality** ⟨G⟩ | `adr/0003` moved judgment to triage (unbuilt) and synthesis (unbuilt). Trivia reaches the sink today |
 | Service restart wipes in-memory Shared Memory for everyone ⟨F⟩ | logs are retained after send, so every orchestrator can `resync`; safe because ingest upserts by `Finding.id` |
 | MCP cannot identify which Agent Session is calling ⟨F⟩ | `clientInfo.name` → product + worker live-session lookup. Named limit: one Agent Session per product per machine |
 | Demo A/B baseline is contaminated by human learning ⟨F⟩ | A/B the *agents* on a replayed capture from fixed repo state, N runs for variance; pre-populated findings must come from a real distilled capture |

@@ -19,11 +19,27 @@ Cloud AI 100 is provided as a **hosted service** (Cirrascale Inference Cloud, Cl
 |---|---|
 | Base URL | `https://aisuite.cirrascale.com/apis/v2` (config: `INFERENCE_CLOUD_BASE_URL`) |
 | Auth | `Authorization: Bearer <key>` (config: `INFERENCE_CLOUD_API_KEY`; key lives in gitignored `api-1.json` / `.env`, never in the repo) |
-| LLMs on our key | **`Llama-3.1-8B` only** (no 70B; ask at office hours whether it can be enabled — if so it's a config-line change) |
+| LLMs on our key | `Llama-3.1-8B` is the only entry in `GET /models` — but that endpoint **under-reports**. ⟨CORRECTED 2026-08-05, see below⟩ |
 | Embeddings | `BAAI/bge-large-en-v1.5` (1024-dim, verified) + `bge-base` |
 | Other | reranker endpoint (BAAI/bge-reranker), sdxl-turbo, transcribe/translate |
 | Endpoints | `POST {base}/chat/completions`, `{base}/completions`, `{base}/embeddings`, `{base}/ping`, `{base}/models` — OpenAI-*shaped* responses |
 | Latency | ~0.7 s short chat completion (dev Mac, home network) |
+
+### ⟨CORRECTION 2026-08-05⟩ — the key *is* entitled to 70B/32B; `/models` lies
+
+The 2026-08-03 "8B only" conclusion was drawn from `GET /models` alone. That was a bad inference: `/models` returns only `{"llm":["Llama-3.1-8B"], ...}`, but the console's Models/rate-limit page lists `Llama-3.3-70B`, `DeepSeek-R1-Distill-Llama-70B`, and `Qwen-QwQ-32B` as Available with configured buckets. Re-probed by invocation, which is the only authoritative test:
+
+| `model` sent to `/chat/completions` | Response | Latency |
+|---|---|---|
+| `NoSuchModel-Fake-99B` (control) | `429 Invalid model/rate limits not configured for this model` | 0.25 s |
+| `Llama-3.1-8B` | `200`, content `"Pong"` | 0.21 s |
+| `Llama-3.3-70B` | `500 Internal Server Error: Models Busy/Unavailable` | 60 s (server-side timeout, reproduced twice) |
+| `DeepSeek-R1-Distill-Llama-70B` | no response, client timeout | > 45 s |
+| `Qwen-QwQ-32B` | no response, client timeout | > 45 s |
+
+**Discriminator:** an unentitled model is rejected *immediately* with a distinct 429 naming the missing rate-limit config. The 70B/32B models are accepted by the router and then block on backend capacity. Entitlement present, capacity absent — a different failure, with different consequences.
+
+**Still unproven:** no successful generation has been obtained from any model above 8B. Every attempt so far has failed on capacity, so 70B synthesis quality remains unmeasured. Do not plan around 70B until one completion actually returns. Treat `/models` as a lower bound on the catalog, never as the entitlement list.
 
 ### Behavioral gotchas (probed, not assumed)
 
@@ -70,7 +86,7 @@ ONNX Runtime GenAI + QNN EP drops out of the plan entirely (kept in history as t
 
 ## Part 3 — Model selection (Qualcomm-optimized only)
 
-**Synthesizer (AI-100):** `Llama-3.1-8B` — the only LLM on our key. Design synthesis prompts for 8B: tight working-memory bound (~500 words, already in spec), simple instructions, tolerant-parse path assumed.
+**Synthesizer (AI-100):** `Llama-3.1-8B` — ⟨CORRECTED 2026-08-05⟩ not "the only LLM on our key" (see Part 1 correction: 70B/32B are entitled but capacity-blocked), but still the only one that has ever *returned a completion*. It stays the default for that reason. Design synthesis prompts for 8B: tight working-memory bound (~500 words, already in spec), simple instructions, tolerant-parse path assumed. Any 70B upgrade needs a fallback-to-8B path, because the 70B's observed failure mode is a 60 s hang then 500.
 
 **Distiller (NPU):** AI Hub's GenieX-runtime catalog (`geniex_qairt,geniex_llamacpp`, compute/X-Elite class) has 12 models. Excluding vision models and GPT-OSS-20B (MoE, overkill for an always-on background distiller), the candidates:
 
@@ -114,6 +130,7 @@ We do **not** use QUAD `convert_model`/`generate_code` for the distiller — tha
 ## Demo-day checklist additions
 
 - [ ] `{base}/ping` from the venue network (HaQathon) on the demo machine.
-- [ ] `models` still lists `Llama-3.1-8B`; credits remaining sane.
+- [ ] `Llama-3.1-8B` still returns a completion (invoke it — do **not** trust `GET /models`); credits remaining sane.
+- [ ] Retry a `Llama-3.3-70B` completion; if one lands, capacity has freed up and the 70B synthesis comparison becomes runnable.
 - [ ] Fallback config ready: `synthesizer: ollama` one env var away.
 - [ ] `geniex serve` starts cleanly on the X Elite; distiller model bundle cached locally (no venue-WiFi dependency on the edge path).

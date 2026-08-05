@@ -33,8 +33,16 @@ _Avoid_: client, tool, assistant, IDE
 ### Components
 
 **Edge Worker**:
-The local process holding read-only access to transcripts. It detects Agents, segments what they write, and distils it. The only component that ever sees raw transcript content.
+The local process holding read-only access to transcripts. It detects Agents, segments what they write, triages, and distils. The only component that ever sees raw transcript content.
 _Avoid_: agent, collector, watcher, daemon
+
+**Triage**:
+The deterministic decision, made in the Edge Worker, about whether a Segment is worth sending to the model at all. Judges durability; the Distiller does not.
+_Avoid_: filter, gate, screening, pre-processing
+
+**Distiller**:
+The on-device model step that turns a Segment into Findings. Its job is faithful compression and abstraction — it does not decide what is worth keeping.
+_Avoid_: summarizer, extractor, condenser, analyzer
 
 **Orchestrator**:
 The local hub, one per machine. The single place Findings enter Synapse from this machine, whoever produced them, and the single place anything leaves it. Hosts the MCP server and owns the LocalBinding.

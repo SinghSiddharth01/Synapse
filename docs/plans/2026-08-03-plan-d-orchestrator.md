@@ -6,6 +6,14 @@
 
 **Goal:** be the single place findings enter Synapse from this machine, whoever produced them — and the single place anything leaves it.
 
+> **⟨STATUS 2026-08-04⟩ A transport shell exists and nothing else.** It boots and serves `streamable-http` on `127.0.0.1:8787` per `adr/0001`, verified live against a real MCP client, reporting itself honestly empty (`tools: []`, `prompts: []`). Everything below is unbuilt: no producer endpoint (D.1), no service client or durable log (D.4), no `query`/`contribute` (D.3 — needs the Synapse Service). `FileSink` in the worker still stands in for the whole egress path; `HttpSink` exists and has never talked to a real endpoint.
+>
+> **D.2's session binding landed in the worker instead** — see Plan A.7. It needs only detection, which the worker already has, and no MCP server has to be running for a developer to bind a session. `SessionBinding` lives in `synapse_contracts` so neither side depends on the other.
+>
+> **Pin `mcp==1.9.4` exactly.** Every version from `1.9.4` through `1.29.0`, and all of `2.x`, pulls `pyjwt[crypto]` → `cryptography`, which has no ARM64 Windows wheel and fails building from source. `1.9.4` is dependency-clean for a local unauthenticated server.
+>
+> **A course-correction worth keeping.** An MCP *prompt* (`/mcp__synapse__start <session_id>`) was built first, worked, and was verified live — then found to contradict D.3's *"there is no `attach(shared_id)`"*. It was deleted rather than deprecated. The lesson recorded: for anything in Plan A/D territory, check the plan **before** presenting options, not after building one.
+
 **Transport: localhost HTTP, one shared orchestrator per machine. Not stdio** — stdio spawns a server process per client, which would give one orchestrator per agent and destroy the single-egress structure. Both demo agents support HTTP MCP servers (Claude Code; Codex via `[mcp_servers.*]` with `url` in `~/.codex/config.toml`).
 
 > **Caller identity — a protocol limitation to design around.** MCP gives a server only `clientInfo: {name, title, version}` at initialize. That identifies the client **product**, not a conversation; nothing in the spec identifies an Agent Session. Resolve it as `clientInfo.name` → Agent product, then the worker's live-session detection → Agent Session. **Documented limitation:** one active Agent Session per Agent product per machine; two Claude Code windows in the same Shared Session is ambiguous. The *distilled* path is unaffected — it never touches MCP and the worker knows the Agent Session exactly.
@@ -59,6 +67,8 @@ Local, over localhost HTTP. Tools: `query(nl)` → ranked findings · `contribut
 Tool descriptions are written in **trigger voice, not API voice** — *"call before exploring an unfamiliar subsystem, when debugging something a teammate may also be on, or before concluding something is a dead end."*
 
 **First failing tests:** initialize returns a briefing in `instructions` reflecting the bound session's real counts and topics; the briefing stays within its token cap for a session with 40 findings; `query` returns ranked findings; an agent with no binding gets a valid initialize with no briefing rather than an error.
+
+> **⟨2026-08-04⟩ Verify the `instructions` mechanism now — it is nearly free and currently unproven.** The whole reason the arrival briefing sits in the agent-agnostic floor is that a real client reads `instructions` from the initialize response. `scripts/verify_orchestrator.py` already drives a real MCP client against the live shell and asserts `tools: []` / `prompts: []`; it does not yet assert anything about `instructions`. Putting a sentinel string in the shell's `instructions` and asserting the client sees it would confirm the mechanism **before** anything is built on top of it. If it turns out a client ignores the field, the whole tier assignment from amendment F Q11 changes, and it is far cheaper to learn that against a shell than against a finished briefing.
 
 ## Task D.4 — Service client + durable log
 

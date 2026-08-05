@@ -15,6 +15,10 @@
 - `OpenAICompatibleProvider` — one HTTP adapter; `OllamaProvider`, `AIC100Provider`, and Plan B's `NPUProvider` differ essentially by base URL.
 - `AIC100Provider` — hosted Cirrascale, `Llama-3.1-8B`, `INFERENCE_CLOUD_API_KEY`.
 
+> **⟨CORRECTION⟩ The key *is* entitled to 70B/32B — `GET /models` under-reports.** The earlier "8B only" conclusion was drawn from `/models` alone, which returns just `{"llm":["Llama-3.1-8B"]}`; the console lists `Llama-3.3-70B`, `DeepSeek-R1-Distill-Llama-70B` and `Qwen-QwQ-32B` as available with configured buckets. Re-probed by invocation, which is the only authoritative test: an *unentitled* model is rejected immediately with a distinct `429` naming the missing rate-limit config, while the 70B/32B models are **accepted by the router and then block on backend capacity** (500 after 60 s, or client timeout). Entitlement present, capacity absent — a different failure with different consequences.
+>
+> **But no successful generation above 8B has ever returned.** 70B synthesis quality is unmeasured, not merely unavailable. Do not plan around it until one completion actually lands. Treat `/models` as a lower bound on the catalog, never as the entitlement list — a lesson that generalises past this provider.
+
 Two verified gotchas, both probed live:
 1. `response_format: json_schema` is **silently ignored** → `native_structured_output = False`.
 2. `/chat/completions` **eats JSON output** — any prompt leading the model to emit `{...}` trips the server's tool-call parser, returning empty content plus an empty `tool_calls` entry. Schema calls must route via **`POST /completions`** with a flattened prompt and a tolerant first-balanced-object extractor.
@@ -68,7 +72,11 @@ Incremental merge: `(SessionContext, new Finding[]) -> SessionContext`. The prom
 >
 > Tombstones rather than deletes, for correctness: ingest upserts by id so a retry must find a known id; conflicts must follow `merged_into` forward; and this merge is an 8B model's judgement performing the only irreversible action in the system.
 
-**c. Conflicts and trivia.** Contradictory pairs become `Conflict{finding_a: FindingId, finding_b: FindingId, description}` — surfaced, never silently resolved. And one prompt instruction: *drop findings that merely restate actions without insight* → `status = TRIVIAL`. This is the backstop for the 4B's noise.
+**c. Conflicts and trivia.** Contradictory pairs become `Conflict{finding_a: FindingId, finding_b: FindingId, description}` — surfaced, never silently resolved. And one prompt instruction: *drop findings that merely restate actions without insight* → `status = TRIVIAL`.
+
+> **⟨2026-08-04⟩ This filter got promoted from backstop to load-bearing.** `adr/0003` removed durability judgment from the distiller because a 4B invented findings from all-noise segments in 6 of 6 configurations. That judgment now has exactly two homes: triage upstream (Plan A.5b, **does not exist**) and this instruction. Today neither is built, and trivia demonstrably reaches the sink.
+>
+> Two things follow. First, **this is no longer a nice-to-have prompt line** — write a test for it, not just an instruction. Second, it runs on `Llama-3.1-8B`, whose quality at this job is unvalidated, and the 70B that might do it better has never returned a completion. Do not assume the downstream half of `adr/0003` is free.
 
 Bump `memory_version` once per merge.
 
@@ -115,7 +123,8 @@ The service half of the awareness layer (Plan D owns delivery).
 |---|---|
 | Retrieval reads Working Memory instead of the Log | Explicit test that a trivial finding never surfaces. This is the single easiest mistake to make in this plan |
 | Bad merge by the 8B destroys an insight | Tombstones make it recoverable and inspectable; the merge prompt is conservative by default |
-| Synthesis quality on a single 8B (no 70B on our key) | Tight Working Memory bound, simple instructions, tolerant parse. The Claude-vs-8B delta *is* the demo narrative. Ask at office hours whether 70B can be enabled — it is a config line |
+| Synthesis quality on a single 8B | Tight Working Memory bound, simple instructions, tolerant parse. The Claude-vs-8B delta *is* the demo narrative. ⟨2026-08-04⟩ 70B/32B **are entitled** but capacity-blocked — no completion above 8B has ever returned, so this is now a capacity question to raise at office hours rather than an entitlement one |
+| **`seg-005` does not exist, so semantic merge is entirely unexercised** ⟨2026-08-04⟩ | ADR 0002 is the most intricate decision in the design and nothing tests it. This plan's exit criteria cannot be met until Plan 0's fixture work lands — a hard cross-track dependency, not a nice-to-have |
 | Shared credit pool / unknown rate limits | Bound `max_tokens` everywhere; dev loops on Ollama; track spend via `ModelResult.usage` |
 | Cirrascale chat endpoint mangles JSON | Route schema calls via `/completions` with tolerant extraction — probed and verified |
 | Cross-machine ordering | Wall-clock timestamps assumed sufficient at this scale. A named limitation |

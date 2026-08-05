@@ -517,8 +517,8 @@
           <rect x="42" y="222" width="264" height="130" rx="6" class="s-box-edge"/>
           <text x="60" y="245" class="s-title">Edge worker</text>
           <text x="60" y="263" class="s-sub">detect agent · follow · adapt</text>
-          <text x="60" y="279" class="s-sub">segment (per-model budget) · compact</text>
-          <text x="60" y="295" class="s-sub">distil — 4B SLM on the Hexagon NPU</text>
+          <text x="60" y="279" class="s-sub">segment · compact · triage (is this worth it?)</text>
+          <text x="60" y="295" class="s-sub">distil — 4B SLM on the NPU, compress only</text>
           <text x="60" y="317" class="s-flow" fill="var(--edge)">durable log — written before any send</text>
           <text x="60" y="337" class="s-sub">the only component that sees raw work</text>
 
@@ -642,11 +642,23 @@
       </div>
 
       <div class="stage on-edge">
+        <div class="n">TR</div>
+        <div class="body">
+          <h3>Triage <span class="st deferred">not built</span></h3>
+          <p>Deterministic code deciding whether a segment is worth waking the model for at all. It exists because the distiller stopped judging: keys on errors, non-zero exits, thinking blocks and decision language; skips read-only runs that all succeeded and lint passes with nothing remaining.</p>
+          <p>Tuned for <em>recall</em>, because the two errors are not symmetric. A false positive costs NPU time. A false negative is knowledge gone silently, with nothing in the log to notice — so every skip is logged with its reason. It also has to read the <em>whole</em> segment, not the filtered view the distiller sees, since the signals it keys on are exactly the event kinds the distiller is configured to ignore.</p>
+          <div class="io"><b>in</b> Segment &nbsp;→&nbsp; <b>out</b> Segment, or a logged skip</div>
+        </div>
+        <div class="who"><span>Akhil</span></div>
+      </div>
+
+      <div class="stage on-edge">
         <div class="n">04</div>
         <div class="body">
           <h3>Distiller</h3>
-          <p>The one piece of judgment on the device. A ~4B instruct model turns a segment into structured findings, abstracting rather than quoting — the redaction is a property of the prompt, measured by a deterministic verbatim-copy metric rather than assumed. Measured throughput at 4B on the NPU is ~14 tok/s — fine for a background worker, and stated as a design budget up front rather than discovered during integration.</p>
-          <p>It also carries a guard learned on real hardware: a mistyped model can silently drop its prompt and stream confident, fluent, <em>invented</em> findings into shared memory. Every distiller call asserts the prompt was actually consumed (<span class="m">usage.prompt_tokens</span>), and a canary fixture fails a model outright before it is ever scored — knowledge poisoning is the one failure the pipeline must never pass through quietly.</p>
+          <p>A ~4B instruct model turns a segment into structured findings, abstracting rather than quoting. Measured throughput on the NPU is 12&ndash;14 tok/s &mdash; fine for a background worker, and stated as a design budget rather than discovered during integration. Usable context is 4096, measured and hard-capped: on the QAIRT path precision, context and KV cache are baked in at compile time.</p>
+          <p><strong>It compresses; it does not judge what is worth keeping.</strong> Asked to do both, a 4B invented a finding from an all-noise segment in six of six configurations &mdash; and, worse, reversed a comparison stated twice in its own prompt, following a prior over the explicit context. Durability judgment moved upstream to triage and downstream to synthesis. An invented trivial finding is noise a reader discards; an inverted one is misinformation that reaches a teammate's agent looking identical to a correct finding.</p>
+          <p>It carries guards learned on real hardware. A mistyped model can silently drop its prompt and stream confident, fluent, <em>invented</em> findings into shared memory, so every call asserts the prompt was consumed (<span class="m">usage.prompt_tokens</span>) and a canary fails a model outright before it is scored. But the sharper lesson is that the factual inversion passed <em>all</em> of them &mdash; canary, token guard, schema validation and the verbatim metric &mdash; which is why the fix was architectural rather than another guard.</p>
           <div class="io"><b>in</b> Segment &nbsp;→&nbsp; <b>out</b> Finding[]</div>
         </div>
         <div class="who"><span>Aditya</span></div>
@@ -1033,7 +1045,10 @@ description: Use when starting work in a joined Synapse session — before
           <li>Distiller model choice, decided by a bake-off that now spans NPU, CPU and GPU arms — at 1.7B the Adreno is 2.9× the NPU. Power is still the one unmeasured number, and it is the number the efficiency argument rests on.</li>
           <li>Synthesis quality on a single 8B model — 70B is not on our key. The honest Claude-vs-8B delta is the demo narrative rather than a thing to hide.</li>
           <li>Expect the 4B to land around 0.5–0.7 against Claude goldens. Recorded up front so results get read against expectations, not hopes.</li>
-          <li>Distiller and synthesis prompts are first-pass Claude drafts, explicitly not contracts — the eval loop exists to fine-tune them, and mid-week changes are expected.</li>
+          <li>Distiller and synthesis prompts are first-pass drafts, explicitly not contracts — the eval loop exists to fine-tune them, and mid-week changes are expected. They are versioned TOML packs now, so a change is a config edit rather than a code edit, and editing one re-budgets segmentation automatically.</li>
+          <li><strong>Nothing filters triviality today.</strong> The distiller stopped judging durability and neither of the two places that inherited the job — triage on the device, synthesis in the service — is built. Trivia reaches the sink: the first real end-to-end run dutifully condensed an API rate-limit notice into a "learning".</li>
+          <li><strong>The privacy claim is unverified.</strong> The metric meant to prove abstraction uses eight-word n-grams and cannot see a single leaked identifier — it scored 0.00 on a finding containing <span class="m">default_pool_size=25</span>. It needs an identifier-shaped-token check, and the hard part is that not every identifier is private. Until then the number reads as proof and is not one.</li>
+          <li><strong>Every measurement rests on two fixtures, both written by one person</strong>, and one of them was contaminated by a few-shot that duplicated it. Three of the five the plan requires are missing — including the only one that would exercise semantic merge at all.</li>
           <li>How shared memory is stored for semantic retrieval. In-memory + LLM-as-retriever is the first pass, behind a storage interface; vector RAG, a findings graph, and a purpose→topic hierarchy are the candidate backends once evidence demands one.</li>
           <li>Who builds the orchestrator. The work is split at its three interfaces so it never blocks on one person, but the component itself was in nobody's plan until the architecture moved — and it is the most expensive item in a five-day build.</li>
         </ul>
