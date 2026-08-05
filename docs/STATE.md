@@ -72,5 +72,6 @@ Three from 2026-08-03 still stand. Six more earned today:
 
 ## Not done
 
-- No Codex adapter, no compaction, no synthesis, no retrieval, no producer endpoint, no `query`/`contribute`.
+- No Codex adapter, no compaction, no producer endpoint, no `query`/`contribute`.
+- **Synthesis, retrieval, and the ingest API are implemented on branch `exec/e3`, pending merge to `main`.** A fix-and-verify round is complete — verifier verdict **clean**, with three residual **major** findings: the API-level half of the `CANDIDATE_WINDOW` starvation fix is untested at the route (a mutant reverting it survives the full suite); the Task 5 plan amendment is self-contradictory and omits two shipped deviations (`_satisfies_schema` gating, the repair-prompt retry); and Finding #11's resync story is half-built — a failed push reports `synthesized: false` but nothing can re-run synthesis without a later push. See the status banner on `docs/plans/2026-08-03-plan-c-service.md`. Until the merge lands, `main` still has none of it.
 - The A/B demo measurement (Plan B.8) has not started.
