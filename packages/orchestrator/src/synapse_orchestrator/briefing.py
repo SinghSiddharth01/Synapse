@@ -24,24 +24,33 @@ async def build_briefing(binding: LocalBinding | None, service_url: str, *,
     if binding is None:
         return _DEFAULT_INSTRUCTIONS
     url = (f"{service_url.rstrip('/')}/v1/sessions/{binding.shared_id}/watermark")
+    # The HTTP round trip AND the parsing of its body both live inside this
+    # guard. E3 is not merged as of this writing, so the watermark response's
+    # shape is an unverified assumption — a 200 whose JSON doesn't match it
+    # (a list instead of a dict, "by_type" holding something un-summable, a
+    # key missing) must fail open exactly like a downed service, not raise
+    # out of here and take the whole orchestrator process down with it (this
+    # runs in cli.main before uvicorn.serve starts).
     try:
         async with httpx.AsyncClient(transport=transport, timeout=timeout) as client:
             resp = await client.get(url, params={"agent_session": binding.agent_session_id})
             resp.raise_for_status()
             w = resp.json()
-    except (httpx.HTTPError, OSError, ValueError) as exc:
+
+        by_type = w.get("by_type", {})
+        total = sum(by_type.values())
+        types = ", ".join(f"{k}: {v}" for k, v in sorted(by_type.items()))
+        text = (
+            f"{SENTINEL} You are in Synapse Shared Session {binding.shared_id} as "
+            f"{binding.contributor}. Team memory holds {total} findings ({types}), "
+            f"{w.get('conflicts', 0)} conflict(s), at version v{w.get('version', 0)} — "
+            f"{w.get('new_since', 0)} new since you last looked. Call the `query` tool "
+            "before exploring an unfamiliar subsystem, when debugging something a "
+            "teammate may also be working on, or before concluding something is a "
+            "dead end. Call `contribute` when you learn something non-obvious a "
+            "teammate would benefit from."
+        )
+    except (httpx.HTTPError, OSError, ValueError, TypeError, AttributeError, KeyError) as exc:
         logger.info("Briefing fail-open (%s)", exc.__class__.__name__)
         return _DEFAULT_INSTRUCTIONS
-
-    total = sum(w.get("by_type", {}).values())
-    types = ", ".join(f"{k}: {v}" for k, v in sorted(w.get("by_type", {}).items()))
-    return (
-        f"{SENTINEL} You are in Synapse Shared Session {binding.shared_id} as "
-        f"{binding.contributor}. Team memory holds {total} findings ({types}), "
-        f"{w.get('conflicts', 0)} conflict(s), at version v{w.get('version', 0)} — "
-        f"{w.get('new_since', 0)} new since you last looked. Call the `query` tool "
-        "before exploring an unfamiliar subsystem, when debugging something a "
-        "teammate may also be working on, or before concluding something is a "
-        "dead end. Call `contribute` when you learn something non-obvious a "
-        "teammate would benefit from."
-    )
+    return text
