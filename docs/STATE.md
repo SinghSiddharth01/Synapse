@@ -44,7 +44,7 @@ Everything is configurable from `config/synapse.toml` or the environment: model,
 
 ## The three that block progress
 
-**1. Triage does not exist, and it is now load-bearing.** The distiller stopped judging durability; nothing took over. Trivia reaches the sink today. Tune for **recall** — a false negative is knowledge permanently lost and silent, because the follower never re-reads a position.
+**1. Triage is implemented on branch `exec/e2`, pending merge to `main`.** A fix-and-verify round is complete — verifier verdict **clean**, with one residual **major** finding: the plan's post-review amendment doesn't yet name three Task 3 deviations present in code (the `check_canary` gate, per-segment failure catch-and-requeue, and `replay --skipped`'s changed exit-code/printed-count semantics) — a documentation-completeness gap, not a code defect. Until the merge lands, `main` still has no triage and trivia still reaches the sink. Tuned for **recall** — a false negative is knowledge permanently lost and silent, because the follower never re-reads a position.
 
 **2. The privacy claim is unverified.** `verbatim_overlap` uses 8-word n-grams and cannot see single-identifier leaks. It reported **0.00** on a finding containing `default_pool_size=25`. The harness currently prints a number that reads as proof and is not. Do not put it in a demo.
 
