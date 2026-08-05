@@ -143,7 +143,14 @@ class AIC100Provider(ModelProvider):
         # INFERENCE_CLOUD_MODEL exists so a rehearsal can A/B synthesis models
         # (8B on .com vs 70B on the Indonesian instance) without a code change.
         self.model = os.environ.get("INFERENCE_CLOUD_MODEL", model)
-        self.api_key = api_key or os.environ.get("INFERENCE_CLOUD_API_KEY", "")
+        # A comma-separated INFERENCE_CLOUD_API_KEYS pool rotates on 429 —
+        # the hosted instances rate-limit per key (~20 req/hour observed), and
+        # one live rehearsal alone is ~11 calls. Singular key stays supported.
+        pool = os.environ.get("INFERENCE_CLOUD_API_KEYS", "")
+        self.api_keys = ([k.strip() for k in pool.split(",") if k.strip()]
+                         or [api_key or os.environ.get("INFERENCE_CLOUD_API_KEY", "")])
+        self._key_index = 0
+        self.api_key = self.api_keys[0]  # kept for back-compat introspection
         self.max_tokens = max_tokens
         self.timeout = timeout
         self._transport = transport
@@ -151,6 +158,22 @@ class AIC100Provider(ModelProvider):
     @property
     def capabilities(self) -> ProviderCapabilities:
         return ProviderCapabilities(native_structured_output=False, streaming=False)
+
+    async def _post_rotating(self, client: httpx.AsyncClient, url: str,
+                             payload: dict[str, Any]) -> httpx.Response:
+        """POST, rotating through the key pool on 429. Each key tried at most
+        once per request; a non-429 answer (success or failure) returns
+        immediately with whichever key gave it."""
+        last: httpx.Response | None = None
+        for _ in range(len(self.api_keys)):
+            key = self.api_keys[self._key_index]
+            resp = await client.post(
+                url, json=payload, headers={"Authorization": f"Bearer {key}"})
+            if resp.status_code != 429:
+                return resp
+            last = resp
+            self._key_index = (self._key_index + 1) % len(self.api_keys)
+        return last  # every key rate-limited; caller's raise_for_status reports it
 
     def _client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(
@@ -162,7 +185,7 @@ class AIC100Provider(ModelProvider):
         started = time.perf_counter()
         async with self._client() as client:
             if response_schema is None:
-                resp = await client.post(f"{self.base_url}/chat/completions", json={
+                resp = await self._post_rotating(client, f"{self.base_url}/chat/completions", {
                     "model": self.model, "messages": messages,
                     "max_tokens": self.max_tokens, "temperature": 0.0})
                 resp.raise_for_status()
@@ -184,7 +207,7 @@ class AIC100Provider(ModelProvider):
                 # 1) echoes the bad response back and asks for a repair, and
                 # nudges temperature off zero so it isn't a no-op resend.
                 temperature = 0.0 if attempt == 0 else 0.2
-                resp = await client.post(f"{self.base_url}/completions", json={
+                resp = await self._post_rotating(client, f"{self.base_url}/completions", {
                     "model": self.model, "prompt": prompt,
                     "max_tokens": self.max_tokens, "temperature": temperature})
                 resp.raise_for_status()

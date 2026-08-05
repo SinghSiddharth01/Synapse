@@ -214,3 +214,32 @@ async def test_model_env_override(monkeypatch):
     assert AIC100Provider(base_url="https://x", api_key="k").model == "Llama-3.3-70B"
     monkeypatch.delenv("INFERENCE_CLOUD_MODEL")
     assert AIC100Provider(base_url="https://x", api_key="k").model == "Llama-3.1-8B"
+
+
+async def test_key_pool_rotates_on_429(monkeypatch):
+    """Per-key rate limits (~20 req/hr observed live): a 429 on key A must
+    retry the same request on key B and succeed, transparently."""
+    monkeypatch.setenv("INFERENCE_CLOUD_API_KEYS", "key-a, key-b")
+    seen_keys = []
+    def handler(request: httpx.Request) -> httpx.Response:
+        key = request.headers["authorization"].removeprefix("Bearer ")
+        seen_keys.append(key)
+        if key == "key-a":
+            return httpx.Response(429, json={"message": "rate limited"})
+        return httpx.Response(200, json={"choices": [{"message": {"content": "Pong"}}],
+                                         "usage": {"prompt_tokens": 5, "completion_tokens": 1}})
+    provider = AIC100Provider(base_url="https://x", transport=httpx.MockTransport(handler))
+    result = await provider.complete([{"role": "user", "content": "ping"}])
+    assert result.data == "Pong"
+    assert seen_keys == ["key-a", "key-b"]
+    # the pool remembers the good key: next call starts on key-b directly
+    result = await provider.complete([{"role": "user", "content": "ping"}])
+    assert result.data == "Pong"
+    assert seen_keys[-1] == "key-b" and len(seen_keys) == 3
+    monkeypatch.delenv("INFERENCE_CLOUD_API_KEYS")
+
+
+async def test_singular_key_unchanged(monkeypatch):
+    monkeypatch.delenv("INFERENCE_CLOUD_API_KEYS", raising=False)
+    provider = AIC100Provider(base_url="https://x", api_key="solo")
+    assert provider.api_keys == ["solo"] and provider.api_key == "solo"
