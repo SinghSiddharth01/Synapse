@@ -149,7 +149,7 @@ Plan 0.3's compaction fixture. Compaction (A.5) is unbuilt, so today this pins t
 **Interfaces:**
 - Produces: `seg-003`, whose middle `tool_result` event exceeds 4000 chars with the error at roughly the midpoint.
 
-- [ ] **Step 1: Append the failing test**
+- [x] **Step 1: Append the failing test**
 
 ```python
 def test_seg003_error_is_buried_in_an_oversized_tool_result():
@@ -163,12 +163,12 @@ def test_seg003_error_is_buried_in_an_oversized_tool_result():
     assert "dead_end" in types
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `uv run pytest packages/distiller/tests/test_fixture_corpus.py::test_seg003_error_is_buried_in_an_oversized_tool_result -v`
 Expected: FAIL with `FileNotFoundError`.
 
-- [ ] **Step 3: Write the fixture**
+- [x] **Step 3: Write the fixture**
 
 Build the big log programmatically once, paste the result. Generator (run ad hoc, do not commit):
 
@@ -211,12 +211,12 @@ All events: `agent_session_id: "as-fixture-003"`, `cwd: "/repo"`, `git_branch: "
 ]
 ```
 
-- [ ] **Step 4: Run to verify it passes**
+- [x] **Step 4: Run to verify it passes**
 
 Run: `uv run pytest packages/distiller/tests/test_fixture_corpus.py -v -k seg003`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add fixtures/segments/seg-003.json fixtures/findings/seg-003.findings.json packages/distiller/tests/test_fixture_corpus.py

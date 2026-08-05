@@ -31,3 +31,14 @@ def test_seg002_is_conversational():
         "seg-002 must contain no tool events — that is its entire point"
     types = {f.type.value for f in load_goldens("seg-002")}
     assert "decision" in types
+
+
+def test_seg003_error_is_buried_in_an_oversized_tool_result():
+    segment = load_segment("seg-003")
+    big = [e for e in segment.events if e.kind == "tool_result" and len(e.content) > 4000]
+    assert big, "seg-003 must contain a tool_result over 4000 chars"
+    assert "ConnectionResetError" in big[0].content
+    pos = big[0].content.index("ConnectionResetError") / len(big[0].content)
+    assert 0.3 < pos < 0.7, "the error must be buried mid-log, not at head or tail"
+    types = {f.type.value for f in load_goldens("seg-003")}
+    assert "dead_end" in types
