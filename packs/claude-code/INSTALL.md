@@ -48,7 +48,7 @@ entry to the existing `hooks.UserPromptSubmit` array rather than
 overwriting it — the format is a list precisely so several hooks can sit
 side by side.
 
-Restart Claude Code (or start a new session) so it picks up the new
+Restart Claude Code (or start a new Agent Session) so it picks up the new
 `settings.json` and the new skill. No orchestrator restart is needed — the
 skill and hook both talk to whatever is running right now.
 
@@ -91,7 +91,7 @@ returns before it even reaches the network, by design (a window that
 never joined must not receive shared-memory content, and must not consume
 the joined window's own pending notice).
 
-`synapse-worker join` binds *whichever* Claude Code session it finds live
+`synapse-worker join` binds *whichever* Claude Code Agent Session it finds live
 at the moment you run it. If two Claude Code windows on the same project
 are open when you join, the binding can end up pointing at a window other
 than the one you're actually working in — and from then on the pointer is
@@ -108,7 +108,7 @@ are actually using**:
 synapse-worker join <shared_id>
 ```
 
-This rebinds `claude-code.json` to whichever session is live in *that*
+This rebinds `claude-code.json` to whichever Agent Session is live in *that*
 terminal, which fixes the mismatch for that window going forward.
 
 ## Custom service URL

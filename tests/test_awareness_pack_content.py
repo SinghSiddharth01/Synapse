@@ -150,6 +150,24 @@ def test_install_md_exists_and_documents_where_the_pack_is_copied_to():
     assert "settings.json" in text
 
 
+def test_install_md_qualifies_the_running_claude_code_window_as_agent_session():
+    """CONTEXT.md: Agent Session's `_Avoid_` list is 'session (unqualified),
+    chat, conversation, local session.' INSTALL.md's restart step and its
+    Troubleshooting section both talked about 'a session'/'whichever
+    session' where the thing meant is precisely what CONTEXT.md defines as
+    an Agent Session (a single running Claude Code conversation, identified
+    by its own id) -- the same defect the hook's injected line had for
+    Shared Session, on the sibling term, in the doc a teammate reads before
+    ever seeing the hook speak."""
+    text = INSTALL_MD.read_text(encoding="utf-8")
+    assert "(or start a new Agent Session)" in text
+    assert "(or start a new session)" not in text
+    assert "*whichever* Claude Code Agent Session it finds live" in text
+    assert "*whichever* Claude Code session it finds live" not in text
+    assert "whichever Agent Session is live in *that*" in text
+    assert "whichever session is live in *that*" not in text
+
+
 def test_this_repos_own_claude_dir_is_not_where_the_pack_self_installed():
     """Chain C: 'The pack is a shipped artifact, not installed into this
     repo's own `.claude/` — installing it on a dev machine is INSTALL.md's
