@@ -317,6 +317,45 @@ def test_build_with_explicit_agent_flag_skips_straight_to_that_agent(tmp_path, m
     assert isinstance(loop.binding, LocalBinding)
 
 
+def test_build_with_explicit_transcript_honors_the_agent_flag(tmp_path) -> None:
+    """MAJOR regression pin: `--agent codex --transcript <rollout>` used to
+    hard-set DEFAULT_AGENT (claude-code) in the --transcript branch and never
+    look at args.agent at all -- ClaudeCodeSource would then silently skip
+    every line of a Codex rollout as bookkeeping (zero events, no error).
+    Both flags live on the same `run` subparser, so this is a supported
+    combination an operator debugging the demo is likely to type."""
+    from synapse_worker.sources.codex import CodexSource
+
+    codex_transcript = tmp_path / "some-codex-rollout.jsonl"
+    codex_transcript.write_text("", encoding="utf-8")
+
+    config, loop, transcript, _, source, _ = cli._build(
+        _ns(transcript=str(codex_transcript), agent="codex")
+    )
+
+    assert isinstance(loop.source, CodexSource)
+    assert loop.binding.agent == "codex"
+    assert transcript == codex_transcript
+    assert source == "explicit --transcript"
+
+
+def test_build_with_explicit_transcript_and_no_agent_flag_defaults_to_claude_code(
+    tmp_path,
+) -> None:
+    """The un-widened case must keep behaving exactly as before: an explicit
+    --transcript with no --agent at all still has no dialect to infer from,
+    so it stays DEFAULT_AGENT."""
+    from synapse_worker.sources.claude_code import ClaudeCodeSource
+
+    transcript_path = tmp_path / "sess.jsonl"
+    transcript_path.write_text("", encoding="utf-8")
+
+    config, loop, transcript, _, source, _ = cli._build(_ns(transcript=str(transcript_path)))
+
+    assert isinstance(loop.source, ClaudeCodeSource)
+    assert loop.binding.agent == "claude-code"
+
+
 async def test_run_swallows_keyboard_interrupt_and_still_shuts_down(
     tmp_path, monkeypatch, capsys
 ) -> None:

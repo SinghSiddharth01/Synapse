@@ -58,10 +58,11 @@ from synapse_worker.triage_log import TriageLog
 logger = logging.getLogger(__name__)
 
 DEFAULT_AGENT = "claude-code"  # `_build`'s fallback for an explicit --transcript
-# whose dialect nothing infers; `status`/`replay --skipped` also still only
-# ever look at the claude-code binding -- a narrower, still-disclosed gap
-# `run`'s multi-agent resolution (_resolve_agent_and_transcript) does not
-# share, since `run` is the half that had to reach CodexSource at all.
+# given WITHOUT --agent, whose dialect nothing infers; `replay --skipped`
+# also still only ever looks at the claude-code binding -- a narrower,
+# still-disclosed gap `run`'s multi-agent resolution
+# (_resolve_agent_and_transcript) does not share, since `run` is the half
+# that had to reach CodexSource at all.
 DEFAULT_DEBUG_PORT = 8790
 
 
@@ -138,9 +139,15 @@ def _build(args: argparse.Namespace, debug_port: int = 0):
     state_dir = Path(worker_cfg.state_dir)
 
     resolved = None
-    agent = DEFAULT_AGENT
     if getattr(args, "transcript", None):
         transcript = Path(args.transcript)
+        # --agent still selects the Source even with an explicit --transcript
+        # -- without this, `--agent codex --transcript <rollout>` silently
+        # parsed a Codex file with ClaudeCodeSource (every line skipped as
+        # bookkeeping, zero events, no error) because this branch used to
+        # hard-set DEFAULT_AGENT and never looked at args.agent at all. Only
+        # when --agent is itself omitted does the dialect stay unguessed.
+        agent = getattr(args, "agent", None) or DEFAULT_AGENT
     else:
         agent, resolved = _resolve_agent_and_transcript(args, state_dir)
         if resolved is None:
