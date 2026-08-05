@@ -130,7 +130,24 @@ class Synthesizer:
                     new_findings: list[Finding]) -> SessionContext:
         store.upsert(shared_id, new_findings)                       # 1. durability first
         ctx = store.get_context(shared_id)
-        candidates = store.retrievable(shared_id)[-CANDIDATE_WINDOW:]   # bounded, always
+
+        # CANDIDATE_WINDOW bounds the merge prompt against LOG GROWTH (Plan
+        # C.4's fixed-cost property) -- it must never bound it against the
+        # CURRENT push. Candidates are the union of every finding just
+        # accepted in THIS call (regardless of how many that is) plus up
+        # to CANDIDATE_WINDOW of the most recent OTHER retrievable
+        # findings. A worker flushing a backlog after being offline is the
+        # normal case for the write-ahead log this system is built around
+        # and can easily exceed the window in one push; those findings are
+        # not "old", they are simply new to synthesis for the first time,
+        # and a pure recency slice of the whole Log silently drops them
+        # forever (they age out of the window the moment anything newer
+        # arrives, in this round or any later one).
+        retrievable = store.retrievable(shared_id)
+        new_ids = {f.id for f in new_findings}
+        pushed = [f for f in retrievable if f.id in new_ids]
+        others = [f for f in retrievable if f.id not in new_ids][-CANDIDATE_WINDOW:]
+        candidates = pushed + others
         if not candidates:
             return ctx
 

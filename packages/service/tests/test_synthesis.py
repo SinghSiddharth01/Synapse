@@ -1,12 +1,28 @@
+import re
 from datetime import datetime, timezone
 
 from synapse_contracts import Attribution, Finding, FindingStatus, Provenance
 from synapse_providers import FakeProvider
 
 from synapse_service.store import InMemoryStore
-from synapse_service.synthesis import Synthesizer
+from synapse_service.synthesis import CANDIDATE_WINDOW, Synthesizer
 
 TS = datetime(2026, 8, 4, tzinfo=timezone.utc)
+
+
+class _RecordingProvider(FakeProvider):
+    """A FakeProvider that also records the finding ids listed in each
+    merge prompt, so a test can assert on WHICH candidates synthesis was
+    offered rather than only on the verdict it returned."""
+
+    def __init__(self, scripts):
+        super().__init__(scripts=scripts)
+        self.seen: list[list[str]] = []
+
+    async def complete(self, messages, response_schema=None):
+        listing = messages[-1]["content"]
+        self.seen.append(re.findall(r"\[([^\]]+)\]", listing))
+        return await super().complete(messages, response_schema)
 
 
 def _pair() -> list[Finding]:
@@ -305,6 +321,56 @@ async def test_conflicts_dedup_after_resolving_forward_not_before():
     ctx = await synth.merge(store, sid, [])
 
     assert len(ctx.conflicts) == 1                        # not doubled
+
+
+async def test_a_push_larger_than_the_candidate_window_is_not_starved():
+    """CANDIDATE_WINDOW bounds the merge prompt against LOG GROWTH (Plan
+    C.4's fixed-cost property) -- it must never bound it against the
+    CURRENT push. A worker flushing a backlog after being offline is the
+    normal case for the write-ahead log this system is built around, and
+    can trivially exceed the window in a single push. Before the fix,
+    candidates were a pure recency slice of the whole Log
+    (store.retrievable(...)[-CANDIDATE_WINDOW:]) that never consulted
+    new_findings at all, so the oldest findings in an over-window push
+    were never offered to synthesis in that round OR any later one (they
+    age out of the window as soon as anything newer arrives)."""
+    store = InMemoryStore()
+    sid = store.create_session(purpose="p", created_by="s").shared_id
+    batch_size = CANDIDATE_WINDOW + 5
+    findings = [Finding(id=f"f-{i:02d}", type="learning", text=f"finding {i}",
+                        attributions=[Attribution(contributor="a", agent_session="as-1",
+                                                  agent="claude-code")], ts=TS)
+               for i in range(batch_size)]
+    noop = {"working_memory": "wm", "merges": [], "trivial_ids": [], "conflicts": []}
+    provider = _RecordingProvider(scripts=[noop])
+
+    await Synthesizer(provider).merge(store, sid, findings)
+
+    assert set(provider.seen[0]) == {f.id for f in findings}   # every one offered, none starved
+
+
+async def test_the_window_still_bounds_established_candidates_not_in_this_push():
+    """The other half of the same property: CANDIDATE_WINDOW must still
+    cap the OTHER (already-established) candidates, or the fixed-cost
+    guarantee the window exists for is gone."""
+    store = InMemoryStore()
+    sid = store.create_session(purpose="p", created_by="s").shared_id
+    old = [Finding(id=f"old-{i:02d}", type="learning", text=f"old {i}",
+                   attributions=[Attribution(contributor="a", agent_session="as-1",
+                                             agent="claude-code")], ts=TS)
+          for i in range(CANDIDATE_WINDOW + 10)]
+    noop = {"working_memory": "wm", "merges": [], "trivial_ids": [], "conflicts": []}
+    provider = _RecordingProvider(scripts=[noop, noop])
+    synth = Synthesizer(provider)
+    await synth.merge(store, sid, old)                  # round 1: lands them all as "new"
+
+    new_one = Finding(id="new-1", type="learning", text="the newly pushed one",
+                      attributions=old[0].attributions, ts=TS)
+    await synth.merge(store, sid, [new_one])             # round 2: nothing special about `old` now
+
+    seen = provider.seen[1]
+    assert "new-1" in seen
+    assert len(seen) == CANDIDATE_WINDOW + 1              # capped: new-1 + CANDIDATE_WINDOW others
 
 
 async def test_unknown_ids_from_the_model_are_ignored_not_fatal():

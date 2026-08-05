@@ -51,9 +51,13 @@ def build_app(provider: ModelProvider) -> Starlette:
             return JSONResponse({"error": str(exc)}, status_code=422)
         accepted = store.upsert(sid, findings)
         if accepted:
-            # Findings are already upserted; the empty list just avoids double
-            # insertion. Replays (accepted == 0) never reach the model at all.
-            await synthesizer.merge(store, sid, [])
+            # `findings` is passed through (not []) so synthesis knows which
+            # ids were just pushed and can force them into its candidate
+            # window regardless of CANDIDATE_WINDOW (see synthesis.merge's
+            # docstring) -- store.upsert is idempotent, so merge()'s own
+            # upsert of the same list is a harmless no-op. Replays
+            # (accepted == 0) never reach the model at all.
+            await synthesizer.merge(store, sid, findings)
         version = store.get_context(sid).memory_version
         return JSONResponse({"accepted": accepted, "memory_version": version})
 
