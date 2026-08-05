@@ -557,7 +557,18 @@ def test_fail_open_when_stdin_is_piped_but_never_written_or_closed(tmp_path, wat
     budget; deleting that bound (or raising it well past budget) is a
     mutant this is the only test that would catch, because every other
     test in this file supplies its own stdin via `input=`, which is
-    written and closed before the subprocess even starts reading."""
+    written and closed before the subprocess even starts reading.
+
+    Deliberately does NOT use `proc.communicate()` to drive the subprocess:
+    `communicate()` closes the write end of `proc.stdin` itself once it has
+    nothing left to send, which would hand the hook an EOF and undo the
+    exact condition this test exists to construct ("piped but never
+    written OR CLOSED"). Instead this polls `proc.poll()` without ever
+    touching `proc.stdin`, so the pipe stays open and silent for the
+    hook's entire run -- `communicate()` is only called once the process
+    has already exited, purely to drain the (empty) stdout/stderr it left
+    behind, by which point it can no longer affect the read this test is
+    pinning."""
     state_dir = tmp_path / ".synapse"
     _write_binding(state_dir)
     watermark.body["version"] = 1
@@ -571,11 +582,23 @@ def test_fail_open_when_stdin_is_piped_but_never_written_or_closed(tmp_path, wat
                             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, text=True)
     try:
-        stdout, stderr = proc.communicate(timeout=FAIL_OPEN_BUDGET_SECONDS + 2)
+        deadline = time.monotonic() + FAIL_OPEN_BUDGET_SECONDS + 2
+        while proc.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+        exited = proc.poll() is not None
+        elapsed = time.monotonic() - start
+        assert exited, (
+            "hook did not exit while stdin was held open, unwritten, and "
+            "unclosed -- _STDIN_READ_TIMEOUT_SECONDS failed to bound the "
+            "read")
+        # Safe to call now: the process has already exited, so this only
+        # drains whatever it already wrote and cannot itself supply the
+        # EOF the hook is meant to time out waiting for.
+        stdout, stderr = proc.communicate(timeout=2)
     finally:
         if proc.poll() is None:
             proc.kill()
-    elapsed = time.monotonic() - start
+            proc.communicate()
 
     assert proc.returncode == 0
     assert stdout == ""  # first-ever check for this binding: baseline only
