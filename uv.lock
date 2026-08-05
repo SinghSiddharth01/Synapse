@@ -13,6 +13,7 @@ members = [
     "synapse-distiller",
     "synapse-orchestrator",
     "synapse-providers",
+    "synapse-service",
     "synapse-worker",
 ]
 
@@ -523,6 +524,7 @@ dependencies = [
     { name = "synapse-distiller" },
     { name = "synapse-orchestrator" },
     { name = "synapse-providers" },
+    { name = "synapse-service" },
     { name = "synapse-worker" },
 ]
 
@@ -540,6 +542,7 @@ requires-dist = [
     { name = "synapse-distiller", editable = "packages/distiller" },
     { name = "synapse-orchestrator", editable = "packages/orchestrator" },
     { name = "synapse-providers", editable = "packages/providers" },
+    { name = "synapse-service", editable = "packages/service" },
     { name = "synapse-worker", editable = "packages/worker" },
 ]
 
@@ -601,6 +604,27 @@ dependencies = [
 requires-dist = [
     { name = "httpx", specifier = ">=0.27" },
     { name = "synapse-contracts", editable = "packages/contracts" },
+]
+
+[[package]]
+name = "synapse-service"
+version = "0.1.0"
+source = { editable = "packages/service" }
+dependencies = [
+    { name = "httpx" },
+    { name = "starlette" },
+    { name = "synapse-contracts" },
+    { name = "synapse-providers" },
+    { name = "uvicorn" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "starlette", specifier = ">=0.37" },
+    { name = "synapse-contracts", editable = "packages/contracts" },
+    { name = "synapse-providers", editable = "packages/providers" },
+    { name = "uvicorn", specifier = ">=0.30" },
 ]
 
 [[package]]
