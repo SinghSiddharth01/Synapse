@@ -77,7 +77,7 @@ The three queries, run from `as-observer` after push 2 and again after push 3:
 
 ---
 
-## §A — the fallback, on `demo-fallback` (plain `main`)
+## §A — the fallback, on `demo-fallback` (pre-brain `main`, cut at `dee49e4` if a fallback branch is wanted)
 
 **Rehearsed first, on the evening of Aug 6** — it is the script already known to work.
 
@@ -157,7 +157,7 @@ kill %1   # stop the service
 
 ---
 
-## §B — the integrated demo, on the cut (`feat/brain-integration`)
+## §B — the integrated demo, on `main` (the brain merged 2026-08-05)
 
 Identical beats, plus the three the integration buys, each named against the task that ships it:
 
