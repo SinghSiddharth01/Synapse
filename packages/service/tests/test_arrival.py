@@ -10,6 +10,8 @@ not push).
 
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 from synapse_providers import FakeProvider
 
@@ -19,6 +21,34 @@ from synapse_service.store import InMemoryStore
 
 MERGE_NOOP = {"working_memory": "the decoder drops frames past 40 ms",
               "merges": [], "trivial_ids": [], "conflicts": []}
+
+
+class _BlocksInsideRanking(FakeProvider):
+    """Scripted for synthesis, and HELD OPEN inside the retrieval call.
+
+    The only way to write finding #3's test honestly. The defect is about a
+    window in real time — the seconds a `/query` spends waiting on a ranking
+    model, during which teammates keep pushing — and a test that pushed
+    "before" or "after" the query would not touch it. Blocking inside
+    `complete` puts the push genuinely mid-flight, so the ordering of
+    `store.read_position` relative to the await is what decides the outcome
+    rather than anything the test arranges.
+
+    Recognised by the response schema, exactly as `_DiesOnRetrieval` in
+    test_retrieval_outage.py does: the merge calls must go through untouched or
+    the session never gets a memory to query in the first place.
+    """
+
+    def __init__(self, scripts) -> None:
+        super().__init__(scripts=scripts)
+        self.ranking_started = asyncio.Event()
+        self.release_ranking = asyncio.Event()
+
+    async def complete(self, messages, response_schema=None):
+        if response_schema is not None and "ranked" in response_schema.get("properties", {}):
+            self.ranking_started.set()
+            await self.release_ranking.wait()
+        return await super().complete(messages, response_schema)
 
 
 def _finding_json(fid: str, *, contributor: str = "akhil",
@@ -311,6 +341,145 @@ async def test_the_summary_is_hard_capped_however_large_the_session_gets():
     assert len(body["accumulated"]["highlights"]) <= 6
 
 
+def _session_at_the_bounds(*, new_items: int) -> tuple[InMemoryStore, str]:
+    """A session sitting on every per-part bound at once, which is what
+    finding #2 needed and what nothing in the suite had.
+
+    A 200-character purpose, twelve members, a 900-character working memory and
+    eight ~275-character findings is not a synthetic worst case — it is what a
+    team session looks like after a day. The per-part caps sum to roughly twice
+    `MAX_ARRIVAL_CHARS`, so this is the region where composition decides what
+    survives and the global cap stops being a backstop.
+    """
+    store = InMemoryStore()
+    sid = store.create_session(purpose="p" * 200, created_by="siddsing").shared_id
+    for i in range(12):
+        store.add_member(sid, f"contributor-{i:02d}")
+    store.set_context(sid, working_memory="w" * 900)
+    store.upsert(sid, [_finding(f"f-old-{i}", text=f"old {i} " + "y" * 275)
+                       for i in range(8)])
+    store.mark_seen(sid, "aditya")
+    store.upsert(sid, [_finding(f"f-new-{i}", text=f"landed while you were away {i} "
+                                + "z" * 250) for i in range(new_items)])
+    return store, sid
+
+
+def test_the_new_since_section_survives_a_session_that_fills_the_whole_budget():
+    """FINDING #2 (2026-08-06): the cap used to eat the half W5 exists to add.
+
+    `render` concatenated head + accumulated + new and truncated from the END,
+    while the per-part caps summed to roughly twice `MAX_ARRIVAL_CHARS`. So the
+    growable content — highlights, the working memory, the topic labels — sat in
+    the MIDDLE and the NEW SINCE section paid for all of it. Reproduced at these
+    exact sizes before the fix: `len(text) == 2800`, `"NEW SINCE YOU LAST
+    LOOKED" not in text`, the string ending `"NEW SINCE YOU LAS…"`. A joiner
+    with three unseen findings was told nothing, mid-word.
+
+    The old bounds test asserted only `len <= MAX` and `highlights <= 6`, both
+    of which stayed true while the section vanished, which is why it stayed
+    green. This asserts the SECTION, and the fixture is deliberately at the
+    bounds: a 200-character purpose, twelve members, a 900-character working
+    memory and eight ~275-character findings is what "a session that has been
+    running all day" looks like."""
+    store, sid = _session_at_the_bounds(new_items=3)
+
+    summary = compute(store, sid, contributor="aditya", agent_session="as-1")
+
+    assert len(summary.text) <= MAX_ARRIVAL_CHARS
+    assert summary.new_count == 3
+    assert "NEW SINCE YOU LAST LOOKED" in summary.text
+    # Not just the heading — the items under it. All three fit inside the
+    # section's own reserved budget, so none of them is allowed to be the price
+    # of a longer working memory.
+    for i in range(3):
+        assert f"landed while you were away {i}" in summary.text
+    # ...and what gave way instead is the recoverable half: the joiner can ask
+    # `query` for the backlog, and cannot ask anything for a watermark that has
+    # already scrolled past.
+    assert "ACCUMULATED" in summary.text
+
+
+def test_dropped_bullets_are_counted_rather_than_silently_lost():
+    """The other half of finding #2: WHAT truncation does, not just where.
+
+    Cutting the joined string mid-word left the joiner reading half a sentence
+    about a teammate's decision with no way to know there was a second half, or
+    a third bullet after it. At plausible sizes it dropped 2 of 4 new bullets
+    with no marker at all. Whole bullets now, and a count of the ones that did
+    not fit — "and 5 more" is smaller than the text it replaces and is the only
+    version that does not lie by omission.
+
+    Eight unseen findings on top of the bounds fixture is where the budget
+    genuinely runs out; below that the new section is allowed to run past its
+    floor and nothing is dropped at all, which is the common case and is
+    asserted by the test above."""
+    store, sid = _session_at_the_bounds(new_items=8)
+
+    summary = compute(store, sid, contributor="aditya", agent_session="as-1")
+    lines = summary.text.splitlines()
+
+    assert summary.new_count == 8
+    # Sliced at the heading, because BOTH sections drop bullets under this
+    # fixture and both say so — a marker read from the whole text would be the
+    # accumulated section's and would agree with the wrong arithmetic.
+    heading = next(i for i, ln in enumerate(lines)
+                   if ln.startswith("NEW SINCE YOU LAST LOOKED"))
+    section = lines[heading:]
+    kept = [ln for ln in section if ln.startswith("- [")]
+    assert 0 < len(kept) < 8                     # some fit, some did not
+    marker = next(ln for ln in section if ln.startswith("… and "))
+    assert f"and {8 - len(kept)} more" in marker
+    # Every bullet that IS there is whole: the text never ends mid-sentence in
+    # the padding, which is what the old end-truncation did.
+    assert not summary.text.endswith("z")
+    assert len(summary.text) <= MAX_ARRIVAL_CHARS
+
+
+async def test_a_finding_pushed_while_a_query_is_ranking_is_still_new_to_the_asker():
+    """FINDING #3 (2026-08-06): the watermark was taken AFTER the model call.
+
+    `/query` computed `mark_seen`'s position once `await query_findings(...)`
+    returned — and that await is a model call docs/FLOW.md measures at 12.6 to
+    52.8 seconds. Anything a teammate pushed inside that window was recorded as
+    SEEN by an asker who was never shown it. For `last_seen` that self-corrects
+    at the next verdict round; `seen_count` is an ARRIVAL INDEX, so those
+    findings were excluded from that person's NEW SINCE slice permanently.
+
+    Reproduced exactly as written here before the fix: `first_look: False`,
+    `new count: 0`, `items: []`, with `accumulated.total: 2`.
+
+    The provider blocks INSIDE the ranking call, which is what makes the window
+    real rather than simulated — the push below genuinely lands between the
+    moment the asker's candidate set was fixed and the moment the response was
+    written."""
+    provider = _BlocksInsideRanking(scripts=[MERGE_NOOP, MERGE_NOOP, {"ranked": [0]}])
+    async with _client(provider) as client:
+        sid = await _session(client)
+        await client.post(f"/v1/sessions/{sid}/findings",
+                          json={"findings": [_finding_json("f-1", text="the first thing")]})
+
+        asking = asyncio.create_task(client.post(
+            f"/v1/sessions/{sid}/query",
+            json={"query": "what do we know", "contributor": "aditya",
+                  "agent_session": "as-window-1"}))
+        await provider.ranking_started.wait()
+
+        landed = await client.post(f"/v1/sessions/{sid}/findings", json={"findings": [
+            _finding_json("f-2", text="the decoder drops frames past 40 ms")]})
+        assert landed.json()["accepted"] == 1
+
+        provider.release_ranking.set()
+        assert (await asking).status_code == 200
+
+        body = await _arrival(client, sid, contributor="aditya",
+                              agent_session="as-window-2")
+
+    assert body["accumulated"]["total"] == 2
+    assert body["first_look"] is False
+    assert body["new"]["count"] == 1
+    assert "the decoder drops frames past 40 ms" in body["text"]
+
+
 async def test_control_characters_in_a_finding_cannot_forge_a_section_of_their_own():
     """This text is composed from Finding prose -- model output derived from
     somebody's transcript -- and handed to another agent as a tool result. A
@@ -420,6 +589,73 @@ def test_a_verdict_round_with_no_new_findings_still_invalidates_the_cache():
     after = cache.get(store, sid, contributor="aditya", agent_session="as-1")
     assert after is not before
     assert "a completely different narrative" in after.text
+
+
+def test_a_teammate_joining_invalidates_the_cache():
+    """FINDING #4 (2026-08-06): the fingerprint missed MEMBERSHIP, so a
+    rejoiner was told the wrong team.
+
+    Membership has never been in the Finding Log and `store.add_member` bumps no
+    version — its own docstring in store.py says so — so a teammate joining
+    changed nothing the key was looking at. Reproduced by object identity
+    before the fix: the second `get` returned the SAME summary, members still
+    `('siddsing', 'aditya')` after akhil joined.
+
+    The shape is exactly the demo's: teammate #2 takes a summary, teammate #3
+    joins, teammate #2 opens a second window and is introduced to a team that no
+    longer exists. The member TUPLE is in the key rather than its length,
+    because one person leaving as another joins is a change a count cannot
+    see."""
+    store = InMemoryStore()
+    sid = store.create_session(purpose="fec decode", created_by="siddsing").shared_id
+    store.add_member(sid, "aditya")
+    cache = SummaryCache()
+
+    before = cache.get(store, sid, contributor="aditya", agent_session="as-1")
+    assert "akhil" not in before.text
+
+    store.add_member(sid, "akhil")
+
+    after = cache.get(store, sid, contributor="aditya", agent_session="as-1")
+    assert after is not before
+    assert "akhil" in after.members
+    assert "akhil" in after.text
+
+    # ...and the same for a departure, which the length alone would miss if a
+    # third member joined in the same breath.
+    store.remove_member(sid, "aditya")
+    later = cache.get(store, sid, contributor="aditya", agent_session="as-1")
+    assert later is not after
+    assert "aditya" not in later.members
+
+
+def test_a_verdict_round_the_asker_has_already_read_past_invalidates_the_cache():
+    """The cosmetic half of finding #4, fixed the same way — by naming it.
+
+    `seen_count` was in the key and `last_seen` was not, so the NEW SINCE
+    section's own sentence ("the memory has moved N version(s) since you last
+    read it") could keep quoting a delta that had stopped being true. Reproduced
+    after a verdict round that produced no new findings: `new_count` stayed
+    correctly 0 while the prose went on claiming two versions of movement."""
+    store, sid = _store_with(_finding("f-1"))
+    cache = SummaryCache()
+    store.mark_seen(sid, "aditya")           # not a first look any more
+    store.bump_version(sid)
+    store.bump_version(sid)
+
+    stale = cache.get(store, sid, contributor="aditya", agent_session="as-1")
+    assert "2 version(s) since you last read it" in stale.text
+
+    # Reads the memory again. `seen_count` does NOT move — no finding has landed
+    # — so `last_seen` is the only thing in the key that can carry this, which
+    # is the point: it was the one that was missing.
+    store.mark_seen(sid, "aditya")
+
+    fresh = cache.get(store, sid, contributor="aditya", agent_session="as-1")
+    assert fresh is not stale
+    assert store.seen_count(sid, "aditya") == stale.total
+    assert fresh.new_count == 0
+    assert "0 version(s) since you last read it" in fresh.text
 
 
 def test_two_askers_do_not_share_one_summary():

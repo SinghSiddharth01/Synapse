@@ -425,16 +425,44 @@ class InMemoryStore:
         return [self._project(view, view.findings[fid])
                 for fid in view.visible_ids if fid in arrived]
 
-    def mark_seen(self, shared_id: str, contributor: str) -> None:
-        # Reads `_contexts` directly rather than `get_context`, deliberately:
-        # this is a write path and it wants the stored version number, not the
-        # status projection get_context performs (which would fold the log on
-        # every query for a value nothing here reads).
-        self._last_seen[(shared_id, contributor)] = (
-            self._contexts[shared_id].memory_version)
-        # The fold IS taken here, unlike the line above — there is no cheaper
-        # way to count findings than the structure that holds them, and this
-        # runs on `/query`, which has already folded (`store.retrievable`) and
-        # left the result cached on `SharedMemory._view`.
-        self._seen_count[(shared_id, contributor)] = len(
-            self._memories[shared_id].view().findings)
+    def read_position(self, shared_id: str) -> tuple[int, int]:
+        """Where the memory stands RIGHT NOW: (memory_version, findings ever
+        recorded). What `mark_seen` would write if called at this instant.
+
+        Exists so a caller whose read takes measurable time can take the
+        snapshot at the moment the reader's view was actually fixed, rather
+        than at the moment the response is written — see `mark_seen`'s `at=`.
+
+        Reads `_contexts` directly rather than `get_context` for the version,
+        deliberately: this wants the stored number, not the status projection
+        `get_context` performs (which folds the log for a value nothing here
+        reads). The fold IS taken for the count, because there is no cheaper
+        way to count findings than the structure that holds them, and every
+        caller has already folded and left the result cached on
+        `SharedMemory._view`.
+        """
+        return (self._contexts[shared_id].memory_version,
+                len(self._memories[shared_id].view().findings))
+
+    def mark_seen(self, shared_id: str, contributor: str, *,
+                  at: tuple[int, int] | None = None) -> None:
+        """Move this contributor's watermark to `at`, or to right now.
+
+        ⟨`at=` ADDED 2026-08-06, adversarial review finding #3⟩ `/query`'s only
+        caller used to let this read the store AFTER awaiting the ranking
+        model — a call docs/FLOW.md measures at 12.6–52.8 seconds. Anything a
+        teammate pushed inside that window was counted as seen by an asker who
+        was never shown it, and for `_seen_count` that is not self-correcting:
+        `_last_seen` is a coarse version delta that the next verdict round
+        moves past anyway, but `_seen_count` is an ARRIVAL INDEX, so those
+        findings were excluded from that person's NEW SINCE slice permanently.
+        Reproduced end to end: push f-1, start /query as aditya, push f-2 while
+        the ranking is blocked, release — /arrival then reported `new: 0` with
+        `accumulated.total: 2`.
+
+        Passing a position taken before the await is the whole fix. `at=None`
+        keeps the old behaviour for callers whose read is instantaneous.
+        """
+        version, count = at if at is not None else self.read_position(shared_id)
+        self._last_seen[(shared_id, contributor)] = version
+        self._seen_count[(shared_id, contributor)] = count

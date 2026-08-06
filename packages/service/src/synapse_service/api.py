@@ -687,8 +687,12 @@ def build_app(provider: ModelProvider, *, debug: bool = True,
         to stay small and cheap. This is a body, fetched once, at join, and
         rendered into a tool result the joining agent reads out loud. Merging
         them would make every ten-second briefing refresh pay for a summary
-        nobody asked for, and would push finding prose into `instructions`,
-        which `briefing.py` caps at 1200 characters precisely to keep it out.
+        nobody asked for. `briefing.py` composes its headline within its own
+        hard cap and then appends THIS body, separately capped, so the two
+        surfaces stay separately bounded rather than one growing into the
+        other. (The number in that cap moved in the same branch that wrote this
+        docstring; naming it here would only give it a second place to go
+        stale, so it is named nowhere but `briefing._MAX_BRIEFING_CHARS`.)
 
         DOES NOT `mark_seen`. Reading the summary is not reading the memory:
         this route is idempotent, an orchestrator may call it on a join that
@@ -771,6 +775,16 @@ def build_app(provider: ModelProvider, *, debug: bool = True,
             cands = store.candidates(sid, body["query"], top_k=TOP_K, exclude=suppressed)
             candidates = [c.finding for c in cands.candidates]
 
+        # THE WATERMARK IS TAKEN HERE, not after the await below. `candidates`
+        # is now fixed, so this is the instant the asker's view of the memory
+        # was decided; `query_findings` is a model call that docs/FLOW.md
+        # measures at 12.6–52.8 seconds, and every finding a teammate pushes
+        # inside that window belongs to the asker's NEXT read, not this one.
+        # Reading the position after the await marked those findings seen by
+        # somebody who was never shown them — and `_seen_count` is an arrival
+        # index, so they were dropped from that person's "new since" slice for
+        # good rather than until the next round (store.mark_seen's `at=`).
+        position = store.read_position(sid)
         try:
             ranked = await query_findings(
                 retrieval_provider,
@@ -808,8 +822,9 @@ def build_app(provider: ModelProvider, *, debug: bool = True,
                 status_code=503)
         # By CONTRIBUTOR, unchanged by the split: the watermark is a fact
         # about a person, so a query from either of one human's windows moves
-        # the place they resume from.
-        store.mark_seen(sid, contributor)
+        # the place they resume from. `at=` is the position snapshotted before
+        # the ranking call, not the position now — see above.
+        store.mark_seen(sid, contributor, at=position)
         if feed is not None:
             # Counts alone could not answer "what did the asker actually get
             # back?", which is the only thing an operator watching a query

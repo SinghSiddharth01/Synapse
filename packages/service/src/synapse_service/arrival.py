@@ -56,7 +56,37 @@ from synapse_service.retrieval import visible_to
 
 # Bounds. The whole rendered text is capped last, after every part has already
 # been capped, so the cap is a backstop rather than the mechanism.
+#
+# ⟨CORRECTED 2026-08-06, adversarial review finding #2⟩ That sentence used to be
+# FALSE and the code below used to make it false. The per-part caps sum to
+# ~5.5k, twice this number, so on any session near those bounds the global cap
+# WAS the mechanism — and because `render` concatenated head + accumulated +
+# new and truncated from the END, the growable content (highlights, working
+# memory, topic labels) sat in the MIDDLE and the NEW SINCE section paid for
+# all of it. Reproduced at plausible sizes: 2 of 4 new bullets silently dropped
+# with no marker; at the bounds, the heading itself disappeared and a joiner
+# with three unseen findings was shown a summary that ended mid-word.
+#
+# That inverts the whole point of W5. "What has accumulated" is the part a
+# joiner could recover by hand with one `query`; "what is new since your
+# watermark" is the part nothing else in the system can tell them. So the NEW
+# section is now composed FIRST against its own reserved budget and the
+# ACCUMULATED section is fitted around it, both by DROPPING WHOLE BULLETS with
+# an explicit "and N more" rather than by cutting a sentence in half. The global
+# cap below is now genuinely unreachable on the composed path and is kept only
+# as the backstop it always claimed to be.
 MAX_ARRIVAL_CHARS = 2800
+
+# The NEW SINCE section's FLOOR, not its ration. It is the amount ACCUMULATED
+# may never bid away — and it is all ACCUMULATED is held to, in one direction
+# only: if the new section is shorter than this (the common case, since most
+# joins have a handful of unseen findings or none) every unspent character goes
+# to ACCUMULATED, and if ACCUMULATED's fixed part is short the new section is
+# allowed to run PAST this number rather than being clipped to it. A ceiling
+# here would have reintroduced finding #2 in miniature: bullets dropped from
+# the one section that cannot be recovered by asking, while the budget they
+# needed sat unspent.
+MIN_NEW_SECTION_CHARS = 1200
 MAX_ITEM_CHARS = 200
 MAX_WORKING_MEMORY_CHARS = 600
 MAX_PURPOSE_CHARS = 160
@@ -179,12 +209,65 @@ def _counts(by_type: dict[str, int]) -> str:
     return ", ".join(f"{k}: {v}" for k, v in sorted(by_type.items()))
 
 
-def render(summary: ArrivalSummary) -> str:
-    """The two sections, as prose, hard-capped.
+_MORE = "… and {n} more — ask `query` about them."
 
-    Written as one string with explicit newlines rather than as a list of
-    lines because the cap has to be applied to the WHOLE thing: capping each
-    part separately still lets the total grow with the number of parts.
+
+def _fit(header: str, bullets: list[str], budget: int) -> str:
+    """`header` plus as many whole bullets as `budget` allows, and an honest
+    count of the ones that did not fit.
+
+    Dropping WHOLE bullets rather than truncating the joined string is the
+    point. A mid-word cut leaves the joiner reading half a sentence about a
+    teammate's decision and — worse — leaves them with no way to know there was
+    a second half, or a third bullet after it. "and 2 more" is smaller than the
+    text it replaces and is the only version that does not lie by omission.
+
+    `header` is never dropped: it is the section's fixed part (the counts, or
+    the "N finding(s) you have not seen" sentence), it is what makes the
+    section's absence distinguishable from its emptiness, and it is bounded.
+    A budget smaller than the header therefore overshoots deliberately —
+    `render` sizes the budgets so that cannot happen, and the global cap is
+    still there behind it.
+    """
+    if not bullets:
+        return header
+    # The marker's room is reserved BEFORE the first bullet is placed, not
+    # found afterwards: spending the last of the budget on one more bullet and
+    # then having nowhere to say "and 3 more" is exactly the silent drop this
+    # function exists to remove. Reserved at its longest (every bullet
+    # dropped), so the reservation can only be generous.
+    reserve = len(_MORE.format(n=len(bullets))) + 1
+    text, kept = header, 0
+    for bullet in bullets:
+        if len(text) + 1 + len(bullet) + reserve > budget:
+            break
+        text += "\n" + bullet
+        kept += 1
+    if kept < len(bullets):
+        text += "\n" + _MORE.format(n=len(bullets) - kept)
+    return text
+
+
+def render(summary: ArrivalSummary) -> str:
+    """The two sections, as prose, neither able to truncate the other away.
+
+    COMPOSITION ORDER IS LOAD-BEARING and is the opposite of the reading order.
+    Three passes, in priority order:
+
+      1. ACCUMULATED's FIXED part — its counts line, and the working memory and
+         thread labels if they fit — sized against a budget that has already set
+         `MIN_NEW_SECTION_CHARS` aside. This is what stops a 600-character
+         working memory from starving the section below it.
+      2. The whole NEW SINCE section, against everything left after that. Sized
+         second because it is the half nothing else in the system can
+         reconstruct: a joiner can always recover "what has accumulated" with
+         one `query`, and can never recover "what landed since your watermark"
+         once it has scrolled past.
+      3. ACCUMULATED's individual finding bullets, into whatever the new section
+         did not use — which is most of the budget on almost every real join,
+         because most joins have a handful of unseen findings or none.
+
+    See the note on `MAX_ARRIVAL_CHARS` for what this replaced and why.
     """
     members = ", ".join(summary.members) or "nobody registered yet"
     if summary.truncated_members:
@@ -192,52 +275,82 @@ def render(summary: ArrivalSummary) -> str:
     head = (f"Shared Session {summary.shared_id} — purpose: “{summary.purpose}”. "
             f"Members: {members}.")
 
-    if summary.total == 0:
-        accumulated = ("ACCUMULATED — nothing yet. No findings have been recorded in "
-                       "this session, so there is no history to catch up on.")
-    else:
-        lines = [f"ACCUMULATED — what the team has built up here: {summary.total} "
-                 f"finding(s) ({_counts(summary.by_type)}), {summary.conflicts} "
-                 f"conflict(s), working memory at v{summary.version}."]
-        if summary.working_memory:
-            lines.append(f"Working memory: {summary.working_memory}")
-        if summary.topics:
-            lines.append("Threads: " + "; ".join(
-                f"“{label}” ({size})" for label, size in summary.topics))
-        if summary.highlights:
-            lines.append("Most worth knowing:")
-            lines.extend(summary.highlights)
-        accumulated = "\n".join(lines)
-
-    if summary.first_look:
-        new = ("NEW SINCE YOU LAST LOOKED — this is your first look at this session, "
-               "so all of the above is new to you.")
-    elif summary.new_count == 0:
-        new = (f"NEW SINCE YOU LAST LOOKED — nothing new. The memory has moved "
-               f"{summary.new_since} version(s) since you last read it, but no "
-               "finding you have not already seen came with it.")
-    else:
-        # `new_since` is a VERSION delta and `new_count` is a FINDING count, and
-        # they genuinely disagree: a push is queryable immediately and only bumps
-        # the version when synthesis gets round to it. "0 version(s) of movement"
-        # next to "1 finding you have not seen" reads like a contradiction, so
-        # the zero case says what is actually true instead — the findings are
-        # here, the narrative has not caught up. (That this case exists at all is
-        # why the new-since slice counts arrivals rather than versions; a
-        # version-derived list would have reported nothing new.)
-        movement = (f", across {summary.new_since} version(s) of movement"
-                    if summary.new_since > 0 else
-                    " — pushed since your last read and not yet folded into the "
-                    "working memory")
-        new = "\n".join(
-            [f"NEW SINCE YOU LAST LOOKED — {summary.new_count} finding(s) you have not "
-             f"seen ({_counts(summary.new_by_type)}){movement}:"]
-            + list(summary.new_items))
+    # 4 = two blank-line separators between three sections.
+    free = MAX_ARRIVAL_CHARS - len(head) - 4
+    header, bullets = _accumulated_section(summary, free - MIN_NEW_SECTION_CHARS)
+    new = _fit(*_new_section(summary), free - len(header))
+    accumulated = _fit(header, bullets, max(free - len(new), 0))
 
     text = f"{head}\n\n{accumulated}\n\n{new}"
     if len(text) > MAX_ARRIVAL_CHARS:
+        # Unreachable from the composition above, which fits both sections to
+        # the budget before joining them. Kept because "unreachable" is a claim
+        # about today's arithmetic and this string is handed to another agent.
         text = text[: MAX_ARRIVAL_CHARS - 1].rstrip() + "…"
     return text
+
+
+def _accumulated_section(summary: ArrivalSummary, budget: int) -> tuple[str, list[str]]:
+    """The header (always) and the bullets `_fit` may drop from the end.
+
+    `budget` bounds the HEADER only — the whole-line optional parts below — and
+    is deliberately smaller than the section's real allowance: `render` hands it
+    what is left after the new section's floor, so that a long working memory
+    cannot push the NEW SINCE section below the size it is guaranteed. The
+    bullets are sized separately, afterwards, against whatever the new section
+    actually spent.
+
+    The two whole-line optional parts — the working memory and the thread
+    labels — are placed into the header when they fit, in that order, because
+    they are worth more per character than one more finding bullet: the
+    working memory IS the model-written narrative of this session, rewritten on
+    every merge, and the thread labels say what the session is ABOUT in ~90
+    characters each. The individual findings under "Most worth knowing" are the
+    tail, and are what a joiner would get back from `query` anyway.
+    """
+    if summary.total == 0:
+        return ("ACCUMULATED — nothing yet. No findings have been recorded in "
+                "this session, so there is no history to catch up on."), []
+
+    header = (f"ACCUMULATED — what the team has built up here: {summary.total} "
+              f"finding(s) ({_counts(summary.by_type)}), {summary.conflicts} "
+              f"conflict(s), working memory at v{summary.version}.")
+    optional = []
+    if summary.working_memory:
+        optional.append(f"Working memory: {summary.working_memory}")
+    if summary.topics:
+        optional.append("Threads: " + "; ".join(
+            f"“{label}” ({size})" for label, size in summary.topics))
+    for line in optional:
+        if len(header) + 1 + len(line) <= budget:
+            header += "\n" + line
+    if not summary.highlights:
+        return header, []
+    return header + "\nMost worth knowing:", list(summary.highlights)
+
+
+def _new_section(summary: ArrivalSummary) -> tuple[str, list[str]]:
+    if summary.first_look:
+        return ("NEW SINCE YOU LAST LOOKED — this is your first look at this session, "
+                "so all of the above is new to you."), []
+    if summary.new_count == 0:
+        return (f"NEW SINCE YOU LAST LOOKED — nothing new. The memory has moved "
+                f"{summary.new_since} version(s) since you last read it, but no "
+                "finding you have not already seen came with it."), []
+    # `new_since` is a VERSION delta and `new_count` is a FINDING count, and
+    # they genuinely disagree: a push is queryable immediately and only bumps
+    # the version when synthesis gets round to it. "0 version(s) of movement"
+    # next to "1 finding you have not seen" reads like a contradiction, so
+    # the zero case says what is actually true instead — the findings are
+    # here, the narrative has not caught up. (That this case exists at all is
+    # why the new-since slice counts arrivals rather than versions; a
+    # version-derived list would have reported nothing new.)
+    movement = (f", across {summary.new_since} version(s) of movement"
+                if summary.new_since > 0 else
+                " — pushed since your last read and not yet folded into the "
+                "working memory")
+    return (f"NEW SINCE YOU LAST LOOKED — {summary.new_count} finding(s) you have not "
+            f"seen ({_counts(summary.new_by_type)}){movement}:"), list(summary.new_items)
 
 
 def compute(store, shared_id: str, *, contributor: str,
@@ -335,16 +448,33 @@ class SummaryCache:
     key CONTAINS the two numbers that move whenever the memory changes:
 
       * the log's entry count, which advances on every push (and on every
-        merge, trivia verdict and topic assignment), and
-      * `memory_version`, which advances on every verdict round applied.
+        merge, trivia verdict and topic assignment),
+      * `memory_version`, which advances on every verdict round applied, and
+      * the MEMBER LIST, which advances on neither.
 
-    A cached entry can therefore only be served while both are unchanged,
+    A cached entry can therefore only be served while all three are unchanged,
     which is exactly "nothing has happened to this session since". No caller
     can forget to invalidate, because no caller invalidates.
 
+    ⟨MEMBERS ADDED 2026-08-06, adversarial review finding #4⟩ The first two are
+    not enough, and the gap is exactly the shape of the demo. Membership has
+    never been in the log and `store.add_member` bumps no version (its own
+    docstring in store.py says so), so a teammate joining changed NOTHING in
+    the fingerprint: teammate #2 took a summary, teammate #3 joined, and
+    teammate #2's second window was served the cached pre-join member list and
+    told the wrong team. Reproduced by object identity. The member tuple itself
+    goes in the key rather than its length, because one member leaving and
+    another joining is a change the count cannot see.
+
     Also in the key: the asker's identity (suppression is per conversation) and
-    their watermark (the NEW SINCE section is per person and moves when they
-    read). Bounded by insertion order — this is a memo for a handful of live
+    BOTH of their watermarks — `seen_count`, which decides the NEW SINCE slice,
+    and `last_seen`, which the section's own sentence quotes ("moved N
+    versions since you last read it"). `last_seen` was missing and could go
+    stale on its own: after a verdict round that produced only trivial
+    findings, a re-read kept quoting a version delta that was no longer true.
+    Cosmetic, unlike the members, and fixed the same way — by naming it.
+
+    Bounded by insertion order — this is a memo for a handful of live
     sessions, not a store.
     """
 
@@ -352,14 +482,17 @@ class SummaryCache:
         self._limit = limit
         self._entries: dict[tuple, ArrivalSummary] = {}
 
-    def fingerprint(self, store, shared_id: str) -> tuple[int, int]:
+    def fingerprint(self, store, shared_id: str) -> tuple:
+        session = store.get_session(shared_id)
         return (len(store.log_entries(shared_id)),
-                store.get_context(shared_id).memory_version)
+                store.get_context(shared_id).memory_version,
+                tuple(session.members) if session is not None else ())
 
     def get(self, store, shared_id: str, *, contributor: str,
             agent_session: str | None) -> ArrivalSummary:
         key = (shared_id, self.fingerprint(store, shared_id), contributor,
                agent_session, store.seen_count(shared_id, contributor),
+               store.last_seen(shared_id, contributor),
                store.has_looked(shared_id, contributor))
         hit = self._entries.get(key)
         if hit is not None:
