@@ -52,6 +52,35 @@ NPU_URL = "http://127.0.0.1:18181/v1"   # geniex serve listens here too
 processes: list[tuple[str, subprocess.Popen]] = []
 
 
+def lan_ip() -> str | None:
+    """This machine's address on the LAN, for teammates to point at.
+
+    A UDP socket to a routable address picks the interface the OS would
+    actually use, without sending a packet — more reliable than parsing
+    `ifconfig`, and it works the same on macOS and Windows.
+    """
+    import socket
+
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.connect(("8.8.8.8", 80))
+        return probe.getsockname()[0]
+    except OSError:
+        return None
+    finally:
+        probe.close()
+
+
+def _lan_address() -> str:
+    """The address a teammate should type, or a placeholder that reads as one.
+
+    Never returns None: this string goes into a command line we print for
+    someone else to run, and "None" in the middle of a URL is worse than an
+    obvious placeholder they will notice and ask about.
+    """
+    return lan_ip() or "<this-machine-lan-ip>"
+
+
 def http(method: str, url: str, body: dict | None = None, timeout: float = 30.0):
     request = urllib.request.Request(
         url, data=json.dumps(body).encode() if body is not None else None,
@@ -98,6 +127,19 @@ def stop_all() -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--shared-id", help="join an existing Shared Session instead of creating one")
+    parser.add_argument("--host", default="0.0.0.0", metavar="ADDR",
+                        help="what the SERVICE binds to. Defaults to 0.0.0.0 so "
+                             "teammates on the LAN can reach it; pass 127.0.0.1 to "
+                             "keep it to this machine. 0.0.0.0 exposes it to your "
+                             "network so teammates' orchestrators can reach it. "
+                             "The service is the only piece worth sharing: it needs "
+                             "no NPU and no key.")
+    parser.add_argument("--service-url", metavar="URL",
+                        help="use a service someone ELSE is hosting instead of "
+                             "starting one (e.g. http://192.168.4.44:8899). Starts "
+                             "only the model seam and your own orchestrator, which "
+                             "is the correct shape: one orchestrator per laptop, "
+                             "stamping YOUR attribution.")
     parser.add_argument("--contributor", default=os.environ.get("USER", "me"))
     parser.add_argument("--purpose", default="live session")
     parser.add_argument("--live", action="store_true",
@@ -141,26 +183,58 @@ def main(argv: list[str] | None = None) -> int:
                   f"not a model, not the NPU — retrieval ranking is identity)",
                   flush=True)
 
-    service = spawn("service", [str(BIN / "synapse-service")], {
-        "SYNAPSE_SYNTHESIZER": "aic100",
-        "INFERENCE_CLOUD_BASE_URL": model_url,
-        "INFERENCE_CLOUD_API_KEY": "local-stand-in",
-        "INFERENCE_CLOUD_MODEL": "local-stand-in",
-    })
-    if not wait_for(f"{SERVICE_URL}/debug", service, "service"):
-        raise SystemExit("the service did not come up")
-    print(f"service    {SERVICE_URL}  · dashboard {SERVICE_URL}/debug", flush=True)
+    if args.service_url:
+        service_url = args.service_url.rstrip("/")
+        if not wait_for(f"{service_url}/debug", None, "service", seconds=8):
+            raise SystemExit(
+                f"nothing is answering at {service_url}. Ask whoever is hosting "
+                f"to start it, and check they bound it to the LAN rather than "
+                f"127.0.0.1 (scripts/serve_local.py does that by default)."
+            )
+        print(f"service    JOINING {service_url} (someone else is hosting it)",
+              flush=True)
+        service = None
+    else:
+        service_url = SERVICE_URL
+        service = spawn("service", [str(BIN / "synapse-service"),
+                                    "--host", args.host], {
+            "SYNAPSE_SYNTHESIZER": "aic100",
+            "INFERENCE_CLOUD_BASE_URL": model_url,
+            "INFERENCE_CLOUD_API_KEY": "local-stand-in",
+            "INFERENCE_CLOUD_MODEL": "local-stand-in",
+        })
+        if not wait_for(f"{service_url}/debug", service, "service"):
+            raise SystemExit("the service did not come up")
+        print(f"service    {service_url}  · dashboard {service_url}/debug", flush=True)
+        if args.host not in ("127.0.0.1", "localhost", "::1"):
+            print(f"           reachable on the LAN at http://{_lan_address()}:8899 "
+                  f"— no auth, so anyone who can reach this port can read and "
+                  f"write the team's memory", flush=True)
 
     if args.shared_id:
         shared_id = args.shared_id
-        http("POST", f"{SERVICE_URL}/v1/sessions",
+        http("POST", f"{service_url}/v1/sessions",
              {"purpose": args.purpose, "created_by": args.contributor,
               "shared_id": shared_id})
+    elif args.service_url:
+        # Adopt the session the host already has. Creating one here would put
+        # this developer alone in a Shared Session nobody else is in, which is
+        # the exact outcome joining exists to avoid — and it would look like
+        # success: a working stack, an empty memory, no error anywhere.
+        listed = (http("GET", f"{service_url}/debug/stats.json") or {}).get("sessions") or []
+        if not listed:
+            raise SystemExit(
+                f"{service_url} is up but holds no Shared Session yet. Ask the host "
+                f"for the id and pass --shared-id.")
+        shared_id = listed[0]["shared_id"]
+        print(f"           adopted the host's session: {shared_id}"
+              + (f"  (of {len(listed)}; pass --shared-id to pick another)"
+                 if len(listed) > 1 else ""), flush=True)
     else:
-        shared_id = http("POST", f"{SERVICE_URL}/v1/sessions",
+        shared_id = http("POST", f"{service_url}/v1/sessions",
                          {"purpose": args.purpose,
                           "created_by": args.contributor})["shared_id"]
-    http("POST", f"{SERVICE_URL}/v1/sessions/{shared_id}/members",
+    http("POST", f"{service_url}/v1/sessions/{shared_id}/members",
          {"contributor": args.contributor})
 
     from synapse_contracts import SessionBinding, write_binding
@@ -174,7 +248,7 @@ def main(argv: list[str] | None = None) -> int:
 
     orchestrator = spawn("orchestrator", [
         str(BIN / "synapse-orchestrator"), "--port", "8787",
-        "--service-url", SERVICE_URL, "--state-dir", str(STATE),
+        "--service-url", service_url, "--state-dir", str(STATE),
     ], {"SYNAPSE_BASE_URL": model_url})
     if not wait_for(f"{ORCHESTRATOR_URL}/mcp", orchestrator, "orchestrator"):
         raise SystemExit("the orchestrator did not come up")
@@ -190,6 +264,25 @@ def main(argv: list[str] | None = None) -> int:
     print(flush=True)
     print(f"  Tools: mcp__synapse__query · mcp__synapse__contribute", flush=True)
     print(f"  Logs:  {STATE / 'logs'}", flush=True)
+
+    if not args.service_url and args.host not in ("127.0.0.1", "localhost", "::1"):
+        # One orchestrator per laptop is not a deployment preference, it is what
+        # keeps attribution honest: a teammate pointing their agent at THIS
+        # orchestrator would have their findings stamped with MY binding — my
+        # contributor, my agent session — so their own work would be suppressed
+        # from them and credited to me.
+        print(flush=True)
+        print("  Give a teammate THIS, so they run their own orchestrator "
+              "against your service:", flush=True)
+        print(f"    uv run python scripts/serve_local.py \\", flush=True)
+        print(f"      --service-url http://{_lan_address()}:8899 \\", flush=True)
+        print(f"      --shared-id {shared_id} \\", flush=True)
+        print(f"      --contributor <their-name>        # add --npu if they have one",
+              flush=True)
+        print("  They must NOT point Claude Code at your :8787 — one orchestrator "
+              "per laptop, or their findings get stamped as yours.", flush=True)
+
+    print(flush=True)
     print("  Ctrl-C to stop.", flush=True)
 
     try:
