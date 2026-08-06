@@ -233,5 +233,5 @@ exactly that reason.
 | the banner names a model you did not pick | you passed `--claude-model` to the wrong arm, or not at all |
 
 Windows/ARM64: [`docs/JOIN-WINDOWS.md`](./JOIN-WINDOWS.md).
-Full detail: [`packs/claude-code/INSTALL.md`](../packs/claude-code/INSTALL.md).
+Full detail: [`packs/claude-code/INSTALL.md`](https://github.com/SinghSiddharth01/Synapse/blob/main/packs/claude-code/INSTALL.md).
 On-hardware NPU work: [`docs/NPU-RUNBOOK.md`](./NPU-RUNBOOK.md).

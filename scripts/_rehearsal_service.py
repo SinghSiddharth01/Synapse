@@ -13,6 +13,7 @@ scripted. `--live` in rehearse_demo.py swaps this file out for the real 8B.
 
 from __future__ import annotations
 
+import argparse
 import os
 import sys
 
@@ -65,6 +66,13 @@ RECOVERY_SCRIPTS = [
 ]
 
 if __name__ == "__main__":
+    # `--port`, mirroring `synapse-service --port`, so rehearse_demo.py can move
+    # BOTH arms of its service (this one, and the real one under --live) with a
+    # single --service-port. The hardcoded 8899 here was half the reason that
+    # script could only ever run on the demo's own ports.
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--port", type=int, default=8899)
+    args = parser.parse_args()
     scripts = RECOVERY_SCRIPTS if os.environ.get("REHEARSAL_PHASE") == "recovery" else SCRIPTS
     # merge_min_interval_s=0: the scripts above are a QUEUE, and one verdict is
     # popped per merge. The 60s debounce would defer pushes 2 and 3 (the
@@ -75,4 +83,4 @@ if __name__ == "__main__":
     # which is what covers `--live`; this line is what makes running THIS file
     # directly behave the same.
     uvicorn.run(build_app(FakeProvider(scripts=scripts), merge_min_interval_s=0),
-                host="127.0.0.1", port=8899, log_level="warning")
+                host="127.0.0.1", port=args.port, log_level="warning")
