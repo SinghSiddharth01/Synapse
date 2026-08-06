@@ -329,15 +329,26 @@ def register_tools(server: FastMCP, *, resolve_binding, service_url: str, relay,
         Code and Codex both open leaves two files pointing at the same
         `shared_id` — that is the documented path, not an exotic one.
 
+        BOTH binding layouts are swept (W2, 2026-08-06): the legacy
+        `bindings/<agent>.json` and the per-session
+        `bindings/<agent>/<agent_session_id>.json`. `_unbind` is this
+        function's only caller, and a leave/end that cleared only the legacy
+        mirror would leave the per-session file behind still naming the
+        session — the worker would resolve it and keep distilling into a
+        Shared Session the conversation was just told it had left, which is
+        the exact class of silent falsehood the multi-file `_unbind` fix
+        existed to end.
+
         Never raises: `read_binding` already answers None for an absent or
         corrupt file, and `glob` on a bindings dir that does not exist yields
         nothing. Callers here are MCP tools.
         """
         if state_dir is None:
             return []
+        root = bindings_dir(Path(state_dir))
+        paths = sorted(root.glob("*.json")) + sorted(root.glob("*/*.json"))
         return [(path, b)
-                for path, b in ((p, read_binding(p))
-                                for p in sorted(bindings_dir(Path(state_dir)).glob("*.json")))
+                for path, b in ((p, read_binding(p)) for p in paths)
                 if b is not None and b.shared_id == shared_id]
 
     def _unbind(shared_id: str) -> list | None:

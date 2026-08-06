@@ -434,6 +434,34 @@ async def test_leave_session_detaches_every_product_bound_to_that_session(tmp_pa
     assert _NOT_JOINED in str(await wiring.server.call_tool("query", {"question": "x?"}))
 
 
+async def test_leave_session_clears_per_session_bindings_too(tmp_path):
+    """W2 pass 1 put the source of truth in `bindings/<agent>/<session>.json`
+    and kept `bindings/<agent>.json` as a mirror for un-upgraded readers. A
+    leave that swept only the mirror would leave every window's real binding
+    behind still naming the session — the worker would resolve one and keep
+    distilling into a Shared Session the conversation was just told it had
+    left, which is the exact falsehood the multi-product sweep above exists to
+    end, one layer down."""
+    urls: list[str] = []
+    wiring = _wire(tmp_path, _service(urls=urls))
+    _prejoin(wiring, "sh-1", contributor="sid", transcript="/tmp/cc.jsonl")
+    window_a = wiring.state_dir / "bindings" / "claude-code" / "conv-1.json"
+    window_b = wiring.state_dir / "bindings" / "claude-code" / "conv-2.json"
+    for path, session, transcript in ((window_a, "conv-1", "/tmp/cc.jsonl"),
+                                      (window_b, "conv-2", "/tmp/cc-2.jsonl")):
+        write_binding(path,
+                      SessionBinding(agent_session_id=session, shared_id="sh-1",
+                                     contributor="sid", agent="claude-code",
+                                     transcript_path=transcript, pinned_at=TS))
+
+    await wiring.server.call_tool("leave_session", {})
+
+    assert not wiring.binding_file.exists()
+    assert not window_a.exists()
+    assert not window_b.exists()
+    assert _NOT_JOINED in str(await wiring.server.call_tool("query", {"question": "x?"}))
+
+
 async def test_an_ended_session_clears_every_product_bound_to_it(tmp_path):
     """The same one-file bug on the 409 path. `_SESSION_ENDED` states "The
     local binding has been cleared, so the next call will say you are not
