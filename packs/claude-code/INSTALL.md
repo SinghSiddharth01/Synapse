@@ -21,6 +21,55 @@ no pack at all; they ride the MCP `instructions` field and are already live
 the moment `synapse-orchestrator` is running and this project has joined a
 Shared Session with `synapse-worker join <shared_id>`.)
 
+## Connecting Claude Code to the orchestrator (do this first)
+
+The pack below adds signals ③ and ④. Signals ① and ② need only the MCP
+connection itself — and that connection has to be registered with Claude Code
+before any of it is reachable.
+
+This repo ships a project-scoped [`.mcp.json`](../../.mcp.json):
+
+```json
+{"mcpServers": {"synapse": {"type": "http", "url": "http://127.0.0.1:8787/mcp"}}}
+```
+
+Copy it to the root of whatever project you want shared memory in, or run the
+equivalent from that project:
+
+```bash
+claude mcp add --transport http --scope project synapse http://127.0.0.1:8787/mcp
+```
+
+`--scope project` writes `.mcp.json`, which is committable — everyone who
+clones the repo gets the connection. `--scope user` (in `~/.claude.json`)
+covers every project on your machine instead and is not shared.
+
+Then **start a new Claude Code session** — the file is read at session start,
+not live — and **approve the server** when prompted. Project-scoped servers
+are gated on approval by design, so a cloned repo cannot wire an agent to a
+server you never agreed to. Approval is remembered per project.
+
+Verify with `claude mcp list` (expect `✔ Connected  synapse`) or `/mcp` inside
+a session. The tools appear as `mcp__synapse__query` and
+`mcp__synapse__contribute`.
+
+**Three things that will bite you if you skip them:**
+
+- **Join first.** Until `synapse-worker join <shared_id>` has been run from a
+  terminal in that project, both tools return "not joined" rather than
+  erroring. The orchestrator re-reads the binding on every single tool call,
+  so joining *after* Claude Code is already running takes effect on the next
+  call — no restart.
+- **`contribute` needs a model.** It distils your prose through the same NPU
+  seam the worker uses (`SYNAPSE_BASE_URL`). On the X Elite that is
+  `geniex serve`; on a machine without an NPU, point it at
+  `scripts/local_model_server.py`. With nothing there it fails soft — your
+  note is not recorded and it says so.
+- **One binding per Agent product per machine.** Every Claude Code session on
+  the laptop shares the one `bindings/claude-code.json`, so they are all in
+  the same Shared Session. Two projects in two different Shared Sessions at
+  once is not something this supports today.
+
 ## Prerequisites
 
 - `synapse-orchestrator` reachable at its default `http://127.0.0.1:8899`
