@@ -20,7 +20,11 @@ concurrency:
 
 jobs:
   tests:
-    name: suite (offline, 717 tests)
+    # No count in the name: it read "717 tests" while the suite ran 724, and a
+    # label that asserts a number goes stale on the next commit that adds one.
+    # pytest discovers everything under `testpaths` (pyproject.toml), so a new
+    # test reaches CI by existing — nothing has to be registered here.
+    name: suite (offline)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
