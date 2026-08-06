@@ -388,18 +388,25 @@ Stated plainly, because several docs in this repo imply otherwise.
   is every orchestrator re-pushing its retained log plus `resync`, which is safe
   only because the log is append-only. Each machine holds only its own relay, so
   every contributor must resync.
-- **Multi-key round-robin is dead code at both layers.** `AIC100Provider` rotates
-  on 429, but the service's pool holds one entry and
-  `scripts/local_model_server.py` — which holds the real key — has no rotation at
-  all. Adding keys to `secrets.jsonc` today changes nothing (ADR 0005
-  Consequences). On one key the governor allows ~6 merge rounds/hour; holding the
-  60s floor under sustained load needs ~10 keys.
-- **Retrieval is not metered.** Synthesis and retrieval are two `RecordingProvider`
-  façades over **one** provider object, hence one key and one hourly ceiling
-  (`service/api.py:178-183`), and `/query` never charges `_spend`. A team that
-  runs 20 queries and no pushes exhausts the key while `_affordable()` still
-  answers True. Deliberately open and documented at `service/api.py:68-79` — the
-  constants keep their `SYNTHESIS_` prefix to say exactly what they cover.
+- **Multi-key round-robin is wired but the pool is one key.** ⟨corrected
+  2026-08-06, W3b⟩ Not dead code: `_post_rotating` is the only POST helper
+  `AIC100Provider.complete` calls and `SYNTHESIS_KEYS` is read by `_affordable`
+  on every push — both tested. What is missing is keys. `SYNAPSE_SYNTHESIS_KEYS`
+  scales the governor's ceiling with nothing checking the pool can pay for it, so
+  `build_app` compares the two at boot and warns
+  (`_warn_if_the_key_pool_cannot_pay_for_the_budget`). The real wiring — a proxy
+  that rotates a pool — is still open: `scripts/local_model_server.py` holds the
+  real key with no rotation, so adding keys to `secrets.jsonc` changes nothing.
+  On one key the governor allows ~6 merge rounds/hour; holding the 60s floor
+  under sustained load needs ~10 keys.
+- ~~**Retrieval is not metered.**~~ **Closed 2026-08-06 (W3b, decisions/002).**
+  Synthesis and retrieval are still two `RecordingProvider` façades over **one**
+  provider object, hence one key and one hourly ceiling, but `/query` now charges
+  that key's ledger through `query_findings`' `on_usage` callback. `_spend`
+  carries which component spent each entry: the hourly ceilings sum across all of
+  them, merge *pricing* still reads only merges. Twenty queries and no pushes now
+  defer the next merge with a logged reason instead of 429ing inside the
+  provider. `/query` itself is charged, never gated.
 - **`contribute(text)` has no input bound.** It bypasses the segmenter entirely,
   so the passive path's whole budget system does not apply; an oversized
   contribution reaches the operator only as `finish_reason=length`

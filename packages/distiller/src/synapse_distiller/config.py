@@ -108,6 +108,16 @@ class WorkerConfig:
     # other half is the endpoint not flushing synchronously at all.
     upstream_timeout_s: float = 120.0
 
+    # The WORKER -> PROVIDER seam's three bounds. Rationale for each number is
+    # in synapse_worker.limiter (which owns the defaults; these mirror them so
+    # a config file is a complete description of the runtime). Nothing bounded
+    # this seam before 2026-08-06 -- one tick distilled every drained segment
+    # back to back, and the in-flight count was one only because `tick()`
+    # happens to await in sequence.
+    max_calls_per_tick: int = 4
+    max_concurrent_calls: int = 1
+    max_deferred_segments: int = 64
+
 
 @dataclass(frozen=True)
 class ProviderConfig:
@@ -258,6 +268,20 @@ def load_config(path: str | Path | None = None) -> SynapseConfig:
             upstream_timeout_s=float(
                 _env("UPSTREAM_TIMEOUT")
                 or worker_raw.get("upstream_timeout_s", WorkerConfig.upstream_timeout_s)
+            ),
+            max_calls_per_tick=int(
+                _env("MAX_CALLS_PER_TICK")
+                or worker_raw.get("max_calls_per_tick", WorkerConfig.max_calls_per_tick)
+            ),
+            max_concurrent_calls=int(
+                _env("MAX_CONCURRENT_CALLS")
+                or worker_raw.get("max_concurrent_calls",
+                                  WorkerConfig.max_concurrent_calls)
+            ),
+            max_deferred_segments=int(
+                _env("MAX_DEFERRED_SEGMENTS")
+                or worker_raw.get("max_deferred_segments",
+                                  WorkerConfig.max_deferred_segments)
             ),
         ),
         distil_kinds=_parse_kinds(_env("DISTIL_KINDS") or distiller.get("distil_kinds")),

@@ -49,7 +49,7 @@ There is **no queue and no background worker anywhere on this path** — `contri
 5. **Service-side deferred queue `_pending`.** Grows without cap while synthesis is deferred (`api.py:192`, `api.py:500-501`); drained only by a non-deferred push (`api.py:524`) or `POST /synthesize` (`api.py:589`).
 6. **`InMemoryStore`.** No cap, no persistence, no eviction (`store.py:195`); retrieval is protected by `TOP_K` but the log itself grows unboundedly per session.
 7. **Cross-session synthesis concurrency.** `_affordable()` is read at `api.py:511`, the merge is awaited at `api.py:542`, `_record_spend()` runs at `api.py:543`. Nothing serializes the interval — N concurrent pushes on N different sessions all observe the same pre-spend ledger and all proceed. The 60s floor is per-session (`_last_merge` keyed by `sid`, `api.py:191`), so it does not help here.
-8. **Worker → provider call rate.** There is no rate limiter on the distiller side at all: `WorkerLoop.tick` distils every surviving segment sequentially with no per-tick cap and no token ledger (`loop.py:340-374`), and `run()` only sleeps between ticks (`loop.py:436-446`).
+8. ~~**Worker → provider call rate.**~~ **CLOSED 2026-08-06 (W3b, decisions/002).** Was: no rate limiter on the distiller side at all — `WorkerLoop.tick` distilled every surviving segment sequentially with no per-tick cap and no token ledger (`loop.py:340-374`), and `run()` only sleeps between ticks (`loop.py:436-446`). Now `SeamLimiter` (`packages/worker/src/synapse_worker/limiter.py`) bounds three things from `[worker]` config: **4 calls/tick** (overflow DEFERRED, persisted to `deferred-segments.json`, never shed), **1 concurrent call** (a semaphore every worker→provider call in `loop.py` holds, so the ceiling is checked rather than implied by sequential awaits), and **64 deferred segments** — a cap the queue is never filled past (`Segmenter.drain(max_segments=…)` takes only the remaining headroom), and while work is held back `tick()` stops reading new transcript bytes, leaving them on disk behind the follower's offset. Visible as a WARNING, an INFO, a `limiter` stats event and `TickResult.deferred`/`.backpressured`. ⟨Corrected 2026-08-06 review pass: as first shipped the 64 governed only the *next* read, so one `--from-start` tick could put 196 segments behind it; and `shutdown()` dropped rather than re-queued a segment whose distillation raised, losing the whole backlog on a provider death during teardown. Both fixed — see decisions/002's ⟨CORRECTED⟩ notes.⟩
 9. **`POST /v1/sessions/{sid}/synthesize` is ungated.** It charges `_record_spend()` (`api.py:594`) but never calls `_affordable()` (`api.py:584-591`) — a public, unauthenticated force-now that can spend past the ceiling. (`api.py:211-228` documents the sibling bug already fixed here: phantom charging of no-call rounds.)
 
 ### 1.4 Two observability gaps on this path
@@ -57,7 +57,20 @@ There is **no queue and no background worker anywhere on this path** — `contri
 - **`deferred` never reaches the agent.** The service reports `deferred: true` (`api.py:560`), but `Relay._post` reads only the status code and discards the body (`relay.py:417-424`), so `contribute()` says `"N finding(s) shared with the team"` (`server.py:629`) for a push whose working memory will not move for up to a minute — or for the rest of the hour if the budget gate tripped (`api.py:511-522`).
 - **The 15s query client sits under a model call.** `_client()` is `timeout=15.0` and its comment asserts "none of these routes runs a model" (`server.py:231-234`), but `query()` uses it (`server.py:492`) and `/query` *does* run one — `query_findings(retrieval_provider, ...)` at `api.py:725-726` → `provider.complete` at `retrieval.py:107`, against the same 70B whose measured round latencies are 12.6–52.8s (`relay.py:131`). A slow retrieval returns "Shared memory is unreachable right now" (`server.py:537`) while the model call keeps running and keeps spending the key.
 
-### 1.5 The suspected metering hole — **CONFIRMED**
+### 1.5 The suspected metering hole — **CONFIRMED**, and **CLOSED 2026-08-06 (W3b, decisions/002)**
+
+> **Status as of the W3b commit.** Every element below still described HEAD when
+> W3b re-checked it (the handler spans `api.py:672-798` after W1's typed-503
+> rewrite and contained neither `_record_spend()` nor `_affordable()`;
+> `_record_spend` had exactly two call sites, both on the synthesis path). It is
+> now fixed: `query_findings` grows an `on_usage` callback, `api.query` passes
+> `_record_query_spend`, and `_spend` became the KEY's ledger — `(ts, tokens,
+> component)` — so the hourly ceilings sum across synthesis *and* retrieval while
+> merge pricing still reads only merges. A failed retrieval is charged
+> `ASSUMED_QUERY_TOKENS` (1,500); a query that ranked nothing made no request and
+> is not charged. `/query` is charged, never gated. The product question this was
+> blocked on — "whose latency gives way?" — is answered in decisions/002. Read
+> the rest of this section as the diagnosis, not as current behaviour.
 
 Every element of the claim holds:
 

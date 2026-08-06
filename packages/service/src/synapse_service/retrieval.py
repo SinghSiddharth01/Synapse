@@ -30,8 +30,9 @@ to special-case.
 from __future__ import annotations
 
 import logging
+from typing import Callable
 
-from synapse_contracts import Finding, SessionContext
+from synapse_contracts import Finding, ModelUsage, SessionContext
 from synapse_providers import ModelProvider
 
 logger = logging.getLogger(__name__)
@@ -116,13 +117,33 @@ async def query_findings(provider: ModelProvider, *, context: SessionContext,
                          candidates: list[Finding],
                          query: str,
                          asking_agent_session: str | None = None,
-                         asking_contributor: str | None = None) -> list[Finding]:
+                         asking_contributor: str | None = None,
+                         on_usage: Callable[[ModelUsage | None], None] | None = None,
+                         ) -> list[Finding]:
     """Rank what the asker is allowed to see.
 
     Both identities are threaded here as well as applied at the lanes seam
     because api.query applies the predicate twice on purpose (belt and
     braces), and a key honoured in only one of the two places would suppress
-    at candidate selection and then hand the model the finding back anyway."""
+    at candidate selection and then hand the model the finding back anyway.
+
+    `on_usage` is the METERING seam (2026-08-06, W3b). Retrieval shares one
+    provider object -- hence one API key and one hourly ceiling -- with
+    synthesis, and until now nothing charged this call to anything, so N
+    queries burned N of the key's 20 requests/hour while the service's
+    governor still answered "affordable" (FLOW.md §1.5). It is a CALLBACK
+    rather than a changed return type on purpose: this function's contract is
+    `list[Finding]` and ~15 test call sites plus `visible_to`'s two-layer
+    application depend on that; a metering hook that forces every reader to
+    unpack a tuple would be paid for by every one of them.
+
+    It fires exactly once per call that reached the provider, INCLUDING the
+    failing one, and is handed `None` when the provider raised before
+    reporting usage -- the caller decides what an un-costed call costs. It
+    does not fire at all when there was nothing to rank, because then there
+    was no request. Same three states `api._record_spend` already
+    distinguishes for synthesis, for the same reason.
+    """
     visible = visible_to(candidates, asking_agent_session=asking_agent_session,
                          asking_contributor=asking_contributor)
     if not visible:
@@ -135,10 +156,30 @@ async def query_findings(provider: ModelProvider, *, context: SessionContext,
             f"PURPOSE: {context.purpose}\nWORKING MEMORY:\n{context.working_memory}\n\n"
             f"QUERY:\n{query}\n\nFINDINGS:\n{listing}"},
     ]
+    # ⟨CORRECTED 2026-08-06, W3b review⟩ The `try` used to cover the
+    # `result.data.get(...)` below as well, and that cost the key ledger
+    # DOUBLE on one specific round: `AIC100Provider` returns
+    # `data=None, schema_valid=False` (aic100.py:291) after a successful HTTP
+    # round whose output failed the schema twice, so `.get` raised
+    # AttributeError INSIDE the try, the handler fired `on_usage(None)` a
+    # second time, and one retrieval booked two `_spend` entries. Since
+    # `_affordable` counts ENTRIES for the request ceiling
+    # (`(len(_spend) + 1) * 2 > request_budget`), that burned 4 of the key's
+    # 20 requests/hour for one query. It is also the one failure class where
+    # "a ranking call that cannot complete is a merge that could not have
+    # completed either" is FALSE — the provider is up and answering, only the
+    # parse failed — so charging it the assumed cost on top of its real one
+    # was wrong twice over. The call is now split: the try covers only the
+    # part that talks to the provider.
     try:
         result = await provider.complete(messages, response_schema=RANK_SCHEMA)
-        indices = result.data.get("ranked", [])
     except Exception as exc:                             # noqa: BLE001
+        # Charged BEFORE the raise: the request went out and the key paid for
+        # it whether or not anything usable came back. Not charging a failed
+        # retrieval is the same mistake `_record_spend`'s ⟨CORRECTED⟩ note
+        # describes from the other direction.
+        if on_usage is not None:
+            on_usage(None)
         # The log line stays; the SWALLOW goes (decision 008). `return []`
         # here was the whole bug: it is the same value a model returns when it
         # honestly ranked nothing, so the caller could not tell an outage from
@@ -147,6 +188,29 @@ async def query_findings(provider: ModelProvider, *, context: SessionContext,
         logger.exception("Retrieval model call failed; raising RetrievalUnavailable")
         raise RetrievalUnavailable(
             getattr(provider, "provider_id", "unknown"), exc) from exc
+
+    # Exactly once, and with the REAL usage: the round trip completed and the
+    # provider told us what it cost. This must run before the schema check
+    # below, because a schema failure still spent those tokens.
+    if on_usage is not None:
+        on_usage(result.usage)
+
+    if not isinstance(result.data, dict):
+        # The provider answered but produced nothing rankable — `data=None`
+        # after the schema retry, or a shape that is not the object
+        # RANK_SCHEMA asked for. Same contract as a raise (decision 008: the
+        # absence of an answer is never dressed up as an empty one), but it is
+        # NOT charged again; the `on_usage` above already booked its real cost.
+        logger.warning(
+            "Retrieval model returned no usable ranking (schema_valid=%s, "
+            "data=%s); raising RetrievalUnavailable",
+            result.schema_valid, type(result.data).__name__,
+        )
+        raise RetrievalUnavailable(
+            getattr(provider, "provider_id", "unknown"),
+            ValueError(f"no usable ranking (schema_valid={result.schema_valid})"))
+
+    indices = result.data.get("ranked", [])
 
     seen: set[int] = set()
     ranked: list[Finding] = []
