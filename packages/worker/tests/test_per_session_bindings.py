@@ -21,6 +21,7 @@ Fixture trees only; no real ~/.claude or ~/.codex is touched, no socket opened.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import time
 from datetime import datetime, timedelta, timezone
@@ -482,3 +483,77 @@ async def test_a_second_windows_join_does_not_retarget_this_loop(tmp_path) -> No
     await loop.tick()
 
     assert producer.shared_id == "sh-a2"
+
+
+# ---------------------------------------------------------------------------
+# generalisation: nothing above is Claude-Code-specific
+# ---------------------------------------------------------------------------
+
+CODEX_UUID_B = "5e4d3c2b-1a09-4f8e-b7d6-c5b4a3928170"
+
+
+def _make_codex_rollout(root, day: str, ts: str, uuid: str, cwd):
+    """A Codex rollout, named the way Codex names them —
+    `rollout-<timestamp>-<uuid>.jsonl`, with the id EMBEDDED in the filename
+    rather than being the stem. Same shape `test_discovery_codex.py` builds;
+    rebuilt here so this file keeps its "fixture trees only" promise without
+    importing another test module."""
+    day_dir = root / day
+    day_dir.mkdir(parents=True, exist_ok=True)
+    path = day_dir / f"rollout-{ts}-{uuid}.jsonl"
+    path.write_text(json.dumps({
+        "timestamp": "2026-08-06T09:00:00Z", "ordinal": 0, "type": "session_meta",
+        "payload": {"id": uuid, "session_id": uuid, "cwd": str(cwd)},
+    }) + "\n", encoding="utf-8")
+    return path
+
+
+def test_two_codex_conversations_bind_separately_through_the_join_path(
+    tmp_path, monkeypatch
+) -> None:
+    """The W2 layout is per-AGENT, not per-Claude-Code: `bindings/<agent>/`,
+    `AGENT_REGISTRY` dispatch, `find_transcript_by_session_id` matching on the
+    id each product's own adapter extracts. This drives that end to end for
+    Codex through the real `join_session` — two rollouts, two explicit ids,
+    two files — and it is the case a stem comparison would silently fail,
+    since a Codex rollout's stem is `rollout-<ts>-<uuid>`, never the id
+    itself.
+
+    Codex needs no pack, no hook and no new code for this: registering an
+    agent is the whole of the work. That is the claim; this is the proof."""
+    import synapse_worker.discovery as discovery
+
+    cwd = tmp_path / "repo"
+    cwd.mkdir()
+    claude_root = tmp_path / "claude-projects"   # left empty: a Codex-only machine
+    codex_root = tmp_path / "codex-sessions"
+    monkeypatch.setattr(discovery, "CLAUDE_PROJECTS", claude_root)
+    monkeypatch.setattr(discovery, "CODEX_SESSIONS", codex_root)
+    state_dir = tmp_path / "state"
+
+    path_a = _make_codex_rollout(codex_root, "2026/08/06", "2026-08-06T10-00-00",
+                                 CODEX_UUID, cwd)
+    path_b = _make_codex_rollout(codex_root, "2026/08/06", "2026-08-06T11-00-00",
+                                 CODEX_UUID_B, cwd)
+
+    [first] = join_session("sh-codex-a", "akhil", cwd, state_dir,
+                           agent_session_id=CODEX_UUID)
+    [second] = join_session("sh-codex-b", "akhil", cwd, state_dir,
+                           agent_session_id=CODEX_UUID_B)
+
+    assert first.agent == second.agent == "codex"
+    assert first.transcript_path == str(path_a)
+    assert second.transcript_path == str(path_b)
+
+    # Two files, neither clobbered -- the same property proved for Claude Code
+    # at the top of this file, reached here through a different adapter.
+    on_disk = sorted(p.name for p in binding_dir_for_agent(state_dir, "codex").glob("*.json"))
+    assert on_disk == sorted([f"{CODEX_UUID}.json", f"{CODEX_UUID_B}.json"])
+
+    assert resolve_agent_binding(state_dir, "codex", CODEX_UUID).shared_id == "sh-codex-a"
+    assert resolve_agent_binding(state_dir, "codex", CODEX_UUID_B).shared_id == "sh-codex-b"
+    # The mirror names the most recent join, for readers that predate the layout.
+    assert read_binding(binding_path_for_agent(state_dir, "codex")).shared_id == "sh-codex-b"
+    # And nothing was invented for the product that has no live conversation.
+    assert read_binding(binding_path_for_agent(state_dir, "claude-code")) is None
+    assert not binding_dir_for_agent(state_dir, "claude-code").exists()

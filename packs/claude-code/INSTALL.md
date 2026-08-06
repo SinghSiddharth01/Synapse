@@ -65,10 +65,14 @@ a session. The tools appear as `mcp__synapse__query` and
   `geniex serve`; on a machine without an NPU, point it at
   `scripts/local_model_server.py`. With nothing there it fails soft — your
   note is not recorded and it says so.
-- **One binding per Agent product per machine.** Every Claude Code session on
-  the laptop shares the one `bindings/claude-code.json`, so they are all in
-  the same Shared Session. Two projects in two different Shared Sessions at
-  once is not something this supports today.
+- **One window is one participant.** Since 2026-08-06 each Claude Code
+  conversation gets its own binding file, `.synapse/bindings/claude-code/
+  <session-id>.json`, written by the `synapse-worker join` you run from that
+  window's terminal. Two windows can therefore be in two different Shared
+  Sessions at once, and two windows in the *same* one are teammates: each
+  sees the other's findings, neither sees its own echoed back. The old
+  single `bindings/claude-code.json` is still written as a mirror of the
+  most recent join, for tooling that predates this.
 
 ## Prerequisites
 
@@ -124,41 +128,66 @@ python3 .claude/synapse-pack/hooks/freshness_pointer.py; echo "exit: $?"
 yet) is correct — see **Fail-open, by design** below.
 
 Note that this direct-run command cannot reproduce the multi-window
-mismatch described next: run from a terminal, its stdin is a TTY, and the
+behaviour described next: run from a terminal, its stdin is a TTY, and the
 hook treats a TTY exactly like "no session_id available" — the same
 fallback as before conversation-scoping existed. Use it to confirm the
 hook is wired up and reaching the service at all; it will not tell you
 *which* Claude Code window, if any, it is currently speaking for.
 
+### Verify two windows are two participants
+
+The check worth doing once, because it is the thing most likely to be
+quietly wrong. Open **two** Claude Code windows on this project and, from a
+terminal inside each one, run `synapse-worker join <shared_id>` for the
+same `<shared_id>`. Then:
+
+```bash
+ls .synapse/bindings/claude-code/
+```
+
+Expect **two** files, one per conversation, named after each window's own
+session id — not one file overwritten by the second join. (A single
+`.synapse/bindings/claude-code.json` sitting alongside them is the
+compatibility mirror, not a third window.)
+
+Now `mcp__synapse__contribute` something from window A and
+`mcp__synapse__query` for it from window B. B should get it back; A should
+not get its own contribution back from its own `query`. That asymmetry —
+each window a teammate to the other, neither reading its own notes as team
+knowledge — is the whole point of the per-conversation identity, and both
+halves of it depend on each window passing its own `agent_session_id`, as
+`skills/synapse-shared-memory/SKILL.md` instructs.
+
 ## Troubleshooting: the pointer stays silent in one window but not another
 
-The hook only ever speaks for the Claude Code conversation whose own
-`session_id` (piped to it on stdin by Claude Code) matches the
-`agent_session_id` recorded in `.synapse/bindings/claude-code.json` when
-you last ran `synapse-worker join` — every other window's invocation
-returns before it even reaches the network, by design (a window that
-never joined must not receive shared-memory content, and must not consume
-the joined window's own pending notice).
+The hook only ever speaks for the Claude Code conversation that invoked it.
+It looks for that conversation's own binding —
+`.synapse/bindings/claude-code/<session_id>.json`, keyed by the `session_id`
+Claude Code pipes to it on stdin — and, failing that, falls back to the
+`bindings/claude-code.json` mirror only when the mirror names this same
+conversation or declares itself machine-scoped. Every other window's
+invocation returns before it even reaches the network, by design: a window
+that never joined must not receive shared-memory content, and must not
+consume a joined window's own pending notice.
 
-`synapse-worker join` binds *whichever* Claude Code Agent Session it finds live
-at the moment you run it. If two Claude Code windows on the same project
-are open when you join, the binding can end up pointing at a window other
-than the one you're actually working in — and from then on the pointer is
-permanently silent in your window, with no error, because a mismatch and
-"nothing changed yet" produce identical (empty) output. This gets more
-likely the more windows you have open on one project at once.
+So a window that never ran `synapse-worker join` from its own terminal is
+silent, permanently, with no error — because a not-joined window and
+"nothing changed yet" produce identical (empty) output. `synapse-worker
+join` binds *whichever* Claude Code Agent Session it finds live at the
+moment you run it, which is the one whose terminal you ran it from.
 
 If you're confident shared memory has moved (a teammate confirms it, or
 `query` returns findings you haven't seen) but your prompts never surface
-a notice, the fix is to re-join **from a terminal inside the window you
-are actually using**:
+a notice, the fix is to join **from a terminal inside the window you are
+actually using**:
 
 ```bash
 synapse-worker join <shared_id>
 ```
 
-This rebinds `claude-code.json` to whichever Agent Session is live in *that*
-terminal, which fixes the mismatch for that window going forward.
+This writes a binding for whichever Agent Session is live in *that*
+terminal, alongside — not over — any other window's, which fixes that
+window going forward and leaves the others working.
 
 ## Custom service URL
 

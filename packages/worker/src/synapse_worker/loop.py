@@ -222,8 +222,9 @@ class WorkerLoop:
         file.
 
         Deliberately narrow: only a REAL on-disk join binding for THIS
-        loop's own Agent product (`binding_path_for_agent(state_dir,
-        self.binding.agent)`) can move the Producer's target, and only when
+        loop's own Agent product AND, where one exists, its own Agent Session
+        (`resolve_agent_binding(state_dir, self.binding.agent,
+        self.binding.agent_session_id)`) can move the Producer's target, and only when
         its `shared_id` actually differs from what's currently bound — an
         absent file (never joined, or `--transcript`/`--shared-id` used
         directly) leaves the constructed binding untouched, exactly as

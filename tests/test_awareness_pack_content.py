@@ -107,6 +107,50 @@ def test_skill_body_tells_the_agent_to_say_plainly_when_memory_had_nothing():
     assert "plainly" in instruction_three
 
 
+def test_skill_teaches_the_agent_to_pass_its_own_agent_session_id():
+    """W2 (2026-08-06): one agent invocation is one Agent Session, so a
+    second Claude Code window on the same machine is a different
+    participant. Nothing in the MCP protocol tells the server which
+    conversation is calling -- the tool argument is the only channel there
+    is. A skill that still said "there is no session id to pass" (its
+    wording before this) would leave every multi-window machine falling
+    back to the most recently joined binding, which is a guess: it either
+    hides a sibling window's findings or replays the caller's own back as
+    team knowledge, silently, with no error either way.
+
+    Pins the mechanism, not the prose: the argument name, where the agent
+    gets its value, and that it is asked for on the two tools the skill
+    drives."""
+    text = SKILL_MD.read_text(encoding="utf-8")
+    assert "agent_session_id" in text
+    assert "CLAUDE_CODE_SESSION_ID" in text
+    body = text.split("---\n", 2)[2]
+    section = body.split("## Say which conversation you are", 1)
+    assert len(section) == 2, "SKILL.md must have the section that teaches the id"
+    section_text = section[1]
+    assert "mcp__synapse__query" in section_text
+    assert "mcp__synapse__contribute" in section_text
+    # The skill is a shipped artifact installed on machines whose Synapse
+    # may be older than it -- the same reason the worker keeps writing the
+    # legacy binding mirror. It must not instruct an agent into a hard
+    # failure against a server that predates the argument.
+    assert "without the argument" in section_text
+
+
+def test_install_md_documents_the_two_window_check():
+    """The pack's own verification section is where a teammate finds out
+    whether per-conversation identity actually works on their machine --
+    two binding files, and each window seeing the other's contribution but
+    not its own. Both halves are checkable in a minute and neither is
+    discoverable from the hook's output, which is silent either way."""
+    text = INSTALL_MD.read_text(encoding="utf-8")
+    assert "### Verify two windows are two participants" in text
+    assert "ls .synapse/bindings/claude-code/" in text
+    # The stale limitation this replaced -- if it comes back, the doc is
+    # telling teammates the opposite of what the code now does.
+    assert "One binding per Agent product per machine." not in text
+
+
 def test_skill_names_the_real_mcp_tools_not_a_rejected_attach_mechanism():
     """Plan D.3: 'There is no attach(shared_id).' An earlier version of the
     orchestrator's own MCP surface built exactly that, then deleted it

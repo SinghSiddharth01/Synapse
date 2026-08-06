@@ -1,8 +1,10 @@
 """synapse-worker — follow a live agent conversation and condense it periodically.
 
     synapse-worker join <shared_id>                 # bind, once per session — see below
+    synapse-worker join <shared_id> --agent-session-id $CLAUDE_CODE_SESSION_ID
     geniex serve                                    # terminal 1
     uv run synapse-worker run                       # terminal 2
+    uv run synapse-worker run --agent-session-id $CLAUDE_CODE_SESSION_ID
     uv run synapse-worker run --interval 15 --ticks 4
     uv run synapse-worker status
     uv run synapse-worker replay                    # drain the write-ahead log
@@ -10,12 +12,21 @@
 `join` is Plan A.7 / Plan D.2's `synapse join <shared_id>`, run from a terminal
 — never from inside the agent conversation. Plan D Task D.3 is explicit that
 there is no `attach(shared_id)` surfaced to the agent: "the agent never needs
-to be told which Shared Session it is in." `join` binds whatever Agent Session
-detection currently finds live, the same heuristic `run` falls back to when
-nothing has been joined. It does not let you hand-pick a specific transcript
-file — two windows of the same agent product open at once is a documented
-ambiguity (Plan D, "one active Agent Session per Agent product per machine"),
-not something this CLI tries to resolve for you.
+to be told which Shared Session it is in." Without `--agent-session-id`, `join`
+binds whatever Agent Session detection currently finds live, the same heuristic
+`run` falls back to when nothing has been joined.
+
+`--agent-session-id` (on `join`, `run` and `replay`) names ONE conversation
+exactly, and every command that takes it refuses rather than falling back to
+another window's binding. It is not a human hand-picking a transcript file —
+the thing D.3 protects against — it is a conversation stating a fact about
+itself, from its own environment (`CLAUDE_CODE_SESSION_ID`). Since W2
+(2026-08-06) that is also what makes two windows of one product two separate
+participants: each writes its own `bindings/<agent>/<session>.json` instead of
+overwriting the other's, retiring Plan D's "one active Agent Session per Agent
+product per machine" limitation. Omit it and every one of these commands
+behaves exactly as it did before the flag existed — the most recently pinned
+binding, which is what reading the single file always meant.
 
 `run` attaches at the END of the transcript by default. Pass --from-start only
 deliberately: a live transcript is routinely several megabytes, and re-reading
