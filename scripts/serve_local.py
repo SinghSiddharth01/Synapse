@@ -146,6 +146,38 @@ def _anthropic_key() -> str | None:
     return str(key) if key else None
 
 
+def _inference_credentials() -> tuple[str | None, str | None]:
+    """-> (api_key, base_url) for the real Cirrascale instance.
+
+    Mirrors `local_model_server._credentials`: environment first, then the
+    gitignored `secrets.jsonc`'s `inference_cloud` block. Lives here rather
+    than in `AIC100Provider` for the same house reason `_anthropic_key` does —
+    scripts read secrets.jsonc, packages read the environment, so `packages/`
+    never grows knowledge of where this checkout keeps its credentials.
+
+    The key is never printed, logged or echoed: it is returned only to be put
+    into a child's environment, and the caller reports its ABSENCE, never its
+    value. A commented-out block is not a credential — comments are stripped
+    before parsing, so an instance the team has deliberately commented out
+    stays unused rather than being silently resurrected.
+    """
+    import re
+
+    key = os.environ.get("INFERENCE_CLOUD_API_KEY")
+    base_url = os.environ.get("INFERENCE_CLOUD_BASE_URL")
+    secrets = REPO / "secrets.jsonc"
+    if (not key or not base_url) and secrets.exists():
+        try:
+            data = json.loads(re.sub(r"^\s*//.*$", "", secrets.read_text(),
+                                     flags=re.MULTILINE))
+        except json.JSONDecodeError:
+            data = {}
+        block = data.get("inference_cloud") or {}
+        key = key or block.get("api_key") or data.get("api_key")
+        base_url = base_url or block.get("base_url")
+    return (str(key) if key else None, str(base_url) if base_url else None)
+
+
 def lan_ip() -> str | None:
     """This machine's address on the LAN, for teammates to point at.
 
@@ -681,7 +713,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="proxy the model seam to the real instance in "
                              "secrets.jsonc, so retrieval is actually RANKED by a "
                              "model and `contribute` can distil arbitrary prose. "
-                             "Costs real requests (~20/hour/key).")
+                             "Costs real requests (~20/hour/key). WITH --npu this "
+                             "means the split production topology instead: distil "
+                             "on the local NPU, synthesize on the real 70B.")
     parser.add_argument("--distiller-model", default="Llama-3.1-8B",
                         help="--live: the small model standing where the NPU sits")
     parser.add_argument("--synthesizer-model", default="Llama-3.3-70B",
@@ -727,6 +761,41 @@ def main(argv: list[str] | None = None) -> int:
             "--claude-model only applies to --distiller anthropic or claude-cli.\n"
             f"You asked for the NPU arm and model {args.claude_model!r}; pick one.")
 
+    # --npu --live used to be a SILENT DROP: `--live` was consulted only in
+    # the non-`--npu` branch, so the pair started plain GenieX and said
+    # nothing, and whoever asked for the live 70B got the NPU synthesizing
+    # and no way to tell from the banner.
+    #
+    # The pair's honest meaning is the real production topology — distil on
+    # the NPU, synthesize on the actual 70B — and it needs ONE machine, not
+    # two. So it runs the split config: GenieX keeps :18181 for the distiller
+    # (no stand-in is spawned) and the SERVICE is pointed straight at
+    # Cirrascale. Resolved BEFORE anything is spawned, because a missing key
+    # discovered after three processes are up is a mess to unwind.
+    #
+    # Side benefit worth knowing: in this mode retrieval is ranked by the real
+    # 70B, and AIC100Provider's key rotation applies — unlike the `--live`
+    # proxy path, which holds one key with no rotation (FLOW.md §1.5).
+    dual = args.npu and args.live
+    dual_key = dual_base_url = None
+    if dual:
+        dual_key, dual_base_url = _inference_credentials()
+        missing = ([] if dual_key else ["an API key (INFERENCE_CLOUD_API_KEY, "
+                                        "or `inference_cloud.api_key` in secrets.jsonc)"]
+                   ) + ([] if dual_base_url else
+                        ["a base URL (INFERENCE_CLOUD_BASE_URL, or "
+                         "`inference_cloud.base_url` in secrets.jsonc)"])
+        if missing:
+            raise SystemExit(
+                "--npu --live means: distil on the local NPU, synthesize on "
+                "the real 70B. That needs " + " and ".join(missing) + ", and "
+                "it is not set.\n"
+                "Either add it, or pick one of the two halves:\n"
+                "  --npu    alone — the NPU synthesizes too (no cloud budget "
+                "spent)\n"
+                "  --live   alone — both seams proxy through the stand-in to "
+                "the cloud (no NPU needed)")
+
     needed = [8787] + ([] if args.service_url else [8899]) + \
              ([] if (args.listen or args.npu) else [18181])
     claim_ports(needed)
@@ -747,6 +816,15 @@ def main(argv: list[str] | None = None) -> int:
               "one thing that needs a model on YOUR machine.", flush=True)
     elif args.npu:
         model = start_or_adopt_geniex(model_url)
+        if dual:
+            host = dual_base_url.split("//", 1)[-1].split("/", 1)[0]
+            print(f"model      DUAL — distil on GenieX {model_url} "
+                  f"(supervised), synthesis LIVE on {host} "
+                  f"(~20 req/hour/key)", flush=True)
+            print("           retrieval is ranked by the real 70B in this "
+                  "mode, with key rotation. The cloud half is NOT supervised: "
+                  "it is not restartable from here, and its failures are "
+                  "already visible (503 / synthesized: false).", flush=True)
         supervisor = SeamSupervisor(
             models_url=f"{model_url}/models", seam_name="geniex",
             restart=geniex_restarter(model_url), child=model,
@@ -800,7 +878,20 @@ def main(argv: list[str] | None = None) -> int:
         # NPU 410s on every synthesis call and the host's own queries come
         # back empty with a 200. Observed live 2026-08-06, and confirmed
         # against Qualcomm's endpoint list.
+        #
+        # --npu --live is the third case and the only one where the service
+        # and the model seam point at DIFFERENT machines: :18181 carries the
+        # distiller only, and synthesis (and therefore retrieval ranking) goes
+        # straight to Cirrascale with the same 1600/180 operating point
+        # ADR-0005 mandates. The key travels in the child's environment and is
+        # never printed.
         service_env = {
+            "SYNAPSE_SYNTHESIZER": "aic100",
+            "INFERENCE_CLOUD_BASE_URL": dual_base_url,
+            "INFERENCE_CLOUD_API_KEY": dual_key,
+            "INFERENCE_CLOUD_MAX_TOKENS": str(SYNTHESIS_MAX_TOKENS),
+            "INFERENCE_CLOUD_TIMEOUT": str(SYNTHESIS_TIMEOUT_S),
+        } if dual else {
             "SYNAPSE_SYNTHESIZER": "npu",
             "SYNAPSE_BASE_URL": model_url,
         } if args.npu else {

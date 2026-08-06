@@ -85,7 +85,7 @@ claude mcp add --transport http --scope project synapse http://127.0.0.1:8787/mc
 
 Start a **new** Claude Code session in that project and approve the `synapse` server when prompted — the `mcp__synapse__query` and `mcp__synapse__contribute` tools then become available (verify with `/mcp` inside the session). A second teammate joins the same Shared Session by re-running `serve_local.py --shared-id <the id printed above>` from their own machine, or by running `synapse-worker join <shared_id>` to passively observe an existing Claude Code transcript instead of calling `contribute` directly.
 
-Add `--npu` if a real `geniex serve` instance is already running, or `--live` to proxy the model seam to a real cloud model instead of the stand-in.
+Add `--npu` to use a real GenieX NPU seam — `serve_local.py` starts `geniex serve` itself if `:18181` is free, adopts one that is already running otherwise, and supervises it either way: it probes `GET /v1/models` every 15s and restarts the seam if it stops answering, because `geniex serve` is known to keep its process alive while its HTTP server goes silent. Every transition prints to your terminal and to `.synapse/logs/supervisor.log`. Add `--live` to proxy the model seam to a real cloud model instead of the stand-in, or `--npu --live` together for the split production topology: distil on the local NPU, synthesize on the real 70B.
 
 ### Run the test suite
 

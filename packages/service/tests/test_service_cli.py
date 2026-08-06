@@ -93,13 +93,21 @@ def test_main_warns_when_debug_is_enabled_on_a_non_local_host(monkeypatch, capsy
     assert "WARNING" in capsys.readouterr().err
 
 
+# ⟨2026-08-06, W1⟩ These two asserted `err == ""`, which said "no /debug
+# exposure warning" by saying "nothing on stderr at all". stderr is a shared
+# channel and it now also carries the SYNAPSE_SYNTHESIZER banner (the boot-side
+# half of decision 008's honesty fix), which fires here because no synthesizer
+# is set in a test environment. Narrowed to the property each test is actually
+# about — the absence of the EXPOSURE warning — rather than relaxed: an
+# emptiness assertion on a shared stream fails for whatever lands there next,
+# which is a test that goes red without anything it covers having changed.
 def test_main_no_warning_when_debug_is_disabled_on_a_non_local_host(monkeypatch, capsys) -> None:
     _stub_build_app(monkeypatch)
 
     exit_code = cli.main(["--host", "0.0.0.0", "--no-debug"])
 
     assert exit_code == 0
-    assert capsys.readouterr().err == ""
+    assert "WARNING" not in capsys.readouterr().err
 
 
 def test_main_no_warning_on_the_default_localhost_host(monkeypatch, capsys) -> None:
@@ -108,4 +116,4 @@ def test_main_no_warning_on_the_default_localhost_host(monkeypatch, capsys) -> N
     exit_code = cli.main([])
 
     assert exit_code == 0
-    assert capsys.readouterr().err == ""
+    assert "WARNING" not in capsys.readouterr().err
