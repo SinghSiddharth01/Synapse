@@ -66,18 +66,18 @@ plugins:
             docstring_section_style: list
             filters: ["!^_"]
 
-# ⟨strict-safe⟩ The six writer files below (index, first-run, architecture,
-# reference/service-http, troubleshooting, contributing) are EXPECTED to be
-# missing at SETUP time — the writer/consistency-review agents land them
-# afterward. `strict: false` + `validation.nav.not_found: warn` lets
-# `mkdocs build` succeed tonight with warnings instead of failing on files
-# that don't exist yet. Once every nav target below exists, flip `strict`
-# to `true` and tighten the two `warn`s to `warn` -> the assembler agent's
-# job, not SETUP's — this comment is the flip instruction.
-strict: false
+# ⟨strict-safe⟩ All six writer files (index, first-run, architecture,
+# reference/service-http, troubleshooting, contributing) now exist and every
+# nav target below resolves — the assembler agent flipped `strict` to `true`
+# per SETUP's instruction above.
+strict: true
 validation:
   nav:
-    omitted_files: warn
+    # Historical/scratch docs (plans/, brainstorming/, overnight/, superpowers/
+    # specs) are deliberately not in the nav — see "Historical documents stay
+    # historical" in docs/contributing.md. Presence in docs/ without a nav
+    # entry is expected here, not a mistake to chase.
+    omitted_files: ignore
     not_found: warn
     absolute_links: warn
   links:
