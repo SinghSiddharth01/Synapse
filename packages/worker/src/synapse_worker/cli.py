@@ -276,9 +276,11 @@ async def cmd_join(args: argparse.Namespace) -> int:
     for binding in bindings:
         print(f"  bound {binding.agent_session_id} -> {binding.shared_id!r} "
               f"(contributor={binding.contributor!r})")
+    # Plain ASCII: this line is printed to a Windows console/pipe whose default
+    # codepage is cp1252, and an em dash here came out mangled on the X Elite.
     print(
-        "\nContributor registration with the Synapse Service was skipped — "
-        "no service exists yet to register with."
+        "\nYou are registered with the Synapse Service as a Contributor on the "
+        "first push (the orchestrator does it, as the single egress)."
     )
     return 0
 

@@ -37,7 +37,11 @@ async def test_write_ahead_then_flush(tmp_path):
     sent, pending = await relay.flush()
     assert (sent, pending) == (1, 0)
     assert received[0]["findings"][0]["id"] == "f-1"
-    assert urls_hit == ["http://svc/v1/sessions/sh-1/findings"]
+    # Findings FIRST, then Contributor registration (Relay._register_members):
+    # registration is metadata about a push that already succeeded, so it must
+    # never precede the payload nor fire for a batch that stayed queued.
+    assert urls_hit == ["http://svc/v1/sessions/sh-1/findings",
+                        "http://svc/v1/sessions/sh-1/members"]
 
 
 async def test_service_down_keeps_findings_queued_and_survives_restart(tmp_path):
@@ -64,6 +68,8 @@ async def test_resync_repushes_everything_even_after_ack(tmp_path):
     post-review amendment (2026-08-04) restored the plan's signature."""
     calls = []
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/members"):   # Contributor registration
+            return httpx.Response(200, json={"members": ["aditya"]})
         calls.append(json.loads(request.content))
         return httpx.Response(200, json={"accepted": 0, "memory_version": 1})
     relay = _relay(tmp_path, handler)
@@ -127,6 +133,9 @@ async def test_unbound_relay_never_attempts_the_network(tmp_path):
     # A NEW Finding, recorded AFTER the rebind, is tagged "sh-late-join" and
     # DOES go out — this is what "a later join recovers" actually means now.
     def sent_ok(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/members"):
+            assert request.url.path == "/v1/sessions/sh-late-join/members"
+            return httpx.Response(200, json={"members": ["aditya"]})
         assert request.url.path == "/v1/sessions/sh-late-join/findings"
         body = json.loads(request.content)
         assert [f["id"] for f in body["findings"]] == ["f-2"]
@@ -154,13 +163,19 @@ async def test_rejoin_does_not_retarget_a_still_queued_finding_to_the_new_sessio
     urls_hit = []
     bodies = []
     def up(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/members"):
+            # Registration follows the findings, so it must be aimed at the
+            # SAME session the partition chose -- pinned below, not skipped.
+            urls_hit.append(str(request.url))
+            return httpx.Response(200, json={"members": ["aditya"]})
         urls_hit.append(str(request.url))
         bodies.append(json.loads(request.content))
         return httpx.Response(200, json={"accepted": 1, "memory_version": 1})
     relay._transport = httpx.MockTransport(up)               # service is back up
 
     assert await relay.flush() == (1, 0)
-    assert urls_hit == ["http://svc/v1/sessions/sh-PRIVATE/findings"]   # NOT sh-OTHERTEAM
+    assert urls_hit == ["http://svc/v1/sessions/sh-PRIVATE/findings",
+                        "http://svc/v1/sessions/sh-PRIVATE/members"]     # NOT sh-OTHERTEAM
     assert bodies[0]["findings"][0]["id"] == "f-private"
 
 
@@ -258,3 +273,70 @@ async def test_resync_sessions_reports_only_the_sessions_it_actually_pushed_to(t
 
     assert pushed == {"sh-good": 1}
     assert await relay.resync() == 1          # the documented int, unchanged
+
+
+async def test_contributors_are_registered_with_the_service_after_a_successful_push(tmp_path):
+    """Plan D.2: join "registers the Contributor with the service (POST
+    /members)". That step existed NOWHERE -- discovery.join_session recorded
+    it NOT DONE ("no Synapse Service exists yet"), and the service's own
+    /members route had no caller in the tree, so every session reported
+    `members: []` however many people had joined. It lives here rather than in
+    `synapse-worker join` because the orchestrator is the single egress.
+
+    Driven off Finding.attributions, not the binding, so a Contributor whose
+    work arrives through contribute() or someone else's resync is registered
+    too -- pinned by f-2's second contributor below.
+    """
+    posts: list[tuple[str, dict]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        posts.append((request.url.path, json.loads(request.content)))
+        if request.url.path.endswith("/members"):
+            return httpx.Response(200, json={"members": []})
+        return httpx.Response(200, json={"accepted": 1, "memory_version": 1})
+
+    relay = _relay(tmp_path, handler)
+    f2 = _finding("f-2")
+    f2.attributions[0].contributor = "akhil"
+    relay.record([_finding("f-1"), f2])
+    assert await relay.flush() == (2, 0)
+
+    members = [body["contributor"] for path, body in posts if path.endswith("/members")]
+    assert sorted(members) == ["aditya", "akhil"]     # every attribution, deduped
+
+    # Cached: a second push of the same contributors costs no further requests.
+    posts.clear()
+    relay.record([_finding("f-3")])
+    assert await relay.flush() == (1, 0)
+    assert [p for p, _ in posts if p.endswith("/members")] == []
+
+
+async def test_a_failed_member_registration_never_fails_the_push(tmp_path):
+    """A Contributor list is metadata; the findings in the same request are
+    not. A service that 500s on /members must not turn a delivered batch into
+    a queued one -- otherwise a cosmetic endpoint can stall the whole egress."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/members"):
+            return httpx.Response(500, json={"error": "members exploded"})
+        return httpx.Response(200, json={"accepted": 1, "memory_version": 1})
+
+    relay = _relay(tmp_path, handler)
+    relay.record([_finding("f-1")])
+    assert await relay.flush() == (1, 0)          # sent, not queued
+    assert relay.pending_count() == 0
+
+
+async def test_the_timeout_covers_a_synchronous_synthesis_call(tmp_path):
+    """`POST /findings` runs synthesis INSIDE the request (api.push_findings),
+    so the relay's timeout has to cover a model call, not a round trip.
+
+    Regression: the default was 10.0 s while real Llama-3.3-70B synthesis on
+    Cloud AI 100 measured 12.6-52.8 s live. The service stored and synthesized
+    every batch; the relay timed out waiting, never marked them sent, and
+    re-pushed the same findings every tick -- an extra 70B call per retry
+    against a ~20 req/hour key, converging never. A FakeProvider answers
+    instantly, so only a live run could expose it."""
+    relay = Relay(tmp_path, "http://svc", "sh-1")
+    assert relay.timeout >= 60.0, (
+        "relay timeout must cover a synchronous synthesis call; a value under "
+        "the observed 12.6-52.8 s range silently re-pushes and re-bills forever")

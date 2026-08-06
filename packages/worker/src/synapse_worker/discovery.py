@@ -326,9 +326,14 @@ def join_session(
     whatever detection finds live right now, and accepts the documented
     ambiguity if two windows of the same product are both live.
 
-    NOT DONE: Plan D.2 also says join "registers the Contributor with the
-    service (POST /members)". No Synapse Service exists yet to register with,
-    so that step is skipped — logged, not silently dropped.
+    Contributor registration with the service (Plan D.2's "registers the
+    Contributor with the service (POST /members)") deliberately does NOT
+    happen here. It was previously recorded as NOT DONE because "no Synapse
+    Service exists yet"; one exists now, and the step lives in
+    `synapse_orchestrator.relay.Relay._register_members` instead — the
+    orchestrator is the single egress and the worker must not open its own
+    connection to the service. Registration follows the findings, so every
+    Contributor whose work reaches a Shared Session becomes a member of it.
     """
     bound: list[SessionBinding] = []
 
@@ -353,8 +358,9 @@ def join_session(
         )
 
     logger.info(
-        "join_session: Contributor registration with the Synapse Service "
-        "skipped (no service exists yet)"
+        "join_session: bound %d Agent Session(s); Contributor registration is "
+        "the orchestrator's (Relay._register_members), not the worker's",
+        len(bound),
     )
     return bound
 

@@ -287,6 +287,8 @@ async def test_contribute_round_trips_through_the_distiller_and_relay(tmp_path):
     def handler(request: httpx.Request) -> httpx.Response:
         import json as _json
         urls_hit.append(str(request.url))
+        if request.url.path.endswith("/members"):
+            return httpx.Response(200, json={"members": ["aditya"]})
         sent_to_service.append(_json.loads(request.content))
         return httpx.Response(200, json={"accepted": 1, "memory_version": 1})
 
@@ -306,7 +308,8 @@ async def test_contribute_round_trips_through_the_distiller_and_relay(tmp_path):
     # Which Shared Session contribute()'s finding is pushed to is the whole
     # point of it landing in team memory at all — pin the exact URL (round 2
     # review: a hardcoded WRONG-SESSION url survived every test).
-    assert urls_hit == ["http://svc/v1/sessions/sh-1/findings"]
+    assert urls_hit == ["http://svc/v1/sessions/sh-1/findings",
+                        "http://svc/v1/sessions/sh-1/members"]
 
 
 class _RaisingDistiller:
@@ -455,6 +458,7 @@ async def test_query_and_contribute_pick_up_a_join_that_happens_after_registrati
 
     assert urls_hit == [
         "http://svc/v1/sessions/sh-late/findings",   # contribute() -> the NEW session
+        "http://svc/v1/sessions/sh-late/members",    # registration follows that push
         "http://svc/v1/sessions/sh-late/query",       # query() -> the SAME session — they agree
     ]
     assert bodies[0]["findings"][0]["attributions"][0]["agent_session"] == "as-1"

@@ -92,9 +92,27 @@ from synapse_contracts import Finding
 logger = logging.getLogger(__name__)
 
 
+# `POST /findings` SYNTHESIZES SYNCHRONOUSLY before it answers (api.push_findings
+# calls merge() inside the request), so this timeout must cover a full synthesis
+# model call, not just a network round trip. Measured live 2026-08-05 against
+# Llama-3.3-70B on Cloud AI 100: 12.6, 16.6, 30.9, 33.2, 33.8, 45.0, 52.8 s.
+#
+# The previous 10.0 s was under EVERY one of those. The failure was silent and
+# expensive rather than loud: the service received, stored and synthesized the
+# findings, then the relay gave up waiting, never wrote sent.jsonl, and re-pushed
+# the identical batch on the next tick -- one more 70B call each time, against a
+# key budgeted at ~20 requests/hour. Ingest is idempotent so nothing corrupted;
+# it just never converged, and `members` stayed empty because registration
+# follows a push this code never saw succeed.
+#
+# 120 s is ~2x the slowest observed call. A FakeProvider answers instantly, which
+# is why no offline test could have caught this.
+_SYNTHESIS_AWARE_TIMEOUT = 120.0
+
+
 class Relay:
     def __init__(self, state_dir: Path, service_url: str, shared_id: str | None, *,
-                 timeout: float = 10.0,
+                 timeout: float = _SYNTHESIS_AWARE_TIMEOUT,
                  transport: httpx.AsyncBaseTransport | None = None) -> None:
         self.state_dir = Path(state_dir)
         self.state_dir.mkdir(parents=True, exist_ok=True)
@@ -105,6 +123,11 @@ class Relay:
         self.shared_id = shared_id
         self.timeout = timeout
         self._transport = transport
+        # (shared_id, contributor) pairs already registered with the service by
+        # THIS process -- see _register_members. Deliberately in-memory: after a
+        # service restart the store forgets its members, and a relay restart
+        # re-registering everything it pushes is exactly the recovery wanted.
+        self._registered: set[tuple[str, str]] = set()
 
     def rebind(self, shared_id: str | None) -> None:
         """Point future `record()` calls at a different (or no) Shared Session.
@@ -218,6 +241,49 @@ class Relay:
         return groups
 
     # ── egress ──────────────────────────────────────────────────────────────
+    async def _register_members(self, client: httpx.AsyncClient, shared_id: str,
+                                findings: list[Finding]) -> None:
+        """Register each Finding's Contributor with the service (Plan D.2's
+        "registers the Contributor with the service (POST /members)").
+
+        This step existed nowhere: `synapse_worker.discovery.join_session`
+        documented it as NOT DONE because "no Synapse Service exists yet to
+        register with", and the service's own `POST /v1/sessions/{sid}/members`
+        route was built with no caller anywhere in the tree. The observable
+        consequence was `members: []` on every session however many people had
+        joined.
+
+        It belongs HERE rather than in `synapse-worker join` for the reason the
+        whole architecture rests on: the orchestrator is the single egress, and
+        the worker must not open its own connection to the service. Driving it
+        off `Finding.attributions` rather than off the binding also means the
+        registration follows the findings — every Contributor whose work
+        actually reaches a Shared Session is a member of it, including one
+        arriving through `contribute()` or a resync of someone else's log.
+
+        Best-effort by construction: a failure here is swallowed, because a
+        Contributor list is metadata and the findings in the same request are
+        not. `store.add_member` is idempotent, and `_registered` caches what
+        this process has already sent so a steady push loop costs one extra
+        request per (session, contributor) rather than one per flush.
+        """
+        wanted = {(shared_id, a.contributor)
+                  for f in findings for a in f.attributions}
+        for key in sorted(wanted - self._registered):
+            try:
+                resp = await client.post(
+                    f"{self.service_url}/v1/sessions/{shared_id}/members",
+                    json={"contributor": key[1]})
+                resp.raise_for_status()
+            except (httpx.HTTPError, OSError) as exc:
+                # Not escalated: the findings POST that follows is the payload
+                # that matters, and a 404 here just means the session is not
+                # recreated yet -- the next flush retries.
+                logger.info("Member registration for %r on %r deferred (%s)",
+                            key[1], shared_id, exc.__class__.__name__)
+                continue
+            self._registered.add(key)
+
     async def _post(self, shared_id: str, findings: list[Finding]) -> str:
         """'ok' | 'retry' | 'terminal'.
 
@@ -241,6 +307,11 @@ class Relay:
                                          timeout=self.timeout) as client:
                 resp = await client.post(url, json=payload)
                 resp.raise_for_status()
+                # AFTER the findings land, never before: registration is
+                # metadata about a push that succeeded, so a queued or
+                # rejected batch must not cost a second request per retry
+                # against a service that is down.
+                await self._register_members(client, shared_id, findings)
             return "ok"
         except httpx.HTTPStatusError as exc:
             code = exc.response.status_code

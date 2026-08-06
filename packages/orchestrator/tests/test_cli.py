@@ -413,6 +413,7 @@ def test_resync_pushes_a_previously_recorded_session_even_when_now_unbound(
     assert exit_code == 0
     assert hit == ["http://127.0.0.1:8899/v1/sessions",
                    "http://127.0.0.1:8899/v1/sessions/sh-old/findings",
+                   "http://127.0.0.1:8899/v1/sessions/sh-old/members",
                    "http://127.0.0.1:8899/v1/sessions/sh-old/synthesize"]
     out = capsys.readouterr().out
     assert "re-pushed 1 finding(s)" in out
@@ -467,6 +468,7 @@ def test_resync_recreates_and_synthesizes_each_session_the_log_names(tmp_path, c
     assert exit_code == 0
     assert hit == ["/v1/sessions",
                    "/v1/sessions/sh-joined/findings",
+                   "/v1/sessions/sh-joined/members",     # registration follows the push
                    "/v1/sessions/sh-joined/synthesize"]
     assert "synthesized" in capsys.readouterr().out
 
