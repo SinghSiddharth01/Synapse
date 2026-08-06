@@ -61,7 +61,8 @@ uv run python scripts/serve_local.py \
 
 | your situation | what to pass |
 |---|---|
-| `geniex serve` is running | `--npu` |
+| you have a GenieX NPU box | `--npu` — starts `geniex serve` for you if it is not already up, adopts it if it is, and supervises it either way |
+| GenieX for distilling **and** the real 70B for synthesis | `--npu --live` (needs `inference_cloud` credentials) |
 | Claude on your own API key | `--distiller anthropic --claude-model claude-haiku-4-5-20251001` |
 | Claude on your **subscription**, no key at all | `--distiller claude-cli --claude-model haiku` |
 | no NPU, no key, read-only | `--listen` |
@@ -227,11 +228,14 @@ exactly that reason.
 | queries return nothing at all | the host restarted; memory is in-process, so it is genuinely empty |
 | agent has the tools but never uses them | the pack from step 5 isn't installed |
 | `ports already in use: 18181` | orphaned stand-in from a previous run — step 2 |
-| `--npu given but nothing is serving on :18181` | start `geniex serve` first, or drop `--npu` |
+| `--npu` says `geniex` is not on PATH | install GenieX and `geniex pull` a model — nothing to start and nothing to adopt |
+| `something is holding :18181 but it is not answering` | a GenieX that has already gone idle-dead: kill it and re-run, and this script will launch and supervise its own |
+| `SUPERVISOR: GIVING UP` in the terminal | three restarts in ten minutes did not hold — take the fallback the banner names (`--distiller claude-cli`, or drop `--npu`) |
+| queries say "Shared memory is DOWN, not empty" | the retrieval backend is not answering. Real outage, not an empty memory — check the `SUPERVISOR:` lines and `.synapse/logs/supervisor.log` |
 | everything returns `409` | somebody ended the session |
 | the worker runs but nothing is ever distilled | it is bound to the scratch transcript — see "let it tail your conversation" |
 | the banner names a model you did not pick | you passed `--claude-model` to the wrong arm, or not at all |
 
 Windows/ARM64: [`docs/JOIN-WINDOWS.md`](./JOIN-WINDOWS.md).
-Full detail: [`packs/claude-code/INSTALL.md`](../packs/claude-code/INSTALL.md).
+Full detail: [`packs/claude-code/INSTALL.md`](https://github.com/SinghSiddharth01/Synapse/blob/main/packs/claude-code/INSTALL.md).
 On-hardware NPU work: [`docs/NPU-RUNBOOK.md`](./NPU-RUNBOOK.md).

@@ -220,8 +220,13 @@ def check_ports() -> Result:
 
     Copied rather than imported — importing serve_local pulls its whole module
     body and this file promises to start nothing. The authority for this
-    behaviour is `claim_ports` at scripts/serve_local.py:147-177; if that
+    behaviour is `claim_ports` at scripts/serve_local.py:159-189; if that
     changes, change this.
+
+    All three ports are probed unconditionally, but `serve_local.py:277-278`
+    only claims the subset its flags need (`--service-url` drops 8899,
+    `--listen`/`--npu` drop 18181). So a WARN here is not automatically a
+    problem for the run the operator is about to make — the remedy says which.
     """
     taken, free = [], []
     for port in PORTS:
@@ -245,9 +250,12 @@ def check_ports() -> Result:
         "ports", "WARN", (held + ("  |  " + rest if rest else "")),
         "a Synapse is already running on this machine — that is a normal "
         "state, not a fault. serve_local.py will refuse with \"ports already "
-        "in use\"; stop the old one, or re-run the installer with --clean. "
-        "If you are trying to listen alongside a host you already run, you "
-        "do not need a second one.")
+        "in use\" IF the run needs that port: it claims 8787 always, 8899 "
+        "unless --service-url, and 18181 unless --listen/--npu "
+        "(serve_local.py:277-278). Stop the old one, or re-run the installer "
+        "with --clean. Note --clean does not kill a `geniex serve` holding "
+        "18181; that one is deliberate, not an orphan. If you are trying to "
+        "listen alongside a host you already run, you do not need a second one.")
 
 
 def check_secrets() -> Result:
@@ -318,9 +326,38 @@ def check_pack() -> Result:
                   "surface proactively.")
 
 
+def _project_mcp_json() -> str:
+    """The `--scope project` registration as it exists ON DISK, in this directory.
+
+    `claude mcp list` is not a complete answer to "is synapse registered for
+    this project". This very checkout ships a tracked `.mcp.json` declaring
+    `synapse`, and `claude mcp list` run from here does not list it — so a
+    correctly configured project reported "not registered", and the installer's
+    idempotency skip never fired. `.mcp.json` is the file `claude mcp add
+    --scope project` writes, so read it directly and say what is actually
+    there. Returns the configured URL, or "" if no synapse entry exists.
+    """
+    path = REPO / ".mcp.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    entry = (data.get("mcpServers") or {}).get("synapse") or {}
+    if not entry:
+        return ""
+    return str(entry.get("url") or entry.get("command") or "declared")
+
+
 def check_claude_mcp() -> Result:
+    on_disk = _project_mcp_json()
     binary = shutil.which("claude")
     if not binary:
+        if on_disk:
+            return Result("claude mcp", "WARN",
+                          f"`claude` not on PATH; .mcp.json here declares "
+                          f"synapse -> {on_disk}",
+                          "install Claude Code to connect an agent; the stack "
+                          "itself runs without it")
         return Result("claude mcp", "WARN", "`claude` not on PATH",
                       "install Claude Code to connect an agent; the stack "
                       "itself runs without it")
@@ -330,6 +367,13 @@ def check_claude_mcp() -> Result:
                       "check your Claude Code install")
     line = next((ln for ln in out.splitlines() if "synapse" in ln.lower()), "")
     if not line:
+        if on_disk:
+            return Result(
+                "claude mcp", "PASS",
+                f"synapse -> {on_disk} (from {REPO / '.mcp.json'}; "
+                f"`claude mcp list` does not show it)",
+                "the project-scope file is the registration. If /mcp in Claude "
+                "Code does not offer it, restart Claude Code in this directory.")
         return Result("claude mcp", "WARN", "no `synapse` server registered here",
                       "run `claude mcp add --transport http --scope project "
                       "synapse http://127.0.0.1:8787/mcp` from the project you "

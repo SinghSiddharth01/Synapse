@@ -7,8 +7,8 @@ Reproduce with `uv run python scripts/w6_live_stress.py --offline`.
 spent, because this checkout has no Anthropic credential** (see §1). Everything
 below §2 is a real measurement taken in-process against the shipped config, not
 an estimate and not a projection — but it is measurement of *our* arithmetic,
-not of the endpoint. §5 is the one finding that matters most and the one that
-most needs a live call to settle.
+not of the endpoint. §5 is the finding that mattered most; it has since been
+fixed, and that section now records the fix rather than the open question.
 
 Offline result: **70 checks, 70 passed, 0 API calls.**
 
@@ -86,13 +86,26 @@ Every row is one blob pushed through the real `Segmenter` at
 `budget_tokens=2787`, drained with `flush_incomplete=True`. `headroom` is
 `2787 − estimate_tokens(segment.events)` for the tightest segment produced.
 
+**These numbers reproduce.** The first version of this table did not, and it is
+worth saying why rather than quietly correcting it: the harness seeded its
+generated prose with `hash(label) % 97`, and `str.__hash__` is salted per
+interpreter. Every run produced different prose from the same label, so every
+multi-segment row's tightest/headroom pair was a number from one particular
+process — `one-over-seam` came out at 38, 38, 45, 43 and 36 across five runs of
+the command this page tells you to run. Two rows here (`one-over-seam`, `3×`)
+are therefore different from what this file said before; the seam rows, `small`
+and `12×` are unchanged, because they were never seed-dependent. The seed is now
+`zlib.crc32(label)` — a checksum, not a hash-table hash — and the table above is
+one run of `--offline`, verified byte-identical under `PYTHONHASHSEED` 0, 1 and
+42.
+
 | Input | Chars | Segments | Events | Tightest segment | Headroom |
 |---|---:|---:|---:|---:|---:|
 | small | 1 200 | 1 | 1 | 343 tok | 2444 |
 | just-under-seam | 9 753 | 1 | 1 | **2787 tok** | **0** |
 | at-seam | 9 754 | 1 | 1 | **2787 tok** | **0** |
-| one-over-seam | 9 755 | 2 | 2 | 2751 tok | 36 |
-| 3× budget | 29 262 | 4 | 4 | 2744 tok | 43 |
+| one-over-seam | 9 755 | 2 | 2 | 2728 tok | 59 |
+| 3× budget | 29 262 | 4 | 4 | **2785 tok** | **2** |
 | 12× budget | 117 048 | 13 | 13 | **2786 tok** | **1** |
 | mixed turn (4 events, one oversized) | 15 409 | 3 | 5 | 2785 tok | 2 |
 
@@ -128,46 +141,52 @@ in a way its comment does not say. Anything asserting the strong form must use
 
 ---
 
-## 5. The finding that most needs a live call
+## 5. The finding that mattered most — since fixed
 
-`packages/providers/src/synapse_providers/anthropic_provider.py:294` sends, on
+`packages/providers/src/synapse_providers/anthropic_provider.py` sent, on
 **every** request, on **every** model:
 
 ```python
-"output_config": {"effort": self._effort},   # DEFAULT_EFFORT = "low", line 138
+"output_config": {"effort": self._effort},   # DEFAULT_EFFORT = "low"
 ```
 
 `effort` is an Opus-tier / Sonnet-5-tier parameter. On **Claude Haiku 4.5 it is
-documented as an error**, alongside Sonnet 4.5 — the same row of the same table
-that records `effort` working on Opus 4.5. Nothing in this provider makes the
-field conditional on the model, and the model is chosen independently by the
-free-text `SYNAPSE_ANTHROPIC_MODEL`.
+an error**, alongside Sonnet 4.5 — the same row of the same table that records
+`effort` working on Opus 4.5. Nothing in the provider made the field conditional
+on the model, and the model is chosen independently by the free-text
+`SYNAPSE_ANTHROPIC_MODEL`.
 
-If that documentation is accurate, **the Haiku arm 400s on its first call and
-has never made a successful request** — the 4096 pin added in `5066f2a` would be
-a cap on an arm that cannot run. Every existing test in
-`packages/providers/tests/test_anthropic_provider.py` passes regardless, because
-they all inject a fake client and assert on the resolved `max_tokens` attribute,
-never on whether the endpoint accepts the request body.
+So **the Haiku arm 400d on its first call and had never made a successful
+request** — the 4096 pin added in `5066f2a` was a cap on an arm that could not
+run, and `claude-haiku-4-5` is the demo's distiller arm. Every test in
+`packages/providers/tests/test_anthropic_provider.py` passed regardless, because
+they all inject a fake client and assert on the resolved `max_tokens`, never on
+whether the endpoint would accept the body. The ADR-0005 trap in its exact
+shape: green because it asserts the thing that is easy to assert.
 
-This is the ADR-0005 trap in its exact shape: a suite that is green because it
-asserts the thing that is easy to assert. It is also precisely what a live run
-exists to catch, and precisely what could not be checked tonight.
+**Now fixed.** `supports_effort()` gates the field on the same kind of substring
+match the cap uses, and for the same reason — the model arrives as free text, so
+an exact-match table would miss a spelling. The table falls back the *opposite*
+way to the max-tokens one, which is the part worth remembering: max-tokens falls
+back to the generous default so an unlisted model keeps working, `effort` falls
+back to **omitting** the field, because omitting it is never an error while
+sending it to a model that rejects it always is.
 
-**Deliberately not "fixed".** Making `effort` conditional is a two-line change,
-but it is a behavioural change to the provider justified only by a documentation
-table, with no way to verify it here — and a speculative fix plus a test written
-to match the speculation would manufacture exactly the false confidence this
-document is complaining about. The first live call settles it either way:
+Two things the fix is careful about:
 
-```
-uv run python scripts/w6_live_stress.py     # phase 4 is the first call
-```
+- **The gate is on the key, not the container.** Structured output *is*
+  supported on Haiku 4.5, so `output_config.format` still goes out; dropping
+  `output_config` wholesale would have fixed the 400 by removing schema
+  enforcement from the one arm this provider pins a cap for.
+- **Both directions are tested**, on the outbound request body rather than on
+  an attribute: no `effort` for either Haiku spelling or for Sonnet 4.5, and
+  `effort` still present for Opus 4.5/5, Sonnet 5 and Fable 5. A fix that just
+  deleted the field would pass the first half and silently stop keeping
+  thinking shallow on the default arm.
 
-If it returns a 400 naming `effort`, the fix is to omit the field for models
-that reject it (substring match, same as the pin, and for the same reason: the
-model arrives as free text and an exact-match table fails open). If it returns
-200, delete this section.
+Still not established here: that the endpoint agrees. This is a documentation-
+grounded fix verified against the request body, not against a live 200 — the
+call in §6 remains the thing that would settle it.
 
 ---
 

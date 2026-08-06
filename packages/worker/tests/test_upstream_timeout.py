@@ -210,6 +210,14 @@ async def test_the_timeout_is_actually_enforced_on_the_wire() -> None:
     that will never answer. Bounded by the timeout itself, so it is fast, and
     the wall-clock assertion is what proves the number was used rather than
     ignored in favour of httpx's own default.
+
+    The bound is 1.0s, and NOT the 5.0s it was, because `httpx.AsyncClient()`'s
+    own default timeout is exactly 5.0. Measured, all three shapes: correct
+    wiring returns in 0.076s; `self.timeout` dropped on the floor returns in
+    5.007s; the constructor's 30.0 default returns in 30.009s. Against a 5.0s
+    bound the dropped-timeout case -- the failure this test exists for -- missed
+    by 7ms in 5000, which is jitter, not signal. 1.0s keeps a 13x margin over
+    the real 0.076s and separates both broken shapes cleanly.
     """
     sink = HttpSink("http://192.0.2.1:10787/producer/findings", timeout=0.05)
 
@@ -218,7 +226,7 @@ async def test_the_timeout_is_actually_enforced_on_the_wire() -> None:
     elapsed = asyncio.get_running_loop().time() - started
 
     assert delivered is False, "a timeout is a retry, never an exception"
-    assert elapsed < 5.0, (
+    assert elapsed < 1.0, (
         "a 0.05s timeout that takes seconds means self.timeout never reached "
         "the client — the same way the two wirings above could be deleted"
     )

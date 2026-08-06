@@ -220,7 +220,16 @@ def _session_payload(store: InMemoryStore, feed: Feed, call_log: CallLog, sid: s
         "topics": [{"label": t.label, "size": t.size} for t in topics],
         "log_tail": _log_tail(store, sid),
         "merges": feed.snapshot(tag="synthesis", session=sid),
-        "queries": feed.snapshot(tag="query", session=sid),
+        # BOTH query tags, interleaved by timestamp (decision 008). A
+        # `query_failed` is the single most operator-relevant thing this feed
+        # can carry -- it means the retrieval backend is not answering -- and
+        # filtering it out here would leave the dashboard showing an
+        # uninterrupted run of successful queries while every one of them came
+        # back a 503. The tag survives into the payload, so the page colours
+        # and filters the two apart (see `renderFeed`).
+        "queries": sorted(feed.snapshot(tag="query", session=sid)
+                          + feed.snapshot(tag="query_failed", session=sid),
+                          key=lambda e: e["ts_iso"]),
         # Not session-filtered: RecordingProvider's CallLog (Task 1) records
         # component/provider/tokens/latency/previews only, with no session
         # field, because ONE provider wrapper serves every Shared Session
@@ -603,6 +612,9 @@ _PAGE = """<!doctype html>
     --tag-llm: #5fc6cc;
     --tag-query: #b49fd1;
     --tag-synthesis: #84c88b;
+    /* Red, and the only red on the page: a query_failed means the retrieval
+       backend is down and every answer the team is getting is a 503. */
+    --tag-query-failed: #e06c75;
     --red: #e38c80;
     --mono: "SF Mono", ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
   }
@@ -738,6 +750,7 @@ _PAGE = """<!doctype html>
   .entry[data-tag="llm"]       { --c: var(--tag-llm); }
   .entry[data-tag="query"]     { --c: var(--tag-query); }
   .entry[data-tag="synthesis"] { --c: var(--tag-synthesis); }
+  .entry[data-tag="query_failed"] { --c: var(--tag-query-failed); }
   .entry .pos { color: var(--dimmer); flex-shrink: 0; width: 3.2em; text-align: right; font-size: 11px; }
   .entry .ts { color: var(--dimmer); flex-shrink: 0; font-size: 11px; }
   .entry .kind, .entry .tag {
@@ -784,6 +797,7 @@ _PAGE = """<!doctype html>
   .chip[data-tag="llm"]       { --c: var(--tag-llm); }
   .chip[data-tag="query"]     { --c: var(--tag-query); }
   .chip[data-tag="synthesis"] { --c: var(--tag-synthesis); }
+  .chip[data-tag="query_failed"] { --c: var(--tag-query-failed); }
   .chip[data-active="false"] { opacity: 0.38; }
   .chip[data-active="false"]::before { background: var(--dimmer); }
   .chip:focus-visible { outline: 2px solid var(--teal); outline-offset: 2px; }
@@ -831,6 +845,7 @@ _PAGE = """<!doctype html>
   <div class="chips" id="chips">
     <span class="chip" data-tag="llm" data-active="true" tabindex="0">llm</span>
     <span class="chip" data-tag="query" data-active="true" tabindex="0">query</span>
+    <span class="chip" data-tag="query_failed" data-active="true" tabindex="0">query_failed</span>
     <span class="chip" data-tag="synthesis" data-active="true" tabindex="0">synthesis</span>
   </div>
   <div id="feed"><div class="empty">waiting for the first event…</div></div>
@@ -919,7 +934,10 @@ _PAGE = """<!doctype html>
     var el = document.getElementById("feed");
     var merged = [];
     session.llm.forEach(function (c) { merged.push({ tag: "llm", ts: c.ts_iso, data: c }); });
-    session.queries.forEach(function (e) { merged.push({ tag: "query", ts: e.ts_iso, data: e }); });
+    // e.tag, not the literal "query": `queries` carries query AND query_failed
+    // now, and hardcoding the tag would paint an outage in the same colour as
+    // a successful search and hide it behind the same filter chip.
+    session.queries.forEach(function (e) { merged.push({ tag: e.tag || "query", ts: e.ts_iso, data: e }); });
     session.merges.forEach(function (e) { merged.push({ tag: "synthesis", ts: e.ts_iso, data: e }); });
     merged.sort(function (a, b) { return a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0; });
 
