@@ -1,7 +1,9 @@
 # W4a — Page 1, the Memory dashboard: implementation-ready spec
 
-**Status:** design complete, no code written. Decision recorded in
-`docs/overnight/decisions/003-dashboard-extends-debug.md`.
+**Status:** BUILT (2026-08-06). Decision recorded in
+`docs/overnight/decisions/003-dashboard-extends-debug.md`. Four deviations from
+this spec, all recorded in §8 at the bottom — read that before treating any
+section here as a description of the shipped code.
 **Tree this was read against:** `origin/main` @ `4c495be` (W2 merged).
 **Requirement, one line:** *the top level shows the state of the brain, not the
 log.*
@@ -437,3 +439,52 @@ exists for on the other page, and the brain page reuses the pattern.
 Nothing in `store.py`, `memory.py`, `log.py`, `fold.py`, `synthesis.py`,
 `retrieval.py`, or any contract. No product route changes shape. No new process,
 no build step, no external asset.
+
+---
+
+## 8. As built — the four deviations
+
+Recorded 2026-08-06, after implementation. Suite 1107 green.
+
+**1. `recent` walks `Merged` entries too, not `FindingAppended` alone (§2.5).**
+This spec was wrong, and the test list contradicted it: `SharedMemory.merge`
+appends only a `Merged` entry, so a Synthesized Finding is **never** a
+`FindingAppended`. Walking appends alone would have made test 20's `merged`
+badge unreachable and left the one thing synthesis does out of "latest into
+memory". Both kinds are walked, deduplicated by finding id so a resend is not a
+second arrival. **The roster's exclusion of `Merged` (§2.3) is unchanged and
+still deliberate** — the two lists answer different questions, and the code
+says so at both sites.
+
+**2. `behind` is reported when `last_seen > 0`, not only when a query was
+observed (§2.3).** The spec's rule would hide a real watermark once the query
+that set it aged out of the 200-event `Feed`. A non-zero `last_seen` is
+positive evidence that someone read; the `0` default is the only ambiguous
+case, and that is the one that renders `—`. Strictly more truthful, and it
+never invents. `last_seen_version` is nulled alongside `behind` so the two
+cannot disagree.
+
+**3. The nav strip is on the brain page only (§1).** The spec offered the
+choice and preferred byte-identical; taken. `/debug/log` is the `_PAGE`
+constant unchanged, so the moved page cannot regress — its two tests pass
+against content that did not change. The brain page links to it.
+
+**4. `asked_by_session` was taken (§2.3), so `last_query_scope` has both
+arms.** Live-checked: a query naming its Agent Session reports
+`"conversation"`, and the same person's other window reports `"contributor"`
+against the same timestamp, with the page labelling which it got.
+
+**Beyond the spec, one addition:** a Node driver test for the brain page
+(`test_service_brain_page_js.py` + `support/brain_page_driver.js`), the §6
+"should-have". It pins the expanded-row-survives-the-poll behaviour on both
+rebuilt lists and asserts the em-dashes in the RENDERED roster, which no
+assertion on the served HTML can see. `support/minidom.js` grew one line so its
+`innerHTML` getter returns the last-written markup — without it a `<table>` is
+invisible to any driver, and the roster is the element most worth asserting on.
+
+**Verified live**, seeded service on port 14899, browser: three revisions with
+word deltas, five participant rows across two Contributors and four Agent
+Sessions including one `left` and one `listening`, tombstones struck through,
+`merged`/`contributed`/`listened` badges distinct, session switching, and the
+empty-session case rendering all four specific empty states. Zero console
+errors.

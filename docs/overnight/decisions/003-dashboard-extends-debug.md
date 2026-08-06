@@ -1,6 +1,8 @@
 # 003 — The dashboard extends `/debug`; the brain page takes the top level
 
-**Status:** Decided, design only (2026-08-06). Implementation is W4a.
+**Status:** Decided and BUILT (2026-08-06). Deviations from the implementation
+spec are recorded in `docs/overnight/w4a-page1-spec.md` §8; none of them change
+a decision on this page.
 **Workstream:** W4a — Dashboard Page 1 (Memory dashboard)
 **Author:** decision agent, per the Decision Agent Protocol (PLAN.md)
 
@@ -247,9 +249,11 @@ revisions", it was the temptation to show *something* in that space.
 Nothing here touches the product path, the store, the log, or any contract, so
 the undo is deletion:
 
-1. Delete `/debug/brain` and `/debug/brain.json` from `debug_routes`, and the
-   `_BRAIN_PAGE` constant, the roster/revision derivation helpers, and the
-   `WorkingMemoryLog` class from `debug.py`.
+1. Delete `/debug/brain.json` from `debug_routes`, and the `_BRAIN_PAGE`
+   constant, the roster/revision derivation helpers, and the
+   `WorkingMemoryLog` class from `debug.py`. ⟨As built there is no
+   `/debug/brain` route: the brain page took `/debug` itself, which is the
+   whole point of Q2.⟩
 2. Re-mount the existing page at `/debug` (one string in the `Route(...)` list)
    and revert the two test URLs to `/debug`.
 3. Remove `working_memory_log` from `build_app` and the one `wm_log.record(...)`
