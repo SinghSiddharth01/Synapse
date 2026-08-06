@@ -16,9 +16,17 @@ def test_npu_arm_speaks_the_only_endpoint_geniex_actually_serves(monkeypatch) ->
 
     Observed live 2026-08-06: a host started with --npu answered queries with
     an empty findings list and a 200, while its own /debug dashboard listed the
-    findings, because retrieval.query_findings() catches the failure and fails
-    closed. NPUProvider is an OpenAICompatibleProvider, so it posts to
+    findings — because retrieval.query_findings() caught the failure and
+    returned `[]`, which is indistinguishable from "nothing matched".
+    NPUProvider is an OpenAICompatibleProvider, so it posts to
     /chat/completions and the synthesizer works.
+
+    ⟨AMENDED, decision 008⟩ The masking half of that story is gone: the same
+    410 now raises `RetrievalUnavailable` and the route answers 503
+    `retrieval_unavailable`, so a wrongly-wired synthesizer announces itself
+    on the first query instead of looking like an empty memory. This test is
+    still worth having — it pins that the arm is wired to the endpoint GenieX
+    actually serves, which is what stops the 503 from happening at all.
     """
     monkeypatch.setenv("SYNAPSE_SYNTHESIZER", "npu")
     monkeypatch.setenv("SYNAPSE_BASE_URL", "http://127.0.0.1:18181/v1")

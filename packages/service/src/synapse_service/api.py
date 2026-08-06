@@ -27,7 +27,8 @@ from synapse_providers import CallLog, ModelProvider, RecordingProvider
 from synapse_service.debug import Feed, debug_routes
 from synapse_service.lanes import DEFAULT_TOP_K
 from synapse_service.log import MarkedTrivial, Merged
-from synapse_service.retrieval import query_findings, visible_to
+from synapse_service.retrieval import (RetrievalUnavailable, query_findings,
+                                       visible_to)
 from synapse_service.store import InMemoryStore
 from synapse_service.synthesis import Synthesizer
 
@@ -722,14 +723,41 @@ def build_app(provider: ModelProvider, *, debug: bool = True,
             cands = store.candidates(sid, body["query"], top_k=TOP_K, exclude=suppressed)
             candidates = [c.finding for c in cands.candidates]
 
-        ranked = await query_findings(
-            retrieval_provider,
-            context=store.get_context(sid),
-            candidates=candidates,
-            query=body["query"],
-            asking_contributor=contributor,
-            asking_agent_session=legacy,
-        )
+        try:
+            ranked = await query_findings(
+                retrieval_provider,
+                context=store.get_context(sid),
+                candidates=candidates,
+                query=body["query"],
+                asking_contributor=contributor,
+                asking_agent_session=legacy,
+            )
+        except RetrievalUnavailable as exc:
+            # 503, not 502: this service is healthy and its DEPENDENCY is not.
+            # Relay's 5xx-retryable classification never sees this — Relay only
+            # posts /findings, never /query.
+            #
+            # Two side effects here are load-bearing and both are achieved by
+            # control flow rather than by a flag: `store.mark_seen` below is
+            # NOT reached, so a query that returned nothing does not advance
+            # the asker's watermark (they did not see anything, so the next
+            # briefing must still call it new); and the debug feed gets a
+            # DISTINCT event, so /debug shows a dead brain as dead instead of
+            # as a quiet query that ranked zero.
+            if feed is not None:
+                feed.event(
+                    "query_failed",
+                    f"{sid}: retrieval provider {exc.provider_id} DOWN — "
+                    f"{exc.cause_name}",
+                    session=sid,
+                    asked_by=contributor or "anonymous",
+                    provider=exc.provider_id,
+                    cause=exc.cause_name,
+                )
+            return JSONResponse(
+                {"error": "retrieval_unavailable", "provider": exc.provider_id,
+                 "detail": str(exc)},
+                status_code=503)
         store.mark_seen(sid, contributor)
         if feed is not None:
             # Counts alone could not answer "what did the asker actually get

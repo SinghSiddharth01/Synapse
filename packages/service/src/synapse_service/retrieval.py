@@ -38,6 +38,32 @@ RETRIEVER_SYSTEM = (
 )
 
 
+class RetrievalUnavailable(RuntimeError):
+    """The retrieval MODEL CALL failed. Distinct by type from 'ranked nothing':
+    an empty list is an answer; this is the absence of one.
+
+    ⟨decision 008, 2026-08-06⟩ This type exists because the alternative — the
+    `except Exception: return []` that stood here — made a dead model backend
+    indistinguishable from a memory with nothing relevant in it. The route
+    answered 200 with `{"findings": []}` and the orchestrator rendered "Team
+    memory has nothing relevant to that. (Checked — not skipped.)", which is a
+    confident lie told by a system whose whole product is honest recall.
+
+    An exception rather than a sentinel or a status field, deliberately: a
+    `None` invites the next caller to `or []` it straight back into silence,
+    and a `degraded: true` on a 200 keeps un-upgraded clients working
+    *silently wrong*. An exception is the only shape that cannot be ignored by
+    accident, which is the entire point of the change.
+    """
+
+    def __init__(self, provider_id: str, cause: Exception) -> None:
+        self.provider_id = provider_id
+        self.cause_name = type(cause).__name__
+        super().__init__(
+            f"retrieval model call failed on {provider_id}: "
+            f"{self.cause_name}: {cause}")
+
+
 def visible_to(candidates: list[Finding], asking_contributor: str, *,
                asking_agent_session: str | None = None) -> list[Finding]:
     """Invariant 3, defined once. Everything that suppresses reads this.
@@ -106,9 +132,15 @@ async def query_findings(provider: ModelProvider, *, context: SessionContext,
     try:
         result = await provider.complete(messages, response_schema=RANK_SCHEMA)
         indices = result.data.get("ranked", [])
-    except Exception:                                    # noqa: BLE001
-        logger.exception("Retrieval model call failed; returning nothing rather than everything")
-        return []
+    except Exception as exc:                             # noqa: BLE001
+        # The log line stays; the SWALLOW goes (decision 008). `return []`
+        # here was the whole bug: it is the same value a model returns when it
+        # honestly ranked nothing, so the caller could not tell an outage from
+        # an answer. The two `return []`s above and below this block are
+        # untouched — those are real empty answers.
+        logger.exception("Retrieval model call failed; raising RetrievalUnavailable")
+        raise RetrievalUnavailable(
+            getattr(provider, "provider_id", "unknown"), exc) from exc
 
     seen: set[int] = set()
     ranked: list[Finding] = []

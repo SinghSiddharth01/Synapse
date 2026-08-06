@@ -170,6 +170,42 @@ _NO_STATE_DIR = (
     "a session binding. Restart it with `--state-dir <dir>`."
 )
 
+# ⟨decision 008, 2026-08-06⟩ The sentence that makes a dead brain VISIBLY dead.
+#
+# Before this, a retrieval backend that was not answering produced an empty
+# 200 and the agent said "Team memory has nothing relevant to that. (Checked —
+# not skipped.)" — the single worst live outcome, because everything looks
+# fine while the memory is unreadable. The instruction not to report "no
+# relevant findings" is in the text on purpose: an agent that reads only the
+# first clause and paraphrases is the failure this is guarding against.
+_RETRIEVAL_DOWN = (
+    "Shared memory is DOWN, not empty: its model backend ({provider}) is not "
+    "answering, so the team's findings exist but cannot be searched right now. "
+    "Tell the user this is an outage — do NOT report 'no relevant findings'. "
+    "The stack self-heals within ~2 minutes; retry after that."
+)
+
+
+def _retrieval_down_text(response) -> str | None:
+    """The outage sentence for THE 503 that means "the retriever's model is
+    dead", or None for anything else.
+
+    Both halves are checked for the same reason `is_session_ended` checks
+    both: a 503 from an intermediary — a proxy, a load balancer, the LAN host
+    being restarted — is an ordinary outage and must keep falling through to
+    the generic handler, which says something true about it. Only the
+    service's own typed body earns this text.
+    """
+    if response.status_code != 503:
+        return None
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    if not isinstance(body, dict) or body.get("error") != "retrieval_unavailable":
+        return None
+    return _RETRIEVAL_DOWN.format(provider=body.get("provider") or "unknown")
+
 
 def register_tools(server: FastMCP, *, resolve_binding, service_url: str, relay,
                    distiller_factory, transport=None, state_dir=None, cwd=None,
@@ -510,6 +546,16 @@ def register_tools(server: FastMCP, *, resolve_binding, service_url: str, relay,
                 # handler below and does NOT clear the binding.
                 if is_session_ended(resp):
                     return _ended_text(_forget_ended(binding))
+                # ALSO before raise_for_status, and for the same reason the
+                # ended-session check is (decision 008): a 503 whose body says
+                # `retrieval_unavailable` is not a generic outage, it is the
+                # one outage this agent must not paper over. Left to
+                # raise_for_status it would render "Shared memory is
+                # unreachable right now (HTTPStatusError)" — honest but
+                # unactionable, and indistinguishable from the service itself
+                # being down.
+                if (down := _retrieval_down_text(resp)) is not None:
+                    return down
                 resp.raise_for_status()
                 data = resp.json()
             # A well-formed empty result ({"findings": []}) and a response that

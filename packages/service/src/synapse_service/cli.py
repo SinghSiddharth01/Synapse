@@ -24,9 +24,11 @@ def _provider():
         # /chat/completions eats emitted JSON into empty tool_calls -- see
         # aic100.py), and GenieX serves only /chat/completions, /v1/models and
         # /v1/models/{model}. So aic100-against-GenieX is a 410 Gone on every
-        # synthesis call, which retrieval.query_findings() then catches and
-        # turns into an empty result with a 200 -- a host whose queries return
-        # nothing while its own dashboard shows the findings.
+        # synthesis call. Until decision 008 that also came back as an empty
+        # result with a 200 -- a host whose queries returned nothing while its
+        # own dashboard showed the findings. It is a 503 naming the provider
+        # now, but the right arm is still the point: a loud failure is a
+        # better bug report, not a substitute for being wired correctly.
         from synapse_providers import NPUProvider
         kwargs = {}
         if base_url := os.environ.get("SYNAPSE_BASE_URL"):
