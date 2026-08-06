@@ -67,10 +67,12 @@ apart:
   back at you as team knowledge.
 
 Omit it and nothing errors — the server uses that most-recent binding,
-which is exactly right when only one window is open. If a tool rejects the
-argument outright, the Synapse install on this machine predates per-
-conversation identity; call it again without the argument and one machine
-means one participant, as it used to.
+which is exactly right when only one window is open.
+
+`leave_session` takes it too, and there it is the difference between
+detaching this conversation and detaching every conversation on the machine
+that is in the same Shared Session. Without it there is nothing to tell them
+apart, so it detaches all of them and says so in its result.
 
 There is otherwise nothing to attach to: the server already knows which
 Shared Session this conversation is in from the local binding

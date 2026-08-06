@@ -130,11 +130,20 @@ def test_skill_teaches_the_agent_to_pass_its_own_agent_session_id():
     section_text = section[1]
     assert "mcp__synapse__query" in section_text
     assert "mcp__synapse__contribute" in section_text
-    # The skill is a shipped artifact installed on machines whose Synapse
-    # may be older than it -- the same reason the worker keeps writing the
-    # legacy binding mirror. It must not instruct an agent into a hard
-    # failure against a server that predates the argument.
-    assert "without the argument" in section_text
+    # The skill is a shipped artifact installed on machines whose Synapse may
+    # be older than it -- the same reason the worker keeps writing the legacy
+    # binding mirror -- so it has to say what OMITTING the argument does.
+    assert "Omit it and nothing errors" in section_text
+    # ⟨2026-08-06 review⟩ And it must not offer an escape hatch that can never
+    # fire. The skill used to say "if a tool rejects the argument outright,
+    # call it again without it"; nothing rejects it. Before the tools took the
+    # argument the surface accepted and silently DISCARDED it (verified by
+    # execution against a real `create_mcp()` + `register_tools` wiring:
+    # identical results with and without, and the generated schema carries no
+    # `additionalProperties: false`), so an agent following that instruction
+    # would have kept passing an argument that did nothing, with the doc
+    # telling it that could not happen.
+    assert "rejects the argument" not in section_text
 
 
 def test_install_md_documents_the_two_window_check():
@@ -210,6 +219,12 @@ def test_install_md_qualifies_the_running_claude_code_window_as_agent_session():
     assert "*whichever* Claude Code session it finds live" not in text
     assert "whichever Agent Session is live in *that*" in text
     assert "whichever session is live in *that*" not in text
+    # ⟨2026-08-06 review⟩ The sentence that phrase used to end in was FALSE:
+    # "which is the one whose terminal you ran it from". `join` resolves by
+    # modification time (`discovery.find_live_transcript`) and cannot see a
+    # terminal at all, so on the two-window machine this section is written
+    # for it names the other window. Vocabulary was right; the claim was not.
+    assert "the one whose terminal you ran it from" not in text
 
 
 def test_this_repos_own_claude_dir_is_not_where_the_pack_self_installed():

@@ -585,6 +585,44 @@ def test_a_machine_scope_binding_enrols_every_window_under_its_own_id(tmp_path, 
     assert "agent_session=real-uuid-1" in watermark.paths[0]
 
 
+def test_serve_local_writes_its_stand_in_binding_as_machine_scope(tmp_path, watermark):
+    """The other end of the arm above, and the reason it exists.
+
+    `scripts/serve_local.py` is the path docs/JOIN.md documents, so it is
+    where most sessions actually come from. It runs before any Claude Code
+    window exists and therefore cannot know a session id — it writes the
+    label `as-<contributor>`, which no real `session_id` can ever equal. With
+    that binding left at the default `scope: session`, this hook's
+    exact-match gate could never fire and the freshness pointer was
+    STRUCTURALLY silent on the demo path: verified by running the shipped
+    hook as a subprocess, a stdin `session_id` produced no output and no
+    network call at all, and only the TTY/no-id case spoke.
+
+    Read out of the script's source with `ast` rather than by running it (it
+    spawns three servers), and then exercised for real: the binding shape it
+    writes is handed to the hook, which must speak under the WINDOW's id."""
+    source = (ROOT / "scripts" / "serve_local.py").read_text(encoding="utf-8")
+    calls = [node for node in ast.walk(ast.parse(source))
+             if isinstance(node, ast.Call)
+             and getattr(node.func, "id", None) == "SessionBinding"]
+    assert len(calls) == 1, "serve_local.py must write exactly one stand-in binding"
+    keywords = {kw.arg: kw.value for kw in calls[0].keywords}
+    assert "scope" in keywords, (
+        "serve_local.py writes a binding no conversation's session id can match, "
+        "so it must declare scope='machine' or the freshness hook stays silent")
+    assert keywords["scope"].value == "machine"
+
+    state_dir = tmp_path / ".synapse"
+    _write_binding(state_dir, shared_id="local-dev", agent_session_id="as-sid",
+                   scope="machine")
+
+    result = _run_hook(state_dir, watermark.url, session_id="a-real-window-uuid")
+
+    assert result.returncode == 0
+    assert len(watermark.paths) == 1
+    assert "agent_session=a-real-window-uuid" in watermark.paths[0]
+
+
 def test_a_session_scope_binding_still_shuts_out_a_window_that_never_joined(tmp_path, watermark):
     """The gate machine-scope relaxes must stay exactly as it was for
     `scope: session`, which is every binding a real `synapse-worker join`

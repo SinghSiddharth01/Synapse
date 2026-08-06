@@ -272,6 +272,58 @@ def test_producer_endpoint_falls_back_to_the_product_binding_for_an_unbound_wind
     assert "http://svc/v1/sessions/local-dev/findings" in forwarded
 
 
+def test_producer_endpoint_routes_a_codex_conversation_by_its_own_binding(tmp_path):
+    """The generalisation claim, at the seam where it would break first.
+
+    Nothing in the W2 layout is Claude-Code-specific: the directory is
+    `bindings/<agent>/`, resolution dispatches through `AGENT_REGISTRY`, and
+    the producer routes on the Finding's own `(agent, agent_session)`. A Codex
+    rollout bound to its own Shared Session must therefore egress there while
+    a claude-code window on the same machine is bound elsewhere — with no pack,
+    no hook and no code that names Codex. Registering an agent is the whole of
+    the work; this is the proof at the egress."""
+    import synapse_orchestrator.cli as cli
+    from synapse_contracts.binding import SessionBinding, write_binding
+
+    codex_uuid = "1c9b6d8e-27ac-4f1e-9f2c-8a2b1e6d4c11"
+    state_dir = tmp_path / "state"
+    write_binding(state_dir / "bindings" / "codex" / f"{codex_uuid}.json",
+                  SessionBinding(agent_session_id=codex_uuid, shared_id="sh-codex",
+                                 contributor="akhil", agent="codex",
+                                 transcript_path="/tmp/rollout.jsonl",
+                                 pinned_at=datetime(2026, 8, 6, tzinfo=timezone.utc)))
+    write_binding(state_dir / "bindings" / "claude-code" / "conv-1.json",
+                  SessionBinding(agent_session_id="conv-1", shared_id="sh-claude",
+                                 contributor="akhil", agent="claude-code",
+                                 transcript_path="/tmp/conv-1.jsonl",
+                                 pinned_at=datetime(2026, 8, 7, tzinfo=timezone.utc)))
+
+    forwarded = []
+    def handler(request: httpx.Request) -> httpx.Response:
+        forwarded.append((str(request.url), json.loads(request.content)))
+        return httpx.Response(200, json={"accepted": 1, "memory_version": 1})
+    relay = Relay(tmp_path / "relay", "http://svc", None,
+                  transport=httpx.MockTransport(handler))
+    app = build_app(
+        relay,
+        resolve_binding_for_session=lambda agent, session:
+            cli._resolve_binding_for_agent(state_dir, agent, session))
+
+    from_codex = dict(FINDING, id="f-codex",
+                      attributions=[{"contributor": "akhil", "agent_session": codex_uuid,
+                                     "agent": "codex"}])
+    from_claude = dict(FINDING, id="f-claude",
+                       attributions=[{"contributor": "akhil", "agent_session": "conv-1",
+                                      "agent": "claude-code"}])
+    with TestClient(app) as client:
+        assert client.post("/producer/findings",
+                           json={"findings": [from_codex, from_claude]}).status_code == 200
+
+    by_url = {url: body for url, body in forwarded}
+    assert by_url["http://svc/v1/sessions/sh-codex/findings"]["findings"][0]["id"] == "f-codex"
+    assert by_url["http://svc/v1/sessions/sh-claude/findings"]["findings"][0]["id"] == "f-claude"
+
+
 def test_producer_endpoint_rejects_empty_attributions(tmp_path):
     def handler(request):
         raise AssertionError("nothing should egress")
