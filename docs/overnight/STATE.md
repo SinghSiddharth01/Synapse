@@ -1,28 +1,38 @@
 # Overnight state — per workstream
 
 Rewritten to current truth at every transition. Times PDT, 2026-08-06.
-Last rewrite: **05:40**.
+Last rewrite: **06:15** (post-incident relaunch; see LOG 06:00–06:10).
 
-| ws | what | status | branch | notes |
+| ws | what | status | where | notes |
 |---|---|---|---|---|
-| W11/W9 | transcript → two checklists | **✅ merged to main** (10783f4) | overnight/w11-transcript | checklist now agentic-only; HUMAN-TODO.md new, deadline-ordered |
-| W3a | flow investigation → FLOW.md | **✅ done** | overnight/journal | 195 lines, file:line cited; feeds W3b + W6 |
-| W10a | docs audit | **✅ done** | overnight/journal | `w10a-docs-audit.md`; contradiction list + writer plan |
-| W8a | install scoping + review | **✅ done** | overnight/journal | reviewer verdict NEEDS-CHANGES, 8 corrections → W8b spec |
-| W1 | GenieX idle death | **🔄 running** (wf_25bd0232) | overnight/w1-geniex | Fable design → Opus dev → review→verify→fix→audit; merges itself when green |
-| W2 | multi-session | **🔄 running** (wf_8355bbbd) | overnight/w2-multisession | 3 dev passes; also fixes serve_local `as-<contributor>` identity mismatch |
-| W8b | install scripts dev | **🔄 running** (wf_ab238776) | overnight/w8-install | install.sh/.ps1, doctor pre-flight, secrets.example.jsonc, README surgical |
-| W6 | stress/regression tests | **🔄 running** (wf_5eca61cf) | overnight/w6-stress | cover 7c42e96/7418a63/c077a51/282fd07; Haiku 4K pin; bounded live stress |
-| W10b | doc writers + consistency | **🔄 running** (wf_b2a1872d) | overnight/w10-docs | MkDocs+Material+Pages; 6 areas; consistency reviewer |
-| W3b | worker rate limiter | queued — **after W1 merges** | overnight/w3-limiter | avoids service-seam collision |
-| W5 | arrival summary | queued — **after W2 merges** | overnight/w5-arrival | retargeted: fire at join_session + carry purpose (wave-1 finding) |
-| W7 | live lifecycle E2E | next to launch | overnight/w7-lifecycle | rehearse port-hardcode fix + real-port live smoke (host is free) |
-| W4a | dashboard Page 1 | queued — after W2 | overnight/w4-dashboard | scope grew: global-view roster items from wave-1 routing |
-| W4b | dashboard Pages 2+3 | expendable | — | only if time remains |
-| slides | HTML deck / two-tab site | **decision agent running** | — | unowned 5-of-7-minutes gap found by W11; decisions/010 will rule |
+| W11/W9 | transcript → two checklists | **✅ merged** | main `10783f4` | checklist agentic-only; HUMAN-TODO.md deadline-ordered |
+| W3a | flow investigation | **✅ merged** | main `2074873` | FLOW.md, file:line cited |
+| W10a | docs audit | **✅ merged** | main `2074873` | `w10a-docs-audit.md` |
+| W8a | install scope + review | **✅ merged** | main `2074873` | 8 corrections feed the integration reviews |
+| slides | outline + two-tab skeleton | **✅ merged** | main `c2ca4b9` + `c1d768f` | decisions/010; outline is source of truth; skeleton passed barred-claims grep |
+| W1 | GenieX idle death | **🔄 v2 running** (wf_4c6491eb) | → overnight/w1-geniex | full redo from recovered Fable design; first run lost uncommitted in incident |
+| W2 | multi-session | **🔄 v2 running** (wf_54298c1f) | overnight/w2-multisession `40b0744` | pass1 ✅ (bindings + decisions/001); pass2/3 + reviews in flight |
+| W8b | install scripts | **🔄 in integration** (wf_efecf617) | overnight/w8-install `5900f04` | dev done (install.sh, doctor, secrets.example, README); install.ps1 possibly missing — integration fixes; reviews running |
+| W10b | docs site | **🔄 in integration** (wf_efecf617) | overnight/w10-docs `2085a62` | six areas + mkdocs assembled; consistency review running |
+| W7 | lifecycle E2E | dev ✅ / live arc **pending redo** | overnight/w7-lifecycle `443a5dd` | port-guard fix done (also as `1d3f149` in the chain); live arc re-runs after integration merges |
+| W6 | stress/regression | **🔄 v2 running** (wf_581ae566) | overnight/w6-stress `ee384e1` | coverage audit ✅; one test commit preserved; rest in flight |
+| W3b | worker rate limiter | queued — after W1 merges | — | a stray uncommitted budget-wiring test preserved at jobs tmp `recovered/` |
+| W5 | arrival summary | queued — after W2 merges | — | retargeted: fire at join_session + carry purpose |
+| W4a | dashboard Page 1 | queued — after W2 | — | |
+| W4b | dashboard Pages 2+3 | expendable | — | |
 
-**Invariants:** baseline 888 green at f56d6f0; main now 10783f4 (docs-only), suite
-re-verified green at merge. Tags `overnight-20260806-start` and `demo-fallback`
-both on origin. Nothing on ports 8899/8787/18181; workstreams use shifted ports.
+**Invariants:** main = `46bb189`, suite verified green at every merge (last full
+run 888 at `c1d768f`; suite grows as test workstreams land). Ports 8899/8787/18181
+free (verified 06:05). Tags `overnight-20260806-start`, `demo-fallback` on origin.
 
-**Merged to main so far:** 10783f4 (W11 checklists).
+**Incident (06:00, recovered):** wave-2 workflow agents shared my control
+worktree — full account in LOG.md. Cost: W1 redo, review stages re-run via the
+integration workflow, one stash parked (`4630ba2`). No red merges, nothing lost
+that wasn't recoverable, no force pushes.
+
+**Morning cleanup for Sid:** stale sibling worktrees under `.claude/worktrees/`
+(`w1-geniex`, `w2-multisession`, `w6-stress`, `w8-install`, `w10-docs`,
+`w11-transcript`, two `agent-*`) hold stale local branches at `f56d6f0` — safe
+to `git worktree remove --force` + `git branch -D`; origin refs are the truth.
+Stash `4630ba2` on `overnight/journal` is redundant-looking (rehearse fix +
+troubleshooting draft, both superseded by commits) — verify then drop.
