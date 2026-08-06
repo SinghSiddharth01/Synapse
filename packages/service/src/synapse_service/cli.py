@@ -18,6 +18,9 @@ def _provider():
     if mode == "aic100":
         from synapse_providers import AIC100Provider   # Task 5
         return AIC100Provider()
+    if mode == "anthropic":
+        from synapse_providers import AnthropicProvider
+        return AnthropicProvider()
     from synapse_providers import FakeProvider
     return FakeProvider(scripts=[])   # boots; any model call fails loudly, honestly
 

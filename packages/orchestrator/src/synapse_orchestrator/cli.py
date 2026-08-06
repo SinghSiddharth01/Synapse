@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -96,20 +97,32 @@ def _resolve_binding_for_agent(state_dir: Path, agent: str) -> LocalBinding | No
 
 
 def build_npu_distiller(binding: LocalBinding):
-    """Same config, same pack, same model as synapse_worker.cli's run
-    command — the "one distiller" property: contribute()'s round trip
-    uses the identical NPU model and prompt pack as the passive path."""
+    """Same config, same pack as synapse_worker.cli's run command — the "one
+    distiller" property: contribute()'s round trip uses the identical prompt
+    pack (and, on the default NPU arm, the identical model) as the passive
+    path.
+
+    SYNAPSE_DISTILLER selects the provider the same way worker/cli.py's
+    build_distiller does: "npu" (default, unchanged) or "anthropic" (opt-in
+    — Claude Opus 5, for running the full loop in parallel without the
+    single NPU box). Unset, this function behaves exactly as before.
+    """
     from synapse_distiller import Distiller, load_config, load_pack_by_name
     from synapse_providers import NPUProvider
 
     config = load_config()
-    provider = NPUProvider(
-        base_url=config.provider.base_url,
-        model=config.model,
-        max_tokens=config.provider.max_tokens,
-        temperature=config.provider.temperature,
-        timeout=config.provider.timeout_s,
-    )
+    if os.environ.get("SYNAPSE_DISTILLER", "npu") == "anthropic":
+        from synapse_providers import AnthropicProvider
+
+        provider = AnthropicProvider()
+    else:
+        provider = NPUProvider(
+            base_url=config.provider.base_url,
+            model=config.model,
+            max_tokens=config.provider.max_tokens,
+            temperature=config.provider.temperature,
+            timeout=config.provider.timeout_s,
+        )
     return Distiller(
         provider,
         binding,

@@ -140,6 +140,24 @@ def _parse_json_tolerantly(text: str) -> Any | None:
                 except json.JSONDecodeError:
                     continue
 
+    # Close what the model left open, before falling back to a span. Observed
+    # live 2026-08-05 against Llama-3.1-8B: a distil response arrived as
+    #   {"findings": [{...}, {...}, {...}]
+    # -- three well-formed findings, valid types, real text, and exactly ONE
+    # missing closing brace. Every recovery below this point then made it
+    # worse rather than better: the outermost-{...} span ends at the last `}`,
+    # which sits INSIDE the final finding, and the outermost-[...] span parses
+    # cleanly into a bare LIST, which `Distiller._to_findings` correctly
+    # rejects because it requires an object with a "findings" key. So a
+    # one-character truncation silently discarded three good findings, and the
+    # retry produced the same shape a second time.
+    #
+    # Only ever appends terminators, never content: a truncated finding that
+    # lost its "text" still fails validation downstream (empty text is
+    # dropped) rather than being invented here.
+    if (repaired := _close_unterminated(candidate)) is not None:
+        return repaired
+
     # Fall back to the outermost brace/bracket span.
     for opener, closer in (("{", "}"), ("[", "]")):
         start = candidate.find(opener)
@@ -151,3 +169,50 @@ def _parse_json_tolerantly(text: str) -> Any | None:
                 continue
 
     return None
+
+
+def _close_unterminated(text: str) -> Any | None:
+    """Parse JSON that was cut off mid-structure, by supplying the terminators
+    the model never emitted. Returns None if that does not yield valid JSON.
+
+    Scans for the first `{` or `[` and tracks nesting outside of string
+    literals, so a brace inside a finding's text cannot confuse the depth
+    count. An unterminated string is closed first, then a trailing comma
+    dropped, then every open container closed innermost-first.
+    """
+    start = min((i for i in (text.find("{"), text.find("[")) if i != -1), default=-1)
+    if start == -1:
+        return None
+
+    stack: list[str] = []
+    in_string = False
+    escaped = False
+    for char in text[start:]:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char in "{[":
+            stack.append("}" if char == "{" else "]")
+        elif char in "}]" and stack:
+            stack.pop()
+
+    if not stack and not in_string:
+        return None                      # nothing was left open; not our case
+
+    body = text[start:]
+    if in_string:
+        body += '"'
+    body = body.rstrip()
+    if body.endswith(","):
+        body = body[:-1]
+    try:
+        return json.loads(body + "".join(reversed(stack)))
+    except json.JSONDecodeError:
+        return None

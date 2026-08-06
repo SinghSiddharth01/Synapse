@@ -97,20 +97,34 @@ def build_distiller(config, binding: LocalBinding) -> Distiller:
     Shared by `cmd_run` (via `_build`) and `cmd_replay --skipped` (Task 3) so
     there is exactly one place that turns a `SynapseConfig` into a live
     NPU-backed `Distiller` — the binding is the only thing that varies.
+
+    SYNAPSE_DISTILLER selects the provider: "npu" (default, unchanged — the
+    demo is the NPU story) or "anthropic" (opt-in — Claude Opus 5 via the
+    Messages API, for running the full loop in parallel without the single
+    NPU box or the Cirrascale key's rate limit). Nobody who leaves the env
+    var unset sees any change in behaviour.
     """
-    provider = NPUProvider(
-        base_url=config.provider.base_url,
-        model=config.model,
-        max_tokens=config.provider.max_tokens,
-        temperature=config.provider.temperature,
-        timeout=config.provider.timeout_s,
-    )
+    provider = _build_distiller_provider(config)
     return Distiller(
         provider,
         binding,
         load_pack_by_name(config.prompt_pack_name),
         config.distil_kinds,
         config.render_style,
+    )
+
+
+def _build_distiller_provider(config):
+    if os.environ.get("SYNAPSE_DISTILLER", "npu") == "anthropic":
+        from synapse_providers import AnthropicProvider
+
+        return AnthropicProvider()
+    return NPUProvider(
+        base_url=config.provider.base_url,
+        model=config.model,
+        max_tokens=config.provider.max_tokens,
+        temperature=config.provider.temperature,
+        timeout=config.provider.timeout_s,
     )
 
 

@@ -74,11 +74,26 @@ render_style = "labelled"
 # measured prefill rate, this is the second of the two limits on segment size.
 max_seconds_per_call = 30.0
 
-# Leave unset to derive the budget from the capability record and prompt pack.
-# Set it only to make segments *smaller* than the derived value — an override
-# larger than the context allows is rejected, because it would truncate every
-# prompt silently.
-# segment_budget = 2000
+# Pinned, not left to derive. Left unset, a 1M-context model (the Anthropic
+# arm below) would fail OPEN: no ceiling to hit, so the derived budget comes
+# out near the full context and the segmenter emits ~90,000-token segments
+# silently -- one finding for an entire conversation. That is the OPPOSITE
+# of the NPU's fail-CLOSED behaviour (CapabilityError the moment a config
+# implies an unusable budget -- see capability.py). Pinning closes that gap
+# for both arms at once.
+#
+# 2787 is exactly what the NPU's own record derives on its own (4096 usable
+# context - 809 prompt overhead - 500 response reserve -- see
+# [capability."qualcomm/Qwen3-4B-Instruct-2507:W4A16"] below and
+# config/prompts/v4-condense.toml's [calibration]), so this pin is a NO-OP
+# for the NPU arm: it does not change a single segment the NPU path already
+# produces. What it does do is force the Anthropic arm to emit the SAME
+# 2787-token segments instead of its own much larger derived value --
+# without that, an A/B comparison between the two arms would be measuring
+# different-sized inputs, not different models. See
+# packages/distiller/tests/test_config.py for the test that pins this.
+#   env: SYNAPSE_SEGMENT_BUDGET
+segment_budget = 2787
 
 [worker]
 # How often to check the transcript for new content.
@@ -128,6 +143,33 @@ usable_context = 4096          # measured 2026-08-04; hard ceiling, no --nctx on
 prefill_toks_per_sec = 250.0   # PROVISIONAL — needs a seed-pinned measurement
 response_reserve = 500
 notes = "QAIRT/W4A16, NPU-exclusive, Snapdragon X Elite X1E80100."
+
+# The Anthropic arm (SYNAPSE_DISTILLER=anthropic / SYNAPSE_SYNTHESIZER=anthropic
+# -- see synapse_worker.cli.build_distiller, synapse_orchestrator.cli.
+# build_npu_distiller, synapse_service.cli._provider). Claude Opus 5's
+# context window is 1M tokens (see shared/models.md in the Anthropic API
+# skill) -- a genuinely cloud number, not something measured on local
+# hardware the way the NPU record above is. response_reserve matches
+# AnthropicProvider's own hardcoded max_tokens=16000 (see
+# anthropic_provider.py correction #3: thinking is on by default on Opus 5
+# and max_tokens caps thinking + text together, so a small reserve here
+# would be a lie about how much output room the provider actually asks for).
+# prefill_toks_per_sec is illustrative, not measured -- a cloud API isn't
+# prefill-bound the way an on-device NPU is, and there is no local hardware
+# to time it against. NONE OF THIS MATTERS while [distiller] segment_budget
+# is pinned above: the override always wins over whatever this record would
+# derive on its own. It exists so the derivation is *defined* (a
+# CapabilityError, not silence, if the pin is ever removed and the record is
+# looked up) -- see the segment_budget comment for what removing the pin
+# would actually produce from these numbers (min(usable_context - overhead -
+# response_reserve, prefill_toks_per_sec * max_seconds_per_call) = min(~983k,
+# 90,000) = 90,000 -- the exact "90,000-token segments" failure the pin
+# exists to prevent).
+[capability."claude-opus-5"]
+usable_context = 1000000       # Claude Opus 5's context window; 1M is both the default and the max
+prefill_toks_per_sec = 3000.0  # illustrative only -- not measured, see note above
+response_reserve = 16000       # matches AnthropicProvider's hardcoded max_tokens
+notes = "Claude Opus 5 via the Messages API (packages/providers/src/synapse_providers/anthropic_provider.py). usable_context is the advertised 1M window, not locally measured like the NPU record above. segment_budget is pinned in [distiller] to 2787, so this record's own derivation never actually governs segmentation -- see that comment."
 
 # Example of a second arm for the bake-off. llama.cpp Q4_0 also lands on the
 # Hexagon NPU and, unlike qairt, honours --nctx — so usable_context here is a

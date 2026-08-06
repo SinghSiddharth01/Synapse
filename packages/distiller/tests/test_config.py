@@ -111,3 +111,24 @@ def test_describe_reports_calibration_provenance(tmp_path) -> None:
 
     assert "calibrated against" in described
     assert "Qwen3-4B" in described
+
+
+def test_shipped_config_pins_the_npu_segment_budget_at_2787(monkeypatch) -> None:
+    """config/synapse.toml pins [distiller] segment_budget = 2787 so a 1M
+    context Anthropic arm can't fail OPEN (no ceiling to hit -> ~90,000-token
+    segments emitted silently, one finding per whole conversation) the way
+    the NPU's own CapabilityRecord fails CLOSED. 2787 is exactly what the
+    NPU record derives on its own (4096 usable context - 809 prompt overhead
+    - 500 response reserve), so the pin must be a NO-OP for the NPU arm --
+    this assertion, against the real committed file (not a tmp_path
+    fixture), IS the safety argument for pinning it globally instead of
+    per-model: it proves the pin didn't change what the NPU already emits.
+    """
+    monkeypatch.delenv("SYNAPSE_MODEL", raising=False)
+    monkeypatch.delenv("SYNAPSE_SEGMENT_BUDGET", raising=False)
+    monkeypatch.delenv("SYNAPSE_PROMPT_PACK", raising=False)
+
+    config = load_config()  # the real, committed config/synapse.toml
+
+    assert config.model == "qualcomm/Qwen3-4B-Instruct-2507:W4A16"
+    assert config.segment_budget == 2787
