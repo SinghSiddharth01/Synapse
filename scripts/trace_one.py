@@ -21,6 +21,14 @@ from synapse_distiller import load_config, load_pack_by_name
 from synapse_distiller.fixtures import load_goldens, load_segment
 from synapse_distiller.prompt import build_messages
 
+# Same Windows/cp1252 reason as scripts/run_npu_eval.py: RULE below is U+2550,
+# which the locale codepage cannot encode, so any redirected run of this script
+# died with UnicodeEncodeError before printing anything.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 RULE = "═" * 78
 
 

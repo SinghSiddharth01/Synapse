@@ -25,6 +25,7 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -44,6 +45,36 @@ LOG_LINES: list[str] = []
 def log(line: str) -> None:
     print(line, flush=True)
     LOG_LINES.append(line)
+
+
+def terminate_tree(proc: subprocess.Popen, timeout: float = 10.0) -> None:
+    """Kill `proc` AND its children. Required for correctness, not tidiness.
+
+    Every server here is spawned as `uv run ...`, so `proc` is `uv.exe` and
+    the actual listener is its CHILD. On POSIX a SIGTERM to the process
+    group reaches both; on Windows there are no process groups in that
+    sense and `Popen.send_signal(SIGTERM)` maps to `TerminateProcess`,
+    which does NOT cascade. The child kept the port open, so
+    `svc.wait()` returned promptly while the service was still serving --
+    beat 7a ("contribute while service is DEAD") then measured a live
+    service, reported `sent: True`, and the restart in 7b silently bound
+    nothing because 8899 was still taken. Both failures, one cause.
+
+    `taskkill /T` walks the tree; `/F` is needed because the intermediate
+    `uv.exe` has no window to receive a graceful close.
+    """
+    if proc.poll() is not None:
+        return
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       check=False)
+    else:
+        proc.send_signal(signal.SIGTERM)
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
 
 
 def beat(name: str, ok: bool, detail: str = "") -> bool:
@@ -235,8 +266,7 @@ def main() -> int:
              "agent='claude-code', transcript_path='(rehearsal)',"
              "pinned_at=datetime.now(timezone.utc)))"],
             cwd=ROOT, check=True)
-        svc.send_signal(signal.SIGTERM)
-        svc.wait(timeout=10)
+        terminate_tree(svc)
         time.sleep(1)
         code, body = http("POST", f"{ORCH}/producer/findings", {"findings": [{
             "id": "f-demo-recovery-01", "type": "learning",
@@ -267,11 +297,17 @@ def main() -> int:
 
     finally:
         for p in procs:
-            if p.poll() is None:
-                p.send_signal(signal.SIGTERM)
+            terminate_tree(p)
         OUT.mkdir(exist_ok=True)
-        (OUT / f"rehearsal-{mode}.log").write_text("\n".join(LOG_LINES) + "\n")
-        subprocess.run(["rm", "-rf", str(ROOT / ".synapse-rehearsal")], check=False)
+        # encoding pinned: Path.write_text defaults to the locale codepage,
+        # which on Windows is cp1252 and cannot encode arbitrary topic labels
+        # echoed into beat details from service-supplied content.
+        (OUT / f"rehearsal-{mode}.log").write_text(
+            "\n".join(LOG_LINES) + "\n", encoding="utf-8")
+        # shutil, not `rm -rf`: `rm` is not a Windows command, so the cleanup
+        # raised FileNotFoundError out of the `finally` block and replaced the
+        # real beat failures with a traceback.
+        shutil.rmtree(ROOT / ".synapse-rehearsal", ignore_errors=True)
 
     log(f"== {('ALL BEATS PASS' if failures == 0 else f'{failures} BEAT(S) FAILED')} ({mode}) ==")
     return 0 if failures == 0 else 1

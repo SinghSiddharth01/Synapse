@@ -35,6 +35,14 @@ from mcp.client.streamable_http import streamablehttp_client
 
 from synapse_worker.discovery import CLAUDE_PROJECTS, project_slug
 
+# Same Windows/cp1252 reason as scripts/run_npu_eval.py — this script's status
+# marks are non-cp1252 codepoints, so a redirected run died before its first
+# line rather than reporting anything.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:

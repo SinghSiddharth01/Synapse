@@ -27,6 +27,18 @@ from synapse_distiller import Distiller, check_canary, load_config
 from synapse_distiller.evaluation import score_fixture
 from synapse_distiller.fixtures import available_fixtures, load_goldens, load_segment
 
+# Windows writes piped stdout in the locale codepage (cp1252 here), not UTF-8,
+# and this harness draws its section rules with U+2500 box characters, which
+# cp1252 has no mapping for. `uv run python scripts/run_npu_eval.py` straight
+# to a console happened to work; the runbook's own `| tee`/redirect into
+# .measurements/ died with UnicodeEncodeError before the canary printed a
+# single line. Reconfiguring here rather than relying on PYTHONUTF8/
+# PYTHONIOENCODING keeps the documented invocation correct with no env setup.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 BINDING = LocalBinding(
     agent_session_id="as-fixture-001",
     shared_id="shared-eval",
