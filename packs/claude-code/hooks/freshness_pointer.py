@@ -133,10 +133,13 @@ BOUNDED OUTPUT (post-review fix, 2026-08-05). `_compose_message` used to
 join every topic label from the watermark response with no length cap.
 The sibling this hook's own comments cite -- `synapse_orchestrator.
 briefing` -- hard-caps the identical composed-from-the-same-response
-string at 1200 characters, because `topics` is unbounded service-supplied
-content interpolated into agent-facing text. `_compose_message` now
-enforces the same cap (`_MAX_MESSAGE_CHARS`), so this hook actually holds
-the parity its own docstring claims rather than merely asserting it.
+string (`_MAX_BRIEFING_CHARS`), because `topics` is unbounded
+service-supplied content interpolated into agent-facing text.
+`_compose_message` now enforces a cap of its own (`_MAX_MESSAGE_CHARS`), so
+this hook actually holds the parity its own docstring claims rather than
+merely asserting it. The two numbers are deliberately NOT tied together --
+they were equal when this was written and the briefing's has since moved to
+pay for the purpose and members clauses, which this hook does not carry.
 
 COMPOSITION ORDER IS LOAD-BEARING (post-review fix, 2026-08-05), the same
 way it is in the sibling above. The cap truncates from the END, so

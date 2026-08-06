@@ -281,17 +281,30 @@ repeating dead end.
 ## The arrival briefing (non-tool)
 
 Not a tool call — it rides the MCP `instructions` field a client reads once
-at `initialize`, composed by `briefing.build_briefing`
-(`packages/orchestrator/src/synapse_orchestrator/briefing.py:79-196`) from
-the current binding's watermark. Fail-open by design: any error in the HTTP
-round trip, the JSON parse, or the string composition itself yields the
-plain unbound default text rather than ever breaking a session start
-(`briefing.py:12-18,190-192`). Headline-only and hard-capped at 1200 chars
-(`briefing.py:53-55`) — finding bodies never appear, only counts, types, and
-version deltas. It re-composes on an interval (`DEFAULT_REFRESH_SECONDS =
-10.0`, `briefing.py:227`) hung off the ASGI lifespan, so a session already
-open keeps the briefing it arrived with while a newly-connecting client
-always gets a current one (`briefing.py:199-287`). A stable sentinel string,
-`SENTINEL = "[synapse-briefing]"` (`server.py:104`), opens every variant of
-this text and is asserted through a real MCP client by
+at `initialize`, composed by `briefing.compose_instructions`
+(`packages/orchestrator/src/synapse_orchestrator/briefing.py`) in two parts:
+
+1. **The headline** (`build_briefing`), from the current binding's
+   `/watermark` — the session's purpose, who is in it, counts by type,
+   conflicts, the version delta, and the topic labels. Hard-capped at
+   `_MAX_BRIEFING_CHARS`, and the cap is the enforcement of "headlines only":
+   what truncation eats is always the growable service-supplied content.
+2. **The arrival body** (`GET /v1/sessions/{sid}/arrival`) — the same
+   two-section summary `join_session` returns, with a directive to relay it to
+   the user in the agent's first reply. It is here because on the path
+   `docs/JOIN.md` documents, `join_session` is never called at all:
+   `scripts/serve_local.py` registers the member and writes the binding
+   itself, so the connecting agent's only surface is this string. Bounded
+   service-side (`arrival.MAX_ARRIVAL_CHARS`) whether the session holds six
+   findings or six hundred, and bounded again here.
+
+The whole string is bounded by `_MAX_INSTRUCTIONS_CHARS`. Both hops fail open,
+independently: any error in either HTTP round trip, JSON parse, or string
+composition yields the plain unbound default text (hop 1) or simply omits the
+body (hop 2) rather than ever breaking a session start. It re-composes on an
+interval (`DEFAULT_REFRESH_SECONDS = 10.0`) hung off the ASGI lifespan, so a
+session already open keeps the briefing it arrived with while a
+newly-connecting client always gets a current one. A stable sentinel string,
+`SENTINEL = "[synapse-briefing]"` (`server.py`), opens every variant of this
+text and is asserted through a real MCP client by
 `scripts/verify_instructions.py`.
