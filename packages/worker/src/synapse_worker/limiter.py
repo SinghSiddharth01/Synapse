@@ -27,8 +27,29 @@ Three bounds, all config-driven (`[worker]` in config/synapse.toml):
                              call goes through `call()`, which holds a
                              semaphore, so the ceiling is enforced rather than
                              implied.
-  `max_deferred_segments`    the VISIBLE BOUND on the backlog. At or above it
-                             the loop stops reading new transcript bytes.
+  `max_deferred_segments`    the VISIBLE BOUND on the backlog. The deferred
+                             queue is never filled past it, and while work is
+                             held back the loop stops reading new transcript
+                             bytes.
+
+⟨CORRECTED 2026-08-06, W3b review⟩ That third line used to claim only the
+second half, and the code only implemented the second half. `accepting_input`
+is checked BEFORE the read and `read_new_lines` returns everything from the
+offset to EOF, so a single tick could drain an arbitrary number of segments
+into the queue and overshoot without limit -- measured at 196 segments against
+a bound of 64 on a `--from-start` attach, rewriting 128 KB of segment JSON
+every tick for the ~25 minutes it took to drain. Back-pressure only ever
+prevented the NEXT read. The bound is now enforced at BOTH ends: `WorkerLoop`
+caps `Segmenter.drain(max_segments=...)` at the queue's remaining headroom, and
+what does not fit stays in the segmenter rather than in the queue. Exact to
+within one turn -- a turn is never split across ticks.
+
+The read gate moved with it, and had to. On queue depth alone it would now be
+dead code: `admit()` takes `max_calls_per_tick` off the queue every tick, so a
+queue filled exactly to its bound is back under the bound by the time the next
+tick asks, and backpressure could never latch. The honest question is whether
+any buffer still holds unconverted work, so the loop checks the segmenter too
+(`has_undrained_turns`).
 
 DEFER, NEVER SHED (decisions/002)
 ---------------------------------

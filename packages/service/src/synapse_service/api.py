@@ -322,10 +322,38 @@ def build_app(provider: ModelProvider, *, debug: bool = True,
 
         `usage is None` means the call raised before reporting anything. It is
         still charged, at ASSUMED_QUERY_TOKENS, for the same reason
-        `_record_spend` charges a failed merge: the request went out. That this
-        can defer synthesis during a retrieval outage is not a cost worth
-        avoiding -- the provider is SHARED, so a retrieval that cannot complete
-        is a merge that could not have completed either.
+        `_record_spend` charges a failed merge: the request went out.
+
+        ⟨SCOPED 2026-08-06, W3b review⟩ That justification -- "the provider is
+        SHARED, so a retrieval that cannot complete is a merge that could not
+        have completed either" -- is TRUE OF SOME FAILURES AND NOT OTHERS, and
+        the code cannot currently tell them apart:
+
+          - a 5xx or a 429 from the shared endpoint: the argument holds
+            exactly. The key really is spent, and the merge really would fail.
+          - a local transport error (connection refused, DNS, a retrieval
+            backend configured to a host that is down): NOTHING was spent, and
+            the synthesis provider may be perfectly healthy. Charging 1,500
+            still defers merges -- ~17 failed queries against the 25,000/hour
+            ceiling block every merge for the rest of the hour.
+
+        Deliberately kept as one charge anyway, because the alternative is
+        worse in the direction that matters: not charging an un-costed failure
+        re-opens the hole this function exists to close, and the failure it
+        re-opens is silent (429 inside the provider) where this one is loud
+        (a deferral with a reason, naming `retrieval` as the spender). An
+        outage that over-defers is visible and self-correcting within the
+        hour; an outage that under-charges is the "findings landed, memory
+        unchanged" symptom again.
+
+        The one failure class that DID deserve better is now handled upstream:
+        a round that completed and reported usage but whose output failed the
+        schema is charged its REAL cost exactly once (retrieval.py's
+        ⟨CORRECTED⟩ note), not the assumed cost, and not twice.
+
+        If this needs to get smarter, the seam is a failure-kind argument on
+        this callback rather than more inference here -- `retrieval.py` is the
+        only place that knows whether a wire round trip happened.
         """
         tokens = ASSUMED_QUERY_TOKENS
         if usage is not None:

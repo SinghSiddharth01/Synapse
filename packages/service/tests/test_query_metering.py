@@ -248,6 +248,60 @@ def test_a_query_that_raised_is_still_charged(monkeypatch):
     assert landed["deferred"] is True              # 2 x ASSUMED_QUERY_TOKENS
 
 
+def test_an_unparseable_ranking_is_charged_exactly_once(monkeypatch):
+    """⟨W3b review⟩ THE DOUBLE-CHARGE. `AIC100Provider` returns
+    `data=None, schema_valid=False` (aic100.py:291) after a successful HTTP
+    round whose output failed the schema twice. `result.data.get("ranked")`
+    used to sit INSIDE the same `try` as `on_usage(result.usage)`, so `.get`
+    on None raised, the handler fired `on_usage(None)` a second time, and one
+    retrieval booked TWO ledger entries — its real cost plus the assumed cost
+    of a failure that never happened.
+
+    Both ceilings are asserted, because the two count different things and the
+    bug hit both. `_affordable`'s request check counts ENTRIES
+    (`(len(_spend) + 1) * 2 > request_budget`), so a doubled entry burned 4 of
+    the key's 20 requests/hour for one query.
+
+    Arithmetic, tokens: budget 10,000, merge 4,000, two schema-failing queries
+    at 1,000 each. Charged once: 4,000 + 2,000 = 6,000, next merge priced at
+    4,000 → exactly 10,000, which fits. Charged twice: 4,000 + 2,000 + 2x1,500
+    assumed = 9,000 → 13,000, deferred. The test can only pass at one charge.
+    """
+    class SchemaFailProvider(SharedKeyProvider):
+        """A round that COMPLETED and reported usage, but whose output could
+        not be parsed. Not an exception — that is the other failure class, and
+        the one this bug was hiding behind."""
+
+        async def complete(self, messages, response_schema=None):
+            ranking = bool(response_schema
+                           and "ranked" in response_schema.get("properties", {}))
+            result = await super().complete(messages, response_schema)
+            if ranking:
+                return result.model_copy(update={"data": None,
+                                                 "schema_valid": False})
+            return result
+
+    client, provider = _client(monkeypatch, tokens_per_hour=10_000,
+                               requests_per_hour=8,
+                               provider=SchemaFailProvider(merge_tokens=4_000,
+                                                           query_tokens=1_000))
+    sid = _session(client)
+    assert client.post(f"/v1/sessions/{sid}/findings",
+                       json={"findings": [_finding("f-0")]}).json()["deferred"] is False
+
+    # Still a 503: an unusable ranking is the ABSENCE of an answer, never an
+    # empty one (decision 008). The fix changed what it costs, not what it means.
+    for _ in range(2):
+        assert _query(client, sid).status_code == 503
+    assert provider.queries == 2
+
+    landed = client.post(f"/v1/sessions/{sid}/findings",
+                         json={"findings": [_finding("f-1")]}).json()
+    assert landed["deferred"] is False, (
+        "the schema-failing query was charged more than once — 3 rounds on the "
+        "ledger for 3 real requests is the bound here")
+
+
 def test_metering_retrieval_never_blocks_a_query_only_the_merge(monkeypatch):
     """The product decision, pinned. Charging `/query` deliberately lets query
     traffic defer SYNTHESIS; it must not gate `/query` itself. A query is the

@@ -91,6 +91,22 @@ class CountingProvider(FakeProvider):
             self.in_flight -= 1
 
 
+class DyingProvider(FakeProvider):
+    """Answers `die_after` calls, then raises on every one after that — a model
+    server stopped mid-run, which is the teardown order a demo actually has."""
+
+    def __init__(self, scripts, *, die_after: int):
+        super().__init__(scripts=scripts)
+        self._die_after = die_after
+        self._n = 0
+
+    async def complete(self, messages, response_schema=None):
+        self._n += 1
+        if self._n > self._die_after:
+            raise RuntimeError("provider is down")
+        return await super().complete(messages, response_schema)
+
+
 def build(tmp_path, *, limiter: SeamLimiter, scripts, provider=None):
     transcript = tmp_path / "t.jsonl"
     transcript.touch()
@@ -276,8 +292,14 @@ async def test_shutdown_drains_the_deferred_backlog_in_full(tmp_path) -> None:
     """`max_calls_per_tick` paces a loop that gets another tick. Shutdown does
     not, and its contract is "nothing stranded"."""
     limiter = SeamLimiter(max_calls_per_tick=1)
+    # FIVE scripts for five segments — the 4 complete turns plus the trailing
+    # open one. ⟨W3b review⟩ This fixture used to supply 4, so the fifth
+    # distillation raised on an exhausted script list, and the test passed only
+    # because `shutdown()` DROPPED the segment that raised instead of
+    # re-queueing it. The bug and the test that should have caught it had the
+    # same root: nothing asserted where a failed segment went.
     loop, transcript, provider = build(
-        tmp_path, limiter=limiter, scripts=[condensed(f"f{i}") for i in range(4)])
+        tmp_path, limiter=limiter, scripts=[condensed(f"f{i}") for i in range(5)])
     transcript.write_text(turns(4), encoding="utf-8")
 
     assert (await loop.tick()).deferred == 3
@@ -285,8 +307,41 @@ async def test_shutdown_drains_the_deferred_backlog_in_full(tmp_path) -> None:
 
     # The 3 deferred, plus the trailing open turn shutdown exists to flush.
     assert result.segments == 4
-    assert provider.calls == 4       # tick's 1 + the 3 that were waiting
+    assert provider.calls == 5       # tick's 1 + the 3 waiting + the open turn
     assert loop._deferred == []
+
+
+async def test_shutdown_requeues_what_the_provider_could_not_distil(tmp_path) -> None:
+    """DEFER, NEVER SHED — including on the way out.
+
+    `shutdown()` empties `self._deferred` up front, so a segment whose
+    distillation raises used to be logged and dropped, and `_persist_state()`
+    then wrote `[]` over deferred-segments.json — losing the whole backlog,
+    whose transcript bytes are already behind the follower's offset. One
+    provider death during teardown (model server stopped first) silently
+    discarded every queued segment. Asserted on DISK, because surviving to the
+    next run is the entire claim.
+    """
+    provider = DyingProvider([condensed(f"f{i}") for i in range(6)], die_after=1)
+    loop, transcript, _ = build(
+        tmp_path, limiter=SeamLimiter(max_calls_per_tick=1), scripts=[],
+        provider=provider)
+    transcript.write_text(turns(4), encoding="utf-8")
+
+    assert (await loop.tick()).deferred == 3       # 1 distilled, 3 waiting
+    await loop.shutdown()                          # provider is dead from here
+
+    # 3 deferred + the trailing open turn = 4 segments shutdown could not distil.
+    assert len(loop._deferred) == 4, "a failed segment was dropped, not re-queued"
+    on_disk = json.loads(
+        (tmp_path / "state" / "deferred-segments.json").read_text(encoding="utf-8"))
+    assert len(on_disk) == 4, "the backlog did not survive to the next run"
+
+    # And a fresh loop over the same state dir picks them back up.
+    revived, _, _ = build(
+        tmp_path, limiter=SeamLimiter(max_calls_per_tick=1),
+        scripts=[condensed("later")])
+    assert len(revived._deferred) == 4
 
 
 # --------------------------------------------------------------------------
@@ -303,7 +358,12 @@ async def test_at_the_backlog_bound_the_loop_stops_reading_new_input(tmp_path) -
     transcript.write_text(turns(4), encoding="utf-8")
 
     first = await loop.tick()
-    assert (first.segments, first.deferred) == (1, 3)      # over the bound now
+    # AT the bound, never over it ⟨W3b review⟩. This asserted (1, 3) against a
+    # `max_deferred_segments` of 2 — the old drain converted every complete turn
+    # the read returned, so the "bound" only ever governed the NEXT read and the
+    # queue could overshoot without limit (measured: 196 against a bound of 64).
+    assert (first.segments, first.deferred) == (1, 1)
+    assert first.deferred <= limiter.max_deferred_segments
 
     transcript.write_text(turns(4) + turns(4), encoding="utf-8")
     offsets_before = dict(loop.follower.state.offsets)
@@ -354,7 +414,8 @@ async def test_deferral_is_visible_in_the_log_not_only_in_the_behaviour(
         await loop.tick()
     rate = [r for r in caplog.records if "Provider rate limit" in r.getMessage()]
     assert rate, "a deferred segment produced no log line at all"
-    assert "3 deferred" in rate[0].getMessage()
+    # 1, not 3: the drain is capped at the backlog bound (2) and `admit` takes 1.
+    assert "1 deferred" in rate[0].getMessage()
     assert "NOT dropped" in rate[0].getMessage()
 
     caplog.clear()
@@ -404,7 +465,11 @@ async def test_the_summary_never_reports_no_change_while_work_is_queued(
         tmp_path) -> None:
     """"no change" next to an undistilled backlog is the exact misreading the
     visible bound exists to prevent."""
-    limiter = SeamLimiter(max_calls_per_tick=1, max_deferred_segments=1)
+    # A bound of 4 with 1 call/tick leaves a standing queue after the first
+    # tick. ⟨W3b review⟩ This used a bound of 1, which now empties every tick —
+    # the drain is capped at the bound and `admit` takes the whole of it — so
+    # the test was asserting on a queue that no longer stands still.
+    limiter = SeamLimiter(max_calls_per_tick=1, max_deferred_segments=4)
     loop, transcript, _ = build(
         tmp_path, limiter=limiter, scripts=[condensed(f"f{i}") for i in range(6)])
     transcript.write_text(turns(4), encoding="utf-8")

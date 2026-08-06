@@ -156,11 +156,23 @@ async def query_findings(provider: ModelProvider, *, context: SessionContext,
             f"PURPOSE: {context.purpose}\nWORKING MEMORY:\n{context.working_memory}\n\n"
             f"QUERY:\n{query}\n\nFINDINGS:\n{listing}"},
     ]
+    # ⟨CORRECTED 2026-08-06, W3b review⟩ The `try` used to cover the
+    # `result.data.get(...)` below as well, and that cost the key ledger
+    # DOUBLE on one specific round: `AIC100Provider` returns
+    # `data=None, schema_valid=False` (aic100.py:291) after a successful HTTP
+    # round whose output failed the schema twice, so `.get` raised
+    # AttributeError INSIDE the try, the handler fired `on_usage(None)` a
+    # second time, and one retrieval booked two `_spend` entries. Since
+    # `_affordable` counts ENTRIES for the request ceiling
+    # (`(len(_spend) + 1) * 2 > request_budget`), that burned 4 of the key's
+    # 20 requests/hour for one query. It is also the one failure class where
+    # "a ranking call that cannot complete is a merge that could not have
+    # completed either" is FALSE — the provider is up and answering, only the
+    # parse failed — so charging it the assumed cost on top of its real one
+    # was wrong twice over. The call is now split: the try covers only the
+    # part that talks to the provider.
     try:
         result = await provider.complete(messages, response_schema=RANK_SCHEMA)
-        if on_usage is not None:
-            on_usage(result.usage)
-        indices = result.data.get("ranked", [])
     except Exception as exc:                             # noqa: BLE001
         # Charged BEFORE the raise: the request went out and the key paid for
         # it whether or not anything usable came back. Not charging a failed
@@ -176,6 +188,29 @@ async def query_findings(provider: ModelProvider, *, context: SessionContext,
         logger.exception("Retrieval model call failed; raising RetrievalUnavailable")
         raise RetrievalUnavailable(
             getattr(provider, "provider_id", "unknown"), exc) from exc
+
+    # Exactly once, and with the REAL usage: the round trip completed and the
+    # provider told us what it cost. This must run before the schema check
+    # below, because a schema failure still spent those tokens.
+    if on_usage is not None:
+        on_usage(result.usage)
+
+    if not isinstance(result.data, dict):
+        # The provider answered but produced nothing rankable — `data=None`
+        # after the schema retry, or a shape that is not the object
+        # RANK_SCHEMA asked for. Same contract as a raise (decision 008: the
+        # absence of an answer is never dressed up as an empty one), but it is
+        # NOT charged again; the `on_usage` above already booked its real cost.
+        logger.warning(
+            "Retrieval model returned no usable ranking (schema_valid=%s, "
+            "data=%s); raising RetrievalUnavailable",
+            result.schema_valid, type(result.data).__name__,
+        )
+        raise RetrievalUnavailable(
+            getattr(provider, "provider_id", "unknown"),
+            ValueError(f"no usable ranking (schema_valid={result.schema_valid})"))
+
+    indices = result.data.get("ranked", [])
 
     seen: set[int] = set()
     ranked: list[Finding] = []

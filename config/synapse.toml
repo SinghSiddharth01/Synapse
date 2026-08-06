@@ -149,11 +149,12 @@ max_calls_per_tick = 4
 #   env: SYNAPSE_MAX_CONCURRENT_CALLS
 max_concurrent_calls = 1
 
-# The VISIBLE BOUND on the backlog. At or above this many deferred segments the
-# loop stops reading new transcript bytes — backpressure, not shedding. The
-# unread bytes stay on disk behind the follower's offset and are picked up as
-# soon as there is room, so nothing is lost by waiting. 64 is ~8 minutes of
-# backlog at 4/tick / 30s.
+# The VISIBLE BOUND on the backlog, enforced at both ends: the deferred queue is
+# never filled past this many segments, and while work is held back the loop
+# stops reading new transcript bytes — backpressure, not shedding. The unread
+# bytes stay on disk behind the follower's offset and are picked up as soon as
+# there is room, so nothing is lost by waiting. 64 is ~8 minutes of backlog at
+# 4/tick / 30s.
 #   env: SYNAPSE_MAX_DEFERRED_SEGMENTS
 max_deferred_segments = 64
 

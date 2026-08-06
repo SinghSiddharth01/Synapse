@@ -100,29 +100,78 @@ class Segmenter:
     def pending_events(self) -> int:
         return len(self._pending)
 
-    def drain(self, *, flush_incomplete: bool = False) -> list[Segment]:
+    @property
+    def has_undrained_turns(self) -> bool:
+        """Whether a COMPLETE turn is sitting here that `drain()` has not
+        emitted yet — i.e. whether a capped drain held work back.
+
+        The second half of the worker's backlog bound (W3b review). Once
+        `drain(max_segments=...)` can leave complete turns behind, "how deep is
+        the deferred queue" stops being the whole answer to "should I read more
+        transcript?": the queue can sit below its bound while the segmenter is
+        still holding turns the last drain had no room for. Reading more bytes
+        in that state grows `_pending` without bound, which is the same
+        unboundedness the deferred cap just closed, one buffer upstream.
+
+        Cheap enough to ask every tick: `_pending` is one partial turn in the
+        steady state, and the only time it is large is exactly the burst this
+        predicate exists to detect.
+        """
+        return len(self._split_into_turns(self._pending)) > 1
+
+    def drain(self, *, flush_incomplete: bool = False,
+              max_segments: int | None = None) -> list[Segment]:
         """Emit every complete turn as one or more Segments.
 
         `flush_incomplete` emits the trailing turn too — used when the transcript
         has gone quiet, and when shutting down so nothing is left unprocessed.
+
+        `max_segments` stops converting turns once that many Segments have been
+        produced; the turns not yet converted STAY in `_pending` and come out of
+        the next `drain()`. Added 2026-08-06 (W3b review) because
+        `max_deferred_segments` did not bound what it claimed to:
+        `WorkerLoop.tick()` checks `accepting_input()` BEFORE the read, and the
+        read has no cap, so one tick over a long transcript — `--from-start`, or
+        a restart after a gap — could hand the caller an arbitrary number of
+        Segments in a single call and overshoot the bound without limit
+        (measured: 196 segments against a bound of 64). Back-pressure only ever
+        prevented the NEXT read.
+
+        Exact to within one turn: a turn is never split across drains, so the
+        return can exceed `max_segments` by at most the segments one turn
+        produces beyond the first over the line. Splitting a turn would hand
+        synthesis a half-turn as if it were whole, which costs more than the
+        slack does. `flush_incomplete` callers (shutdown) pass no cap on
+        purpose — that path's contract is "nothing stranded".
         """
         if not self._pending:
+            return []
+        if max_segments is not None and max_segments < 1:
             return []
 
         turns = self._split_into_turns(self._pending)
 
         if flush_incomplete:
-            complete, self._pending = turns, []
+            complete, remainder = turns, []
         elif len(turns) <= 1:
             # Only one turn so far, and we cannot yet tell whether it has ended.
             return []
         else:
             complete, remainder = turns[:-1], turns[-1]
-            self._pending = remainder
 
         segments: list[Segment] = []
-        for turn in complete:
+        for i, turn in enumerate(complete):
+            if max_segments is not None and len(segments) >= max_segments:
+                # Out of room. Everything from here on goes back to the front of
+                # `_pending`, ahead of the trailing partial turn, so FIFO order
+                # across ticks is preserved — the same ordering argument
+                # `SeamLimiter.admit` makes: slow is recoverable, scrambled is
+                # not. These events are re-split next drain; splitting is pure.
+                held_back = [e for t in complete[i:] for e in t]
+                self._pending = held_back + remainder
+                return segments
             segments.extend(self._turn_to_segments(turn))
+        self._pending = remainder
         return segments
 
     def _split_into_turns(self, events: list[AgentEvent]) -> list[list[AgentEvent]]:

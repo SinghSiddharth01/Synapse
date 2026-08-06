@@ -415,23 +415,38 @@ class WorkerLoop:
         # deferring here is safe where shedding would not be (decisions/002).
         # Deliberately BEFORE `has_new_data`, not after — the point is not to
         # notice growth and ignore it, it is not to consume it.
-        reading_input = self.limiter.accepting_input(len(self._deferred))
+        #
+        # TWO conditions, and the second is not redundant ⟨W3b review⟩. The
+        # deferred queue alone is the wrong question now that `drain()` is
+        # capped: `admit()` takes `max_calls_per_tick` off the queue every tick,
+        # so a queue filled exactly to the bound is back under it by the time
+        # the next tick asks — on the queue depth alone, backpressure could
+        # never latch and the read gate would be dead code. The honest question
+        # is "is there already work buffered that has not been converted yet",
+        # and after a capped drain that work is sitting in the SEGMENTER, not
+        # the queue. Both buffers must be quiet before more bytes are read.
+        at_bound = not self.limiter.accepting_input(len(self._deferred))
+        holding_turns = self.segmenter.has_undrained_turns
+        reading_input = not (at_bound or holding_turns)
         if not reading_input:
             result.backpressured = True
+            reason = (f"{len(self._deferred)} segment(s) already deferred, at "
+                      f"the bound of {self.limiter.max_deferred_segments}"
+                      if at_bound else
+                      "the segmenter is still holding complete turns the last "
+                      "drain had no room for")
             logger.warning(
-                "Provider-seam BACKPRESSURE: %d segment(s) already deferred, at "
-                "the bound of %d. Not reading new transcript bytes this tick. "
-                "Nothing is dropped — the unread bytes stay on disk behind the "
-                "follower's offset and are picked up as soon as there is room. "
-                "Raise [worker] max_calls_per_tick / max_deferred_segments, or "
-                "accept the lag.",
-                len(self._deferred), self.limiter.max_deferred_segments,
+                "Provider-seam BACKPRESSURE: %s. Not reading new transcript "
+                "bytes this tick. Nothing is dropped — the unread bytes stay on "
+                "disk behind the follower's offset and are picked up as soon as "
+                "there is room. Raise [worker] max_calls_per_tick / "
+                "max_deferred_segments, or accept the lag.",
+                reason,
             )
             if self.stats:
                 self.stats.event(
                     "limiter",
-                    f"backpressure: {len(self._deferred)} deferred at the bound "
-                    f"of {self.limiter.max_deferred_segments}; not reading new input",
+                    f"backpressure: {reason}; not reading new input",
                     deferred=len(self._deferred),
                     bound=self.limiter.max_deferred_segments,
                     backpressured=True,
@@ -482,8 +497,27 @@ class WorkerLoop:
             result.new_events = len(events)
             self.segmenter.add(events)
 
-            self._deferred.extend(
-                self.segmenter.drain(flush_incomplete=result.flushed_incomplete))
+        # THE BACKLOG BOUND, second half. `accepting_input` above decides
+        # whether to read AT ALL; this decides how much of what was read may
+        # become deferred work THIS tick. Both are needed: the check above
+        # happens before the read, and `read_new_lines` returns everything from
+        # the offset to EOF, so without a cap here one `--from-start` attach put
+        # 196 segments behind a bound of 64 and rewrote 128 KB of segment JSON
+        # every tick until it drained (W3b review). What does not fit stays in
+        # the segmenter's pending buffer, which `_persist_state` already writes
+        # next to this one — it is the same durable position in the transcript,
+        # so nothing is lost and nothing is re-read.
+        #
+        # OUTSIDE the `if reading_input` on purpose: a tick that declined to
+        # read is exactly the tick that has turns held back from the last capped
+        # drain, and leaving the drain inside the read branch would mean the
+        # only path that can clear that backlog is the one backpressure has
+        # switched off. That deadlocks — the queue drains, the segmenter never
+        # does, and `has_undrained_turns` stays true forever.
+        headroom = self.limiter.max_deferred_segments - len(self._deferred)
+        self._deferred.extend(
+            self.segmenter.drain(flush_incomplete=result.flushed_incomplete,
+                                 max_segments=headroom))
 
         # THE RATE BOUND. Everything drained joins the deferred queue; the
         # limiter says how much of it may reach the provider this tick. FIFO,
@@ -642,8 +676,11 @@ class WorkerLoop:
         # paces a loop that will get another tick; shutdown will not, and the
         # method's whole contract is "nothing stranded". The CONCURRENCY bound
         # still applies below — that one is about the provider, not the clock.
-        # Whatever is still deferred (because a distillation raised) is
-        # re-persisted at the end and picked up by the next run.
+        # Whatever fails here (because a distillation raised) is collected in
+        # `failed`, put back on `self._deferred` below, re-persisted by
+        # `_persist_state()` at the end, and picked up by the next run. Until
+        # the W3b review this comment described an intention the code did not
+        # implement — see the ⟨CORRECTED⟩ note on the except clause.
         deferred, self._deferred = self._deferred, []
         if deferred:
             logger.info(
@@ -652,6 +689,7 @@ class WorkerLoop:
             )
         segments = deferred + self.segmenter.drain(flush_incomplete=True)
         result.segments = len(segments)
+        failed: list[Segment] = []
         for segment in segments:
             # Same ordering as tick(): triage the Segment as segmented,
             # before compaction can reshape what triage would see.
@@ -662,15 +700,56 @@ class WorkerLoop:
                     result.skipped_triage += 1
                     logger.info("Triage skipped %s (%s)", segment.id, decision.reason)
                     continue
-            segment = self._compact(segment)
+            compacted = self._compact(segment)
             try:
                 findings, stats = await self.limiter.call(
-                    lambda s=segment: self.distiller.distil(s))
+                    lambda s=compacted: self.distiller.distil(s))
                 if not stats.skipped_empty:
                     self.producer.record(findings)
                     result.findings += len(findings)
             except Exception:  # noqa: BLE001
+                # ⟨CORRECTED 2026-08-06, W3b review⟩ Put it BACK. `deferred,
+                # self._deferred = self._deferred, []` above empties the queue
+                # up front, so before this line a raising segment was logged
+                # and then dropped, and `_persist_state()` below wrote `[]`
+                # over deferred-segments.json — losing the WHOLE backlog, up
+                # to `max_deferred_segments` segments, whose transcript bytes
+                # are already behind the follower's offset and will never be
+                # re-read. One provider death during teardown (model server
+                # stopped before the worker, an NPU that dies with work
+                # queued) silently discarded everything queued behind it.
+                # That is precisely the "silent loss that looks like success"
+                # this workstream exists to negate, and it contradicted both
+                # this method's own comment above and decisions/002's "defer,
+                # never shed".
+                #
+                # Re-appending the UNCOMPACTED segment on purpose: compaction
+                # is lossy (it truncates and ranks events to fit a budget), so
+                # re-persisting the compacted view would make the next run's
+                # retry work from evidence this run chose to show rather than
+                # what was actually in the transcript — the same ordering
+                # argument tick() makes for triage-before-compaction.
+                failed.append(segment)
                 logger.exception("Distillation failed for %s during shutdown", segment.id)
+        if failed:
+            # Back on disk via _persist_state below, and LOUD: a backlog that
+            # survives to the next run is the good outcome, but an operator who
+            # thinks shutdown drained everything would stop the model server
+            # and never know these were still owed.
+            self._deferred = failed + self._deferred
+            logger.warning(
+                "Shutdown could not distil %d segment(s) — the provider failed. "
+                "They are NOT dropped: re-queued in %s and picked up by the next "
+                "`synapse-worker run`.",
+                len(failed), self._deferred_path.name,
+            )
+            if self.stats:
+                self.stats.event(
+                    "limiter",
+                    f"shutdown re-queued {len(failed)} segment(s) the provider "
+                    f"could not distil; they survive to the next run",
+                    requeued=len(failed),
+                )
         result.sent, result.pending_send = await self.producer.flush()
         result.held = self.producer.pending_count()[1]
         self._persist_state()

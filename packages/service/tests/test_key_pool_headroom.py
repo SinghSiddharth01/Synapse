@@ -83,7 +83,17 @@ def test_a_provider_with_no_readable_pool_says_nothing(monkeypatch, caplog):
     monkeypatch.setattr("synapse_service.api.SYNTHESIS_KEYS", 10)
     with caplog.at_level(logging.INFO, logger="synapse_service.api"):
         build_app(FakeProvider(scripts=[]), debug=False)
-    assert caplog.records == []
+    # Filtered on the SUBJECT, the way the two tests above already are.
+    # ⟨W3b review⟩ This asserted `caplog.records == []` — that `build_app`
+    # logs nothing AT ALL — so any future INFO line anywhere in startup would
+    # fail this test for a reason that has nothing to do with key pools, and
+    # the next reader would learn to delete the assertion rather than trust it.
+    pool_lines = [r for r in caplog.records
+                  if "SYNAPSE_SYNTHESIS_KEYS" in r.getMessage()
+                  or "key pool" in r.getMessage().lower()]
+    assert pool_lines == [], (
+        "a provider with no readable pool produced a key-pool claim anyway: "
+        f"{[r.getMessage() for r in pool_lines]}")
 
 
 def test_rotation_is_still_the_only_post_path_in_the_provider():

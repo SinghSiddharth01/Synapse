@@ -80,7 +80,27 @@ bounds, all config-driven from `[worker]` in `config/synapse.toml` with
 |---|---|---|---|
 | `max_calls_per_tick` | **4** | the RATE — segments admitted to the provider per tick | one distillation is ~10s on the NPU against a 30s poll interval, so ~3 is what a tick's own period pays for; 4 leaves headroom to catch up after a quiet stretch |
 | `max_concurrent_calls` | **1** | the CEILING, held as a semaphore every worker→provider call in `loop.py` passes through | the shipped distiller arm is one local NPU serving one request at a time; the cloud arms genuinely do serve concurrent calls, which is why it is a number and not a constant |
-| `max_deferred_segments` | **64** | the BACKLOG bound — at it, `tick()` reads no new transcript bytes | ~8 minutes of backlog at 4/tick / 30s: long enough to absorb a burst, short enough that the number is climbing visibly before it is hours |
+| `max_deferred_segments` | **64** | the BACKLOG bound — the deferred queue is never filled past it, and while work is held back `tick()` reads no new transcript bytes | ~8 minutes of backlog at 4/tick / 30s: long enough to absorb a burst, short enough that the number is climbing visibly before it is hours |
+
+⟨**CORRECTED** 2026-08-06, review pass⟩ The third row originally claimed only
+the second half of that, and the code implemented only the second half.
+`accepting_input()` is checked *before* the read and `read_new_lines` returns
+everything from the offset to EOF, so one tick could drain an arbitrary number
+of segments into the queue: measured at **196 segments against a bound of 64**
+on a `--from-start` attach over a 200-turn transcript, rewriting 128 KB of
+segment JSON every tick for the ~25 minutes it took to drain. Backpressure only
+ever prevented the *next* read. The bound is now enforced at both ends —
+`WorkerLoop` caps `Segmenter.drain(max_segments=…)` at the queue's remaining
+headroom, and what does not fit stays in the segmenter, behind the same
+persisted position in the transcript. Exact to within one turn, because a turn
+is never split across ticks.
+
+The read gate moved with it and had to: on queue depth alone it would now be
+dead code, since `admit()` empties `max_calls_per_tick` off the queue every tick
+and a queue filled exactly to its bound is back under the bound by the next
+tick. The loop now asks whether *either* buffer still holds unconverted work
+(`Segmenter.has_undrained_turns`), which is the question the gate was always
+trying to ask.
 
 **Visibility is the decision, not a garnish.** A `WARNING` naming the depth and
 the bound when backpressure engages; an `INFO` on every deferral naming the
@@ -97,6 +117,23 @@ ordering forbids. `deferred-segments.json` is written atomically alongside
 `pending-events.json`, restored on start, and drained **in full** by
 `shutdown()` — the per-tick rate paces a loop that gets another tick, and
 shutdown does not.
+
+⟨**CORRECTED** 2026-08-06, review pass⟩ "Drained in full" was true only when
+every distillation succeeded. `shutdown()` empties `self._deferred` up front,
+and a segment whose `limiter.call` raised was logged and dropped; `_persist_
+state()` then wrote `[]` over `deferred-segments.json`. So one provider death
+during teardown — the model server stopped before the worker, the ordinary
+kill-order in a demo — silently discarded the **entire** backlog, up to
+`max_deferred_segments` segments whose transcript bytes are already behind the
+follower's offset and which nothing will ever re-read. Measured: 4 turns
+queued, provider dies after the first, `deferred = 3` before shutdown and
+`0` in memory, `0` on disk, 1 finding landed. That is the silent-loss-that-
+looks-like-success this workstream exists to negate, arriving inside the fix
+for it. Failed segments are now re-queued and re-persisted, and the re-queue is
+`WARNING`-level: an operator who believes shutdown drained everything is the
+person this file is written for. Pinned by
+`test_shutdown_requeues_what_the_provider_could_not_distil`, which asserts on
+the file on disk and on a fresh loop restoring it.
 
 ### Two decisions carried in the same change
 
@@ -188,3 +225,24 @@ Three commits, newest first:
   that round-robin is dead code. Nothing behavioural depends on it. If you
   revert this one alone, keep the ADR correction: the code it describes is
   unchanged either way, and the sentence is simply false.
+
+⟨**Added** 2026-08-06, review pass⟩ A fourth commit sits on top of those three,
+fixing four defects the review found in them. It is the one to revert **last**
+and the one you almost certainly do not want to revert alone — each hunk
+restores a specific bug, so partial reverts are listed rather than a single SHA:
+
+- *the `/query` double-charge* (`retrieval.py`) — reverting merges the
+  `result.data.get(...)` back inside the provider `try`, so a schema-failing
+  ranking books two ledger entries again and burns 4 of the key's 20
+  requests/hour for one query. Pinned by
+  `test_an_unparseable_ranking_is_charged_exactly_once`.
+- *the shutdown re-queue* (`loop.py`) — reverting drops the `failed` list, and
+  a provider that dies during teardown discards the whole backlog again.
+- *the drain cap* (`loop.py` + `segmenter.py`) — reverting restores the
+  overshoot (196 against a bound of 64). If you revert this hunk you **must**
+  also revert the `has_undrained_turns` half of the read gate in `tick()`,
+  or backpressure engages on a condition nothing clears. The two are one
+  change; `max_segments=None` at the `drain()` call site is the smaller
+  version if you only want the old sizing back.
+- *the docstring/table corrections* — inert. Reverting only restores claims the
+  code does not honour.
