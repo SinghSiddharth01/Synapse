@@ -140,7 +140,13 @@ timeout_s = 300.0
 # re-budgets automatically instead of leaving a stale number here.
 [capability."qualcomm/Qwen3-4B-Instruct-2507:W4A16"]
 usable_context = 4096          # measured 2026-08-04; hard ceiling, no --nctx on qairt
-prefill_toks_per_sec = 250.0   # PROVISIONAL — needs a seed-pinned measurement
+# MEASURED 2026-08-06 by the slope of latency against prompt length (7 lengths,
+# 92→1709 tokens, max_tokens=1, 5 repeats, least-squares): 0.9604 ms/token,
+# intercept 0.076 s, R²=0.9974. Replaces a PROVISIONAL 250.0 that was 4.2x low.
+# Changes no segment the system produces — this arm is context-bound, so the
+# budget is min(2787, 31240) = 2787 either way. See
+# docs/2026-08-06-npu-efficiency-evidence.md §3.
+prefill_toks_per_sec = 1041.3
 response_reserve = 500
 notes = "QAIRT/W4A16, NPU-exclusive, Snapdragon X Elite X1E80100."
 

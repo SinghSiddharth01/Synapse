@@ -111,18 +111,36 @@ class CapabilityRecord:
 # predicted exactly this ("qairt bundles are often 4K regardless of what the
 # model claims on paper"); it is now confirmed.
 #
-# prefill_toks_per_sec: PROVISIONAL. The only timed call so far included model
-# load, so it is not a clean number. Task B.6 must replace this with a
-# seed-pinned measurement before any latency claim is made.
+# prefill_toks_per_sec: MEASURED 2026-08-06, replacing the 250.0 that stood here
+# as PROVISIONAL ("the only timed call so far included model load, so it is not a
+# clean number"). A single timed call cannot yield a prefill rate at all, because
+# it also contains model load, scheduling and a decode step. So the number below
+# is a SLOPE, not a timing: seven prompt lengths from 92 to 1709 tokens, max_tokens
+# =1 so decode contributes exactly one token at every length, five repeats each,
+# median per length, least-squares fit of latency against prompt length. Every
+# per-call constant lands in the intercept (0.076 s) and cancels out of the slope
+# (0.9604 ms/token). R² = 0.9974 across a 19x range.
+#
+# The old value was 4.2x too low. It does NOT change any segment the system
+# produces: segment_budget takes min(usable_context - overhead - reserve,
+# prefill_toks_per_sec * max_seconds_per_call) = min(2787, 31 240) = 2787, and the
+# old value gave min(2787, 7500) = 2787 as well. This arm has always been
+# context-bound, never prefill-bound. Correcting it makes the record honest and
+# retires the last unmeasured input to the budget derivation.
+#
+# Worth knowing alongside it: measured decode on the same arm is ~14-17 tok/s, so
+# prefill is roughly 75x faster than decode. Distillation is decode-bound, and the
+# segment budget -- whose whole purpose is to bound prefill time -- is bounding the
+# cheap half. See docs/2026-08-06-npu-efficiency-evidence.md.
 NPU_QWEN3_4B_INSTRUCT_2507 = CapabilityRecord(
     model="qualcomm/Qwen3-4B-Instruct-2507:W4A16",
     usable_context=4096,
-    prefill_toks_per_sec=250.0,
+    prefill_toks_per_sec=1041.3,
     response_reserve=500,
     notes=(
         "QAIRT/W4A16, NPU-exclusive. usable_context measured 2026-08-04 and is a "
-        "hard ceiling (no --nctx on the qairt path). prefill_toks_per_sec is "
-        "PROVISIONAL — needs a seed-pinned measurement."
+        "hard ceiling (no --nctx on the qairt path). prefill_toks_per_sec measured "
+        "2026-08-06 by latency-vs-length slope, R²=0.9974 — see the comment above."
     ),
 )
 
