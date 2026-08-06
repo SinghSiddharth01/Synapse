@@ -15,10 +15,11 @@ conversation, the watermark (`store.last_seen`, not this module) by the person.
 """
 from datetime import datetime, timezone
 
+import pytest
 from synapse_contracts import Attribution, Finding, SessionContext
 from synapse_providers import FakeProvider
 
-from synapse_service.retrieval import query_findings
+from synapse_service.retrieval import RetrievalUnavailable, query_findings
 
 TS = datetime(2026, 8, 4, tzinfo=timezone.utc)
 CTX = SessionContext(shared_id="sh-1", purpose="fec decode", working_memory="wm")
@@ -148,6 +149,67 @@ async def test_a_finding_with_zero_attributions_is_never_suppressed():
     ranked = await query_findings(fake, context=CTX, candidates=[orphan],
                                   query="anything", asking_contributor="anyone")
     assert [f.id for f in ranked] == ["f-orphan"]
+
+
+class _DeadProvider(FakeProvider):
+    """A model seam that is up enough to be called and not up enough to
+    answer — the shape of the GenieX idle death (W1): the process is alive,
+    the socket accepts, and the request never completes."""
+
+    provider_id = "npu"
+
+    def __init__(self) -> None:
+        super().__init__(scripts=[])
+
+    async def complete(self, messages, response_schema=None):
+        raise TimeoutError("read timed out after 30s")
+
+
+async def test_a_dead_model_raises_instead_of_returning_an_empty_list():
+    """⟨decision 008⟩ THE pin for the contract change. `[]` is what a model
+    returns when it honestly ranked nothing, so returning it on failure made
+    an outage and an answer the same value — and the orchestrator rendered
+    "Team memory has nothing relevant to that. (Checked — not skipped.)" over
+    a backend that was not answering at all.
+
+    The candidate list is non-empty on purpose: an empty one short-circuits
+    before the model and would pass this test for the wrong reason."""
+    candidates = [_f("f-1", "timing window 40ms", ["aditya"])]
+
+    with pytest.raises(RetrievalUnavailable) as raised:
+        await query_findings(_DeadProvider(), context=CTX, candidates=candidates,
+                             query="what do we know about timing?",
+                             asking_contributor="siddsing")
+
+    # The two fields the 503 body is built from — a message alone would leave
+    # the route guessing which backend to name.
+    assert raised.value.provider_id == "npu"
+    assert raised.value.cause_name == "TimeoutError"
+    assert "npu" in str(raised.value)
+    # Chained, so `logger.exception` and any traceback keep the real cause.
+    assert isinstance(raised.value.__cause__, TimeoutError)
+
+
+async def test_a_model_that_ranked_nothing_still_returns_an_empty_list():
+    """The other half of the contract, and the reason it is a TYPE and not a
+    flag: "the model read everything and none of it was relevant" is a real
+    answer and must stay a plain `[]` with a 200 behind it."""
+    candidates = [_f("f-1", "unrelated", ["aditya"])]
+    fake = FakeProvider(scripts=[{"ranked": []}])
+    assert await query_findings(fake, context=CTX, candidates=candidates,
+                                query="anything at all",
+                                asking_contributor="siddsing") == []
+
+
+async def test_everything_suppressed_is_an_empty_list_not_an_outage():
+    """The early return above the model call. Every candidate is the asker's
+    own, so there is nothing to rank; that is an answer, not a failure, and it
+    must not raise even though no model was consulted."""
+    fake = FakeProvider(scripts=[{"ranked": [0]}])
+    assert await query_findings(fake, context=CTX,
+                                candidates=[_f("f-mine", "mine", ["me"])],
+                                query="anything", asking_contributor="me") == []
+    assert fake.calls == 0
 
 
 async def test_bogus_indices_are_dropped():

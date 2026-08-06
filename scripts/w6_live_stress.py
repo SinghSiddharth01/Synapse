@@ -71,6 +71,7 @@ import json
 import os
 import re
 import sys
+import zlib
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -225,6 +226,30 @@ _PARAGRAPHS = [
 ]
 
 
+def seed_for(label: str) -> int:
+    """A per-label seed that is the same in every process, on every machine.
+
+    `hash(label) % 97` was not, and that is what made section 4 of
+    `docs/overnight/w6-live-stress.md` unreproducible. `str.__hash__` is salted
+    per interpreter (PYTHONHASHSEED), so two runs of `--offline` generated
+    DIFFERENT prose from the same label, and therefore different segment
+    boundaries and different headroom -- while the doc said "reproduce with"
+    and printed one run's numbers as measurements. Seven runs put
+    `one-over-seam` worst headroom at 43, 45, 43, 46, 51, 51 and 43; the
+    committed table said 36.
+
+    `zlib.crc32` is a checksum rather than a hash-table hash: no salt, no
+    per-process seed, specified output. The label is the only input, so the
+    same label is the same prose forever. The `% 97` is unchanged and does
+    nothing but pick a starting paragraph.
+
+    Not `random.Random(label)` even though it is also deterministic: `prose`
+    takes an integer offset into _PARAGRAPHS, and routing a string through a
+    PRNG to get one would be a longer way to say crc32.
+    """
+    return zlib.crc32(label.encode("utf-8")) % 97
+
+
 def prose(target_chars: int, seed: int = 0) -> str:
     """Realistic engineering-transcript prose of exactly `target_chars`.
 
@@ -374,7 +399,7 @@ async def main(argv: list[str]) -> int:
                 event(prose(700, seed=29)),
             ])
         else:
-            seg.add([event(prose(size, seed=hash(label) % 97))])
+            seg.add([event(prose(size, seed=seed_for(label)))])
         original = "".join(e.content for e in seg._pending)
 
         segments = seg.drain(flush_incomplete=True)
@@ -476,7 +501,7 @@ async def main(argv: list[str]) -> int:
                 continue
             seg = Segmenter(budget_tokens=budget_tokens,
                             agent_session_id="w6-live-stress")
-            seg.add([event(prose(rec.chars, seed=hash(rec.label) % 97))])
+            seg.add([event(prose(rec.chars, seed=seed_for(rec.label)))])
             target = seg.drain(flush_incomplete=True)[0]
             findings, stats = await distiller.distil(target)
             rec.actual_input = stats.input_tokens

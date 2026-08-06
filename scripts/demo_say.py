@@ -135,8 +135,35 @@ def main(argv: list[str] | None = None) -> int:
                              f"Running: {', '.join(sessions) or 'nobody'}")
         asker = sessions[args.who] if args.who else "as-observer"
         whose = f"as {args.who}" if args.who else "as an outsider who contributed nothing"
-        answer = http("POST", f"{SERVICE_URL}/v1/sessions/{shared_id}/query",
-                      {"query": args.ask, "agent_session": asker})
+        try:
+            answer = http("POST", f"{SERVICE_URL}/v1/sessions/{shared_id}/query",
+                          {"query": args.ask, "agent_session": asker})
+        except urllib.error.HTTPError as exc:
+            # ⟨decision 008⟩ /query answers 503 `retrieval_unavailable` when the
+            # ranking model is not answering. `urlopen` raises on that, so this
+            # script — the one a presenter drives BY HAND, in front of people —
+            # used to end the sentence in a urllib traceback. The outage is the
+            # honest result and it deserves to read like one; the traceback
+            # reads like the demo tool is broken.
+            detail = {}
+            try:
+                detail = json.loads(exc.read() or b"{}")
+            except (ValueError, OSError):
+                pass
+            if exc.code == 503 and detail.get("error") == "retrieval_unavailable":
+                print(f"\n  asked {whose}: {args.ask!r}")
+                print(f"  SHARED MEMORY IS DOWN, NOT EMPTY — its model backend "
+                      f"({detail.get('provider', 'unknown')}) is not answering, "
+                      f"so the findings are all still there and cannot be "
+                      f"searched.")
+                print(f"  This is the loud failure working: before decision 008 "
+                      f"this same outage came back as an empty list and a 200.")
+                print(f"  If serve_local.py is supervising the seam it restarts "
+                      f"within ~2 minutes — see .synapse/logs/supervisor.log.")
+                return 1
+            raise SystemExit(
+                f"the service answered HTTP {exc.code} to that query "
+                f"({detail or 'no body'}).") from None
         findings = answer.get("findings") or []
         print(f"\n  asked {whose}: {args.ask!r}")
         print(f"  {len(findings)} finding(s) came back")
