@@ -54,6 +54,40 @@ So there are now two, and they are deliberately different sizes:
 Both fail open, and the second one harder than the first: a summary that
 cannot be fetched must never turn a join that WORKED into a join that looks
 like it failed.
+
+#### Correction (2026-08-06, adversarial review finding #1) — the DOCUMENTED
+#### join never calls `join_session`
+
+The paragraph above fixed the in-conversation join and missed the join the
+docs and the demo actually use. `docs/JOIN.md` step 3 has a teammate run
+`scripts/serve_local.py --service-url --shared-id --contributor`, which
+registers membership itself (`POST /v1/sessions/{sid}/members`) and writes
+`bindings/claude-code.json` itself, THEN starts the orchestrator. Step 4 then
+points Claude Code at an orchestrator that is ALREADY BOUND — so
+`mcp__synapse__join_session` is never called, the tool result that carries the
+summary is never produced, and the awareness moment does not happen. The
+awareness pack (`packs/claude-code/skills/synapse-shared-memory/SKILL.md`)
+says as much in its own words: it assumes the machine "joined before this
+conversation connected".
+
+On that path `instructions` is the ONLY surface the joining agent is handed,
+so that is where the body has to go. `compose_instructions` is what the CLI
+and the refresher now install: `build_briefing`'s headline, composed exactly as
+before and hard-capped exactly as before, plus the same `/arrival` body —
+separately fetched, separately capped, fail-open on its own, and introduced by
+a directive that says to relay it to the user. `build_briefing` itself is
+untouched, deliberately: it is the piece whose fail-open behaviour is pinned by
+a dozen tests, and a summary that cannot be fetched must not be able to change
+what it returns. The total is bounded by `_MAX_INSTRUCTIONS_CHARS`.
+
+That is a deliberate softening of "headline-only, finding bodies never appear"
+and it is worth stating why rather than quietly reversing it. The rule existed
+for CONTEXT ECONOMY — bodies grow with session length, headlines do not. The
+body appended here does NOT grow with session length: the service composes it
+to a fixed budget (`arrival.MAX_ARRIVAL_CHARS`) whether the session holds six
+findings or six hundred, which is the whole of what W5 built. The economy
+argument survives; what does not survive is a briefing that tells an agent a
+memory exists and gives it nothing to say about it.
 """
 
 from __future__ import annotations
@@ -299,26 +333,33 @@ _SUMMARY_PREAMBLE = (
 )
 
 
-async def fetch_arrival_summary(service_url: str, shared_id: str, *,
-                                contributor: str,
-                                agent_session: str | None = None,
-                                timeout: float = 10.0,
-                                transport: httpx.AsyncBaseTransport | None = None
-                                ) -> str | None:
-    """The two-section summary for a joining conversation, or None.
+async def _arrival_text(service_url: str, shared_id: str, *, contributor: str,
+                        agent_session: str | None, timeout: float,
+                        transport: httpx.AsyncBaseTransport | None) -> str | None:
+    """The service's rendered arrival body, or None on ANY failure.
 
-    None on ANY failure, and that is the entire error contract: this is called
-    from inside `join_session` AFTER the join has already succeeded, so every
-    outcome except "here is the summary" must leave the join reporting itself
-    as the success it was. A service that is too old to have `/arrival`, one
-    that is down, one that answers something unparseable — all None, all
-    invisible to the user beyond a join result that says a little less.
+    None is the entire error contract, and it is shared by both callers below
+    for the same reason: neither of them is asking a question whose failure the
+    user should hear about. `join_session` has already succeeded by the time it
+    calls this, and the connect-time briefing has already composed a headline
+    that is true. A service too old to have `/arrival`, one that is down, one
+    that answers something unparseable — all None, all invisible beyond a
+    surface that says a little less.
 
     Both identity fields are sent for the same reason `build_briefing` sends
     both: `contributor` keys the watermark (what is new to this PERSON) and
     `agent_session` keys suppression (what is already in this CONVERSATION's
     context window) — decisions/001. A service that predates the split reads
     whichever it understands (`api._asking_contributor`).
+
+    Capped here as well as at the service, because "the service already bounds
+    it" is a claim about a process on somebody else's laptop. The cap sits
+    ABOVE `arrival.MAX_ARRIVAL_CHARS` on purpose: truncating a body the service
+    composed to fit would cut its NEW SINCE section off the end, which is the
+    defect the service side just spent a rewrite removing (arrival.py's note on
+    `MAX_ARRIVAL_CHARS`). Reaching this cap means the peer is not the service
+    this was built against, and cutting from the end is then the least-wrong
+    thing left.
     """
     url = f"{service_url.rstrip('/')}/v1/sessions/{shared_id}/arrival"
     params = {"contributor": contributor}
@@ -340,7 +381,88 @@ async def fetch_arrival_summary(service_url: str, shared_id: str, *,
         return None
     if len(text) > _MAX_SUMMARY_CHARS:
         text = text[: _MAX_SUMMARY_CHARS - 1].rstrip() + "…"
-    return _SUMMARY_PREAMBLE + text
+    return text
+
+
+async def fetch_arrival_summary(service_url: str, shared_id: str, *,
+                                contributor: str,
+                                agent_session: str | None = None,
+                                timeout: float = 10.0,
+                                transport: httpx.AsyncBaseTransport | None = None
+                                ) -> str | None:
+    """The two-section summary for a joining conversation, or None."""
+    text = await _arrival_text(service_url, shared_id, contributor=contributor,
+                               agent_session=agent_session, timeout=timeout,
+                               transport=transport)
+    return None if text is None else _SUMMARY_PREAMBLE + text
+
+
+# ---------------------------------------------------------------------------
+# The CONNECT-time body (W5, adversarial review finding #1)
+# ---------------------------------------------------------------------------
+
+# Said differently from `_SUMMARY_PREAMBLE` because the moment is different. The
+# join-time preamble arrives inside a tool result the agent asked for, mid
+# conversation, and can say "then say you are ready". This one arrives in
+# `instructions`, BEFORE the user has typed anything — there is no turn to speak
+# into yet — so it asks for the summary in the agent's first reply instead.
+_CONNECT_PREAMBLE = (
+    "\n\nHere is what this session already holds. In your FIRST reply in this "
+    "conversation, before anything else, summarise it for the user in your own "
+    "words in two or three sentences — what the team is working on, what has "
+    "already been established, and anything new since you last looked — then "
+    "carry on with whatever they asked. Do not paste it verbatim, and do not "
+    "keep it to yourself: the user cannot see this text, so a machine that "
+    "joined a shared memory and never mentions it looks to them like nothing "
+    "happened.\n\n")
+
+# The whole `instructions` string: the capped headline, the fixed preamble, and
+# the capped arrival body. Stated as its own constant rather than left implicit
+# so that "how big can this surface get" has one answer somebody can read, and
+# asserted in test_tools.py against a service returning a body far larger than
+# any it is capable of composing.
+_MAX_INSTRUCTIONS_CHARS = (_MAX_BRIEFING_CHARS + len(_CONNECT_PREAMBLE)
+                           + _MAX_SUMMARY_CHARS)
+
+
+async def compose_instructions(binding: LocalBinding | None, service_url: str, *,
+                               timeout: float = 2.0,
+                               transport: httpx.AsyncBaseTransport | None = None
+                               ) -> str:
+    """What actually goes into MCP `instructions`: the headline, then the body.
+
+    ⟨ADDED 2026-08-06, adversarial review finding #1⟩ The join beat did not fire
+    on the documented path. `docs/JOIN.md` step 3 has the teammate run
+    `scripts/serve_local.py`, which registers membership and writes the binding
+    ITSELF and then starts the orchestrator; step 4 points Claude Code at an
+    orchestrator that is already bound, so `join_session` — the only place the
+    arrival body was delivered — is never called. The teammate's agent connected
+    knowing the counts and nothing it could say back.
+
+    So the body is delivered on the surface that path DOES reach. Two things are
+    deliberately not merged into `build_briefing`: the fetch (a second network
+    hop, which must not be able to change what the headline says) and the cap
+    (the headline stays headline-sized whatever the body does).
+
+    NOT appended when the headline is not a live briefing. `_DEFAULT_INSTRUCTIONS`
+    means no binding or a briefing that failed open, and `_ended_briefing` means
+    a closed session whose read routes all answer 409 — in both cases there is
+    no memory to summarise, and appending a stale or empty body would contradict
+    the sentence just above it.
+    """
+    headline = await build_briefing(binding, service_url, timeout=timeout,
+                                    transport=transport)
+    if binding is None or headline == _DEFAULT_INSTRUCTIONS:
+        return headline
+    if headline == _ended_briefing(binding):
+        return headline
+    body = await _arrival_text(service_url, binding.shared_id,
+                               contributor=binding.contributor,
+                               agent_session=binding.agent_session_id,
+                               timeout=timeout, transport=transport)
+    if body is None:
+        return headline
+    return headline + _CONNECT_PREAMBLE + body
 
 
 # ---------------------------------------------------------------------------
@@ -380,8 +502,17 @@ async def refresh_briefing(server, resolve_binding, service_url: str, *,
 
     `resolve_binding` is called here, not captured: a `join` that happened
     after boot has to be able to change who this server says it is.
+
+    `compose_instructions`, not `build_briefing` (finding #1): the refresher is
+    what keeps `instructions` true for agents that connect LATER, and since the
+    arrival body is now part of `instructions`, refreshing only the headline
+    would hand a teammate who connects an hour in a body composed at boot. The
+    extra hop is a cached, model-free read service-side (decisions/004), and it
+    fails open independently — a body that cannot be fetched leaves the headline
+    exactly where it was rather than reverting it.
     """
-    text = await build_briefing(resolve_binding(), service_url, transport=transport)
+    text = await compose_instructions(resolve_binding(), service_url,
+                                      transport=transport)
     # The low-level server is the one place this lives: it is what
     # `create_initialization_options()` reads for each new connection, and
     # `FastMCP.instructions` is a read-only property delegating to it, so the

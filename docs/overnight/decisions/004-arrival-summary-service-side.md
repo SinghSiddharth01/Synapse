@@ -148,8 +148,10 @@ which is also what someone returning to an unmoved session gets, and only the
 first of those may be told "everything here is new to you".
 
 **Cache invalidation is structural, not hooked.** The key contains the
-session's content fingerprint — `(log entry count, memory_version)` — so a
-cached entry is only reachable while nothing has happened to the session. The
+session's content fingerprint — `(log entry count, memory_version, members)` —
+so a cached entry is only reachable while nothing has happened to the session.
+⟨The member tuple was added by the review below; the first two were not enough,
+because membership is in neither the log nor the version.⟩ The
 rejected alternative was an explicit `invalidate(sid)` called from
 `push_findings` and `synthesize`: correct today, and wrong the first time a
 route mutates a session and forgets to call it. That is the failure mode
@@ -172,8 +174,54 @@ text was.
 
 Every option above would have failed identically had it only improved the
 briefing string. The decision that matters as much as service-vs-model is
-**where the summary is delivered**: in the tool result, which is the one surface
-an agent has just been handed and will speak from.
+**where the summary is delivered**: on the surface the arriving agent is
+actually handed, with a directive to speak from it. There turned out to be two
+such surfaces, not one — see the amendment below.
+
+## Amendments (2026-08-06, adversarial review)
+
+The decision above stands unchanged — service-side, no model call — but the
+review found the delivery argument in the section directly above this one was
+still half wrong, and three defects underneath it. All five are fixed; none of
+them changed the option chosen.
+
+**The delivery surface was still the wrong one.** "In the tool result, which is
+the one surface an agent has just been handed" is true of the in-conversation
+join and false of the join the docs actually describe. `docs/JOIN.md` step 3
+has the teammate run `scripts/serve_local.py`, which POSTs the member and writes
+`bindings/claude-code.json` itself, then starts the orchestrator; step 4 points
+Claude Code at an orchestrator that is *already bound*, so `join_session` — the
+only place the body was delivered — is never called. The awareness pack says so
+in its own words ("joined before this conversation connected"). So there are now
+two delivery surfaces, not one: `join_session`'s result for the
+in-conversation join, and MCP `instructions` for the pre-bound one, both
+carrying the same `/arrival` body and both carrying a directive to relay it.
+`briefing.compose_instructions` is the second; `build_briefing` is untouched
+beneath it, so a body that cannot be fetched cannot downgrade a headline that
+was already true.
+
+**The global cap was eating the half W5 exists to add.** The per-part caps sum
+to about twice `MAX_ARRIVAL_CHARS`, and `render` truncated the concatenation
+from the END — so the growable content sat in the middle and the NEW SINCE
+section paid for all of it. At the bounds the heading itself disappeared. The
+sections are now composed against budgets: ACCUMULATED's fixed part first
+against what is left over `MIN_NEW_SECTION_CHARS`, then the whole new section,
+then ACCUMULATED's bullets into the remainder — dropping whole bullets with an
+explicit "and N more" rather than cutting a sentence in half.
+
+**The watermark was taken after the model call.** `/query` computed
+`mark_seen`'s position once ranking returned, and ranking is a model call
+docs/FLOW.md measures at 12.6–52.8 seconds. Everything a teammate pushed inside
+that window was marked seen by an asker who was never shown it — and because
+`seen_count` is an arrival index rather than a self-correcting version delta,
+those findings were dropped from that person's NEW SINCE slice permanently. The
+position is now snapshotted before the await (`store.read_position`,
+`mark_seen(at=)`).
+
+**A rejoiner was told the wrong team.** Covered in the fingerprint note above.
+
+**Two doc surfaces quoted a cap that had moved.** Both now name the constant
+rather than a number.
 
 ## How to undo it
 

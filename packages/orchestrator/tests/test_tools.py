@@ -7,9 +7,12 @@ from synapse_providers import FakeProvider
 
 from synapse_orchestrator.briefing import (
     _MAX_BRIEFING_CHARS,
+    _MAX_INSTRUCTIONS_CHARS,
     _MAX_SUMMARY_CHARS,
     _SUMMARY_PREAMBLE,
+    _ended_briefing,
     build_briefing,
+    compose_instructions,
     fetch_arrival_summary,
 )
 from synapse_orchestrator.relay import Relay
@@ -350,6 +353,128 @@ async def test_the_arrival_summary_is_capped_by_the_orchestrator_too():
                                        transport=httpx.MockTransport(handler))
     assert len(text) <= len(_SUMMARY_PREAMBLE) + _MAX_SUMMARY_CHARS
     assert text.endswith("…")
+
+
+# ── W5 finding #1: the CONNECT-time body, for the join nobody calls ─────────
+
+
+def _watermark_and_arrival(arrival: httpx.Response):
+    """A service that answers both hops `compose_instructions` makes."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/arrival"):
+            return arrival
+        return httpx.Response(200, json={"version": 3, "new_since": 1,
+                                         "by_type": {"learning": 4}, "conflicts": 0,
+                                         "purpose": "ship the FEC decoder",
+                                         "members": ["siddsing", "aditya"]})
+    return httpx.MockTransport(handler)
+
+
+async def test_the_connect_time_instructions_carry_the_arrival_body():
+    """The join beat has to fire on the path the DOCS actually use.
+
+    `docs/JOIN.md` step 3 runs `scripts/serve_local.py`, which POSTs the member
+    itself and writes `bindings/claude-code.json` itself before starting the
+    orchestrator; step 4 then points Claude Code at an orchestrator that is
+    ALREADY BOUND. `mcp__synapse__join_session` — the only place the arrival
+    body was delivered — is never called on that path, and the awareness pack
+    says as much in its own words ("joined before this conversation
+    connected"). So a teammate following the docs verbatim got counts, no
+    content, and no instruction to say anything: the storyboard's "I have this
+    context, ready to go" (docs/demo-transcripts.txt:139-154) did not happen.
+
+    Three things are asserted, because the beat needs all three: the headline
+    still composes (the pre-existing surface is not replaced), the BODY is
+    there (content, not counts), and the DIRECTIVE to relay it is there — a
+    body the agent reads and does not mention is indistinguishable to the user
+    from no join at all."""
+    transport = _watermark_and_arrival(httpx.Response(200, json={
+        "text": "ACCUMULATED — 4 finding(s).\n- [decision] the ring buffer stays at 8"
+                " — akhil\n\nNEW SINCE YOU LAST LOOKED — 1 finding(s) you have not seen"}))
+
+    text = await compose_instructions(BINDING, "http://svc", transport=transport)
+
+    assert SENTINEL in text                                   # the headline survives
+    assert "ship the FEC decoder" in text
+    assert "the ring buffer stays at 8" in text               # the BODY, not counts
+    assert "NEW SINCE YOU LAST LOOKED" in text
+    assert "summarise it for the user" in text                # the directive
+    assert text.index(SENTINEL) < text.index("ACCUMULATED")   # headline first
+
+
+async def test_the_connect_time_instructions_send_both_identities():
+    """Same reason `fetch_arrival_summary` does (decisions/001), and this path
+    has to get it from the BINDING rather than from tool arguments: the
+    contributor decides what is new to this person, the agent session decides
+    what this conversation has already seen."""
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/arrival"):
+            seen.update(request.url.params)
+            return httpx.Response(200, json={"text": "ACCUMULATED — nothing yet."})
+        return httpx.Response(200, json={"version": 1, "new_since": 0,
+                                         "by_type": {}, "conflicts": 0})
+
+    await compose_instructions(BINDING, "http://svc",
+                               transport=httpx.MockTransport(handler))
+
+    assert seen == {"contributor": "aditya", "agent_session": "as-1"}
+
+
+@pytest.mark.parametrize("arrival", [
+    httpx.Response(404, json={"error": "unknown route"}),   # a service that predates W5
+    httpx.Response(500, text="boom"),
+    httpx.Response(200, json={"text": ""}),
+], ids=["404", "500", "empty_text"])
+async def test_a_summary_that_cannot_be_fetched_leaves_the_headline_intact(arrival):
+    """The second hop fails open INDEPENDENTLY of the first. A briefing that
+    was true a moment ago must not be downgraded to the unbound default because
+    an extra request failed — that would make the fix for finding #1 a
+    regression on every deployment whose service has not been upgraded yet."""
+    text = await compose_instructions(BINDING, "http://svc",
+                                      transport=_watermark_and_arrival(arrival))
+
+    assert text != _DEFAULT_INSTRUCTIONS
+    assert SENTINEL in text and "ship the FEC decoder" in text
+    assert "summarise it for the user" not in text
+
+
+async def test_nothing_is_appended_when_there_is_no_live_session_to_summarise():
+    """Two headlines are not briefings about a readable memory: the unbound
+    default, and an ENDED session whose read routes all answer 409. Appending a
+    body to either would contradict the sentence directly above it."""
+    unbound = await compose_instructions(
+        None, "http://svc",
+        transport=_watermark_and_arrival(httpx.Response(200, json={"text": "boo"})))
+    assert unbound == _DEFAULT_INSTRUCTIONS
+
+    def ended(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/arrival"):
+            return httpx.Response(200, json={"text": "a summary of a closed session"})
+        return httpx.Response(409, json={"error": "session_ended"})
+
+    text = await compose_instructions(BINDING, "http://svc",
+                                      transport=httpx.MockTransport(ended))
+    assert text == _ended_briefing(BINDING)
+    assert "a summary of a closed session" not in text
+
+
+async def test_instructions_are_bounded_however_large_the_service_body_is():
+    """`instructions` is the highest-trust text surface a connecting agent
+    sees, and it now carries service-composed prose. The service bounds that
+    prose to 2800 characters; this asserts the orchestrator does not TRUST it
+    to. The standalone bound on the constant is what a bare `<=` would lose —
+    a cap raised to some enormous number satisfies every other assertion here
+    while quietly turning a briefing into a document."""
+    assert _MAX_INSTRUCTIONS_CHARS <= 6000, "instructions is a briefing, not a transcript"
+
+    text = await compose_instructions(
+        BINDING, "http://svc",
+        transport=_watermark_and_arrival(httpx.Response(200, json={"text": "x" * 50_000})))
+
+    assert len(text) <= _MAX_INSTRUCTIONS_CHARS
+    assert SENTINEL in text
 
 
 async def test_briefing_renders_without_topics_when_the_service_predates_them():
