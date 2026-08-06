@@ -133,8 +133,14 @@ async def test_a_rejoin_from_a_new_conversation_reports_only_what_landed_since()
     if the "new since" slice ever re-keys onto the conversation, `first_look`
     comes back True here and the whole backlog is announced as news, which is
     exactly the defect `store.last_seen`'s contributor key exists to prevent."""
-    async with _client(FakeProvider(scripts=[MERGE_NOOP, MERGE_NOOP,
-                                             {"ranked": [0, 1]}])) as client:
+    # Scripts are consumed IN CALL ORDER regardless of what each one is for:
+    # push (merge), query (retrieval), push (merge). Getting that order wrong
+    # feeds a merge verdict to the retriever, which answers `[]` and looks like
+    # "nothing relevant" — and since decision 008 an EXHAUSTED script raises
+    # rather than degrading, so an under-scripted fixture now fails loudly here
+    # instead of quietly skipping the `mark_seen` this test depends on.
+    async with _client(FakeProvider(scripts=[MERGE_NOOP, {"ranked": [0, 1]},
+                                             MERGE_NOOP])) as client:
         sid = await _session(client)
         await client.post(f"/v1/sessions/{sid}/findings", json={"findings": [
             _finding_json("f-old-1", text="frames drop past the 40 ms window"),
@@ -198,7 +204,8 @@ async def test_reading_the_arrival_summary_does_not_move_the_watermark():
     twice. If fetching it marked the asker seen, the FIRST call would erase the
     "new since" the second one exists to report -- and would move the watermark
     of somebody who has read nothing."""
-    async with _client(FakeProvider(scripts=[MERGE_NOOP])) as client:
+    async with _client(FakeProvider(scripts=[MERGE_NOOP, {"ranked": [0]},
+                                             MERGE_NOOP])) as client:
         sid = await _session(client)
         await client.post(f"/v1/sessions/{sid}/findings",
                           json={"findings": [_finding_json("f-1")]})
