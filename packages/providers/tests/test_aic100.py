@@ -210,10 +210,10 @@ async def test_schema_prompt_shows_an_example_instance_never_the_schema():
 
 
 async def test_model_env_override(monkeypatch):
-    monkeypatch.setenv("INFERENCE_CLOUD_MODEL", "Llama-3.3-70B")
-    assert AIC100Provider(base_url="https://x", api_key="k").model == "Llama-3.3-70B"
-    monkeypatch.delenv("INFERENCE_CLOUD_MODEL")
+    monkeypatch.setenv("INFERENCE_CLOUD_MODEL", "Llama-3.1-8B")
     assert AIC100Provider(base_url="https://x", api_key="k").model == "Llama-3.1-8B"
+    monkeypatch.delenv("INFERENCE_CLOUD_MODEL")
+    assert AIC100Provider(base_url="https://x", api_key="k").model == "Llama-3.3-70B"
 
 
 async def test_key_pool_rotates_on_429(monkeypatch):

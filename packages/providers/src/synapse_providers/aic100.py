@@ -26,7 +26,12 @@ from synapse_providers.base import ModelProvider, ProviderCapabilities
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_BASE_URL = "https://aisuite.cirrascale.com/apis/v2"
+# The Indonesian instance, not aisuite.cirrascale.com. Probed 2026-08-05: the
+# team key now gets `500 Invalid API key, no user found` from the .com host and
+# a clean 200 from this one. The .com value shipped as the default since
+# 2026-08-03, so anything that did not set INFERENCE_CLOUD_BASE_URL has been
+# pointed at a host we cannot authenticate against.
+DEFAULT_BASE_URL = "https://aisuite-indonesia.cirrascale.com/apis/v2"
 
 
 def extract_first_json_object(text: str) -> dict[str, Any] | None:
@@ -134,7 +139,16 @@ def _example_from_schema(schema: dict[str, Any]) -> Any:
 class AIC100Provider(ModelProvider):
     provider_id = "aic100"
 
-    def __init__(self, base_url: str | None = None, model: str = "Llama-3.1-8B",
+    # Llama-3.3-70B, not the 8B. Bake-off 2026-08-05 on the four models this key
+    # can reach: the 8B does not merge semantically, it concatenates with "and" --
+    # it stapled two unrelated cache properties into one fabricated claim, and on
+    # the near-duplicate case it kept one side and dropped the other, which is the
+    # discard-one failure adr/0002 exists to forbid. The 70B distinguished "same
+    # fact" from "two facts about one component" correctly, and costs ~7x FEWER
+    # output tokens doing it (56-87 vs the 8B hitting its 600 cap every call).
+    # Its rate limits are tighter -- 429s with a ~36s cooldown under load, which
+    # this provider does not yet handle.
+    def __init__(self, base_url: str | None = None, model: str = "Llama-3.3-70B",
                  api_key: str | None = None, max_tokens: int = 800,
                  timeout: float = 60.0,
                  transport: httpx.AsyncBaseTransport | None = None) -> None:
