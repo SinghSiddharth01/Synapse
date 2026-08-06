@@ -276,6 +276,31 @@ def test_windows_entry_points_exist():
     assert b'"%~dp0install.ps1"' in raw
 
 
+def test_install_ps1_is_pure_ascii():
+    """The UTF-8 preamble cannot save the script's OWN literals.
+
+    `install.bat` launches `powershell` -- Windows PowerShell 5.1, not pwsh --
+    and 5.1 decodes a script file with no byte-order mark using the system ANSI
+    codepage, NOT UTF-8. That decision is made by the parser before line 1 runs,
+    so `chcp 65001`, `[Console]::OutputEncoding` and `$env:PYTHONUTF8` -- all of
+    which govern OUTPUT -- are powerless over it: every em dash in a `Say`
+    string reaches the screen as `a<TM>"`. install.ps1 shipped with 33 of them.
+
+    A BOM would fix the file path and put a U+FEFF at the front of the string
+    that `irm ... | iex` hands to [scriptblock]::Create. ASCII-only fixes every
+    path at once and cannot be undone by an encoding decision anywhere.
+
+    install.sh is deliberately NOT held to this: `sh` copies bytes to stdout
+    without re-decoding them, so its UTF-8 prose renders correctly.
+    """
+    ps1_text = (REPO / "install.ps1").read_text(encoding="utf-8")
+    offenders = sorted({c for c in ps1_text if ord(c) > 127})
+    assert not offenders, (
+        f"install.ps1 must be pure ASCII; found {offenders!r}. "
+        "Windows PowerShell 5.1 reads a BOM-less script as ANSI."
+    )
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permissions")
 def test_install_sh_help_needs_no_stdin():
     """`curl … | sh` gives every child the SCRIPT as stdin.

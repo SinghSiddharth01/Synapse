@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-Synapse — one-command install and run, Windows PowerShell.
+Synapse -- one-command install and run, Windows PowerShell.
 
 .DESCRIPTION
 The phase-for-phase mirror of install.sh. Same phase names (P0-P8), same
@@ -72,7 +72,7 @@ param(
 # Encoding, before anything else runs.
 #
 # PYTHONUTF8=1 fixes two different things at once: the encoding of a piped or
-# redirected stdout, and the default encoding of open()/read_text() — which is
+# redirected stdout, and the default encoding of open()/read_text() -- which is
 # why secrets.jsonc and the transcript writers need it as much as the console
 # does. `chcp 65001` fixes the *display* in the interactive window, which is
 # the half that matters on a projector. Both are needed; neither substitutes
@@ -124,7 +124,7 @@ if ($Rest) { foreach ($token in $Rest) { $Forward.Add($token) } }
 $Joining = [bool]$ServiceUrl -or ($Forward -contains "--service-url")
 
 # ---------------------------------------------------------------------------
-# P0 — preamble
+# P0 -- preamble
 # ---------------------------------------------------------------------------
 Say "Synapse installer (PowerShell)"
 Say ("  os        {0} {1}" -f [System.Environment]::OSVersion.VersionString, $env:PROCESSOR_ARCHITECTURE)
@@ -140,7 +140,7 @@ if ($Forward.Count -gt 0) {
 # they live in secrets.jsonc.
 
 # ---------------------------------------------------------------------------
-# P1 — prerequisites
+# P1 -- prerequisites
 # ---------------------------------------------------------------------------
 Step "P1  prerequisites"
 if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
@@ -151,7 +151,7 @@ Say "  git       $(git --version)"
 if (Get-Command uv -ErrorAction SilentlyContinue) {
     Say "  uv        $(uv --version)"
 } else {
-    Say "  uv        not found — installing from https://astral.sh/uv"
+    Say "  uv        not found -- installing from https://astral.sh/uv"
     powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://astral.sh/uv/install.ps1 | iex"
     # PATH in THIS process is stale: the installer edited the user PATH, which
     # only new processes see. Re-probe the known location and use the absolute
@@ -183,14 +183,14 @@ if ($UvCommand -and $UvCommand.Source) {
 if (Get-Command claude -ErrorAction SilentlyContinue) {
     Say "  claude    present"
 } else {
-    Say "  claude    not found — the stack still runs; you just have no agent to"
+    Say "  claude    not found -- the stack still runs; you just have no agent to"
     Say "            connect yet. Install Claude Code, then run:"
     Say "              claude mcp add --transport http --scope project synapse http://127.0.0.1:8787/mcp"
     $SkipMcp = [switch]$true
 }
 
 # ---------------------------------------------------------------------------
-# P2 — repo. Never clobber, never switch branch, never pull unless asked.
+# P2 -- repo. Never clobber, never switch branch, never pull unless asked.
 # ---------------------------------------------------------------------------
 Step "P2  repository"
 $top = $null
@@ -225,7 +225,7 @@ if ($Update) {
 }
 
 # ---------------------------------------------------------------------------
-# P3 — sync, then assert the one pin that silently ruins Windows-on-ARM
+# P3 -- sync, then assert the one pin that silently ruins Windows-on-ARM
 # ---------------------------------------------------------------------------
 Step "P3  dependencies"
 
@@ -234,13 +234,13 @@ Step "P3  dependencies"
 # uv will happily provision an x86_64 interpreter that runs under Prism
 # emulation on an ARM64 box. Nothing complains at sync time. The failure
 # surfaces much later as a Rust build error out of `cryptography`, which reads
-# like a packaging problem and is not one — and the NPU wheels never load at
+# like a packaging problem and is not one -- and the NPU wheels never load at
 # all. So on ARM64 the interpreter is chosen explicitly, and each candidate is
 # VERIFIED by asking Python itself what it is. A directory called `Python312`
 # under Programs\Python is not evidence of anything.
 $pythonArg = @()
 if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64" -or $env:PROCESSOR_ARCHITEW6432 -eq "ARM64") {
-    Say "  host      ARM64 — resolving a native Python before syncing"
+    Say "  host      ARM64 -- resolving a native Python before syncing"
     $roots = @(
         (Join-Path $env:LOCALAPPDATA "Programs\Python"),
         (Join-Path $env:ProgramFiles "")
@@ -274,7 +274,7 @@ if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64" -or $env:PROCESSOR_ARCHITEW6432 -eq 
         Die @"
 no native ARM64 Python found, and this is an ARM64 machine.
 Install Python 3.12+ (ARM64 build) from https://www.python.org/downloads/windows/
-— pick the installer whose name ends in ``-arm64.exe`` — then re-run.
+-- pick the installer whose name ends in ``-arm64.exe`` -- then re-run.
 Refusing to run ``uv sync`` first: it would provision an x86_64 interpreter under
 Prism emulation, and the failure surfaces much later as a Rust build error out of
 ``cryptography`` that reads like an unrelated packaging problem.
@@ -316,19 +316,19 @@ build failure it produces reads like an unrelated Rust error.
 }
 
 # ---------------------------------------------------------------------------
-# P4 — secrets. Created from the template, NEVER overwritten, never echoed.
+# P4 -- secrets. Created from the template, NEVER overwritten, never echoed.
 # ---------------------------------------------------------------------------
 Step "P4  credentials"
 $secrets = Join-Path (Get-Location).Path "secrets.jsonc"
 $template = Join-Path (Get-Location).Path "secrets.example.jsonc"
 if (Test-Path -LiteralPath $secrets) {
-    Say "  secrets.jsonc already exists — left untouched"
+    Say "  secrets.jsonc already exists -- left untouched"
 } elseif ($DoctorOnly) {
     # -DoctorOnly is an INSPECTION. Creating the file here would answer the
     # doctor's own question before it is asked: its check 6 reports
     # "secrets.jsonc absent" as a WARN, and that WARN is unreachable through an
     # installer that has already made it false.
-    Say "  secrets.jsonc absent — NOT creating it (-DoctorOnly changes nothing)"
+    Say "  secrets.jsonc absent -- NOT creating it (-DoctorOnly changes nothing)"
     Say "  the doctor below reports the real state of this machine"
 } elseif (Test-Path -LiteralPath $template) {
     # Explicit UTF-8 without a BOM: the JSONC readers (scripts/doctor.py,
@@ -339,7 +339,7 @@ if (Test-Path -LiteralPath $secrets) {
     [IO.File]::WriteAllText($secrets, $text, [Text.UTF8Encoding]::new($false))
     Say "  created $secrets from the template"
 } else {
-    Say "  secrets.example.jsonc missing from this checkout — skipping"
+    Say "  secrets.example.jsonc missing from this checkout -- skipping"
 }
 Say "  Nothing in it is required for a first run: the stand-in arm needs no key."
 Say "  Paste real keys there only when you want -Live or -Distiller anthropic."
@@ -353,7 +353,7 @@ if ($insideWorkTree) {
         git check-ignore -q secrets.jsonc 2>$null
         if ($LASTEXITCODE -ne 0) {
             Die @"
-secrets.jsonc is NOT gitignored in this checkout. Refusing to continue —
+secrets.jsonc is NOT gitignored in this checkout. Refusing to continue --
 restore the 'secrets.jsonc' line in .gitignore first, or you will commit a key.
 "@
         }
@@ -361,12 +361,12 @@ restore the 'secrets.jsonc' line in .gitignore first, or you will commit a key.
 } else {
     # A zip download has no .git. That is a legitimate way to get the code, and
     # aborting on it would be a false failure -- there is no index to commit to.
-    Say "  WARNING: not a git checkout (zip download?) — cannot verify that"
+    Say "  WARNING: not a git checkout (zip download?) -- cannot verify that"
     Say "           secrets.jsonc is ignored. Do not commit it."
 }
 
 # ---------------------------------------------------------------------------
-# P6 — port hygiene. Only ever under -Clean. Before the doctor, so the
+# P6 -- port hygiene. Only ever under -Clean. Before the doctor, so the
 # doctor's port check reports the state -Clean actually left behind.
 # ---------------------------------------------------------------------------
 if ($Clean -and -not $DoctorOnly) {
@@ -394,10 +394,10 @@ if ($Clean -and -not $DoctorOnly) {
 }
 
 # ---------------------------------------------------------------------------
-# P8 — doctor. Runs BEFORE anything is started AND before P5 mutates
+# P8 -- doctor. Runs BEFORE anything is started AND before P5 mutates
 # %USERPROFILE%\.claude, so a box with the wrong interpreter or the wrong mcp
 # is not half-configured on the way to failing. Its output is teed, because the
-# Unicode canary only proves something through a redirection — and on Windows
+# Unicode canary only proves something through a redirection -- and on Windows
 # that redirection is the whole point of check 4.
 # ---------------------------------------------------------------------------
 Step "P8  pre-flight doctor"
@@ -411,7 +411,7 @@ if ($DoctorOnly) {
 }
 & $Uv run python scripts/doctor.py 2>&1 | Tee-Object -FilePath $doctorLog
 # Read the real exit status, not just the log. Grepping for a FAIL line misses
-# every way the doctor can fail WITHOUT printing one — an unhandled traceback,
+# every way the doctor can fail WITHOUT printing one -- an unhandled traceback,
 # an OSError from the port probe, an ImportError in the venv.
 $doctorRc = $LASTEXITCODE
 if ($null -eq $doctorRc) { $doctorRc = 0 }
@@ -421,7 +421,7 @@ if (Select-String -Path $doctorLog -Pattern '^FAIL' -Quiet -ErrorAction Silently
 
 Say ""
 if ($DoctorOnly) {
-    Say "  full log: $doctorLog  (temporary — -DoctorOnly writes nothing here)"
+    Say "  full log: $doctorLog  (temporary -- -DoctorOnly writes nothing here)"
     Say ""
     Say "-DoctorOnly: nothing was started, nothing was registered, nothing was"
     Say "written into this checkout."
@@ -439,19 +439,19 @@ if ($doctorRc -ne 0 -and -not $Force) {
 if (Select-String -Path $doctorLog -Pattern '^WARN  ports' -Quiet -ErrorAction SilentlyContinue) {
     Say ""
     Say "  NOTE: the doctor WARNed about a held port. serve_local.py will REFUSE"
-    Say "        to start on one it cannot bind — which ports it needs depends on"
+    Say "        to start on one it cannot bind -- which ports it needs depends on"
     Say "        your flags (-ServiceUrl drops 8899; -Listen/-Npu drop 18181;"
     Say "        see scripts/serve_local.py:277-278). If P7 below exits with"
     Say "        ""ports already in use"", re-run with -Clean."
 }
 
 # ---------------------------------------------------------------------------
-# P5 — MCP registration + awareness pack. Idempotent.
+# P5 -- MCP registration + awareness pack. Idempotent.
 # ---------------------------------------------------------------------------
 if ($DoctorOnly) {
-    Step "P5  MCP registration — skipped (-DoctorOnly changes nothing)"
+    Step "P5  MCP registration -- skipped (-DoctorOnly changes nothing)"
 } elseif ($SkipMcp) {
-    Step "P5  MCP registration — skipped (-SkipMcp)"
+    Step "P5  MCP registration -- skipped (-SkipMcp)"
 } else {
     Step "P5  MCP registration"
     $repoAbs = (Get-Location).Path
@@ -485,7 +485,7 @@ if ($DoctorOnly) {
             $listed = ""
             try { $listed = (claude mcp list 2>$null | Out-String) } catch { $listed = "" }
             if ($listed -match '(?m)^synapse') {
-                Say "  already registered in $projectAbs — if /mcp shows it failed, pick"
+                Say "  already registered in $projectAbs -- if /mcp shows it failed, pick"
                 Say "  Reconnect there"
             } else {
                 claude mcp add --transport http --scope project synapse $mcpUrl
@@ -505,11 +505,11 @@ if ($DoctorOnly) {
         foreach ($entry in (Get-ChildItem -LiteralPath $src -ErrorAction SilentlyContinue)) {
             $target = Join-Path $dest $entry.Name
             if ((Test-Path -LiteralPath $target) -and (-not $Update)) {
-                Say "  pack      $kind/$($entry.Name) already installed — left alone (-Update to replace)"
+                Say "  pack      $kind/$($entry.Name) already installed -- left alone (-Update to replace)"
             } else {
                 # Move aside, never delete. What sits there may be something the
                 # operator edited by hand, and -Update is documented as "git pull
-                # --ff-only" — an unprompted, unbacked-up removal under that
+                # --ff-only" -- an unprompted, unbacked-up removal under that
                 # description is a surprise nobody consented to.
                 if (Test-Path -LiteralPath $target) {
                     $backup = "$target.synapse-bak." + (Get-Date -Format "yyyyMMddHHmmss")
@@ -525,7 +525,7 @@ if ($DoctorOnly) {
     Say "  copy; re-run '.\install.ps1 -DoctorOnly' to see it settle."
     if (Test-Path -LiteralPath "packs\claude-code\settings-snippet.json") {
         Say "  Optional hooks: merge packs\claude-code\settings-snippet.json into"
-        Say "  your %USERPROFILE%\.claude\settings.json by hand — this script will"
+        Say "  your %USERPROFILE%\.claude\settings.json by hand -- this script will"
         Say "  not rewrite a settings file it does not own. See"
         Say "  packs\claude-code\INSTALL.md."
         # The snippet's command points at
@@ -542,10 +542,10 @@ if ($DoctorOnly) {
 }
 
 # ---------------------------------------------------------------------------
-# P7 — start, in the foreground, so Ctrl-C works and the banner is live.
+# P7 -- start, in the foreground, so Ctrl-C works and the banner is live.
 # ---------------------------------------------------------------------------
 if ($NoStart) {
-    Step "P7  start — skipped (-NoStart)"
+    Step "P7  start -- skipped (-NoStart)"
     Say "  would have run: $Uv run python scripts/serve_local.py"
     foreach ($token in $Forward) { Say "      | $token" }
     exit 0
