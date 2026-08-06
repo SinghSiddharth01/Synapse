@@ -1,0 +1,75 @@
+# Docs — build on every PR, publish to GitHub Pages from main.
+#
+# Deploys via actions/deploy-pages rather than `mkdocs gh-deploy` so it needs
+# no PAT and no gh-pages branch: it uses the repo's own GITHUB_TOKEN and the
+# native Pages OIDC deployment. The one manual step is enabling it — see the
+# comment on the `deploy` job below.
+#
+# decisions/007 (in-repo docs, no wiki) and decisions/009 (MkDocs + Material +
+# mkdocstrings) at docs/overnight/decisions/ record why this shape.
+
+name: docs
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build (mkdocs)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync --group docs
+      # `strict: false` in mkdocs.yml tonight (writer pages still landing) —
+      # warnings are expected and do not fail this job. See mkdocs.yml's
+      # comment for the flip-to-strict instruction once they're in.
+      - run: uv run mkdocs build --site-dir site
+      - name: upload the built site (PR runs; nothing to deploy)
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v5
+        with:
+          name: docs-site
+          path: site
+          retention-days: 14
+      - name: upload Pages artifact (main only)
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    name: deploy (GitHub Pages)
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+# ── Repo settings a human must flip, once ──────────────────────────────────
+# Settings -> Pages -> "Build and deployment" -> Source: "GitHub Actions"
+# (not "Deploy from a branch"). Without this the `deploy` job's
+# actions/deploy-pages step 404s — Pages has no target environment until the
+# source is switched. Nothing else: no PAT, no gh-pages branch, no secrets.

@@ -1,0 +1,109 @@
+site_name: Synapse
+site_description: Shared working memory for AI-assisted coding teams.
+site_url: https://SinghSiddharth01.github.io/Synapse/
+repo_url: https://github.com/SinghSiddharth01/Synapse
+repo_name: SinghSiddharth01/Synapse
+edit_uri: edit/main/docs/
+
+docs_dir: docs
+
+# ⟨decisions/007, 009⟩ In-repo docs published to GitHub Pages, not a wiki.
+# See docs/overnight/decisions/007-docs-in-repo-not-wiki.md and
+# docs/overnight/decisions/009-mkdocs-material-for-pages.md.
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.top
+    - navigation.footer
+    - content.code.copy
+    - content.action.edit
+    - search.suggest
+    - search.highlight
+
+markdown_extensions:
+  - admonition
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.superfences
+  - pymdownx.highlight
+  - pymdownx.inlinehilite
+  - pymdownx.details
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths:
+            - packages/contracts/src
+            - packages/providers/src
+            - packages/distiller/src
+            - packages/worker/src
+            - packages/orchestrator/src
+            - packages/service/src
+          options:
+            show_source: true
+            show_root_heading: true
+            show_root_full_path: false
+            merge_init_into_class: true
+            docstring_section_style: list
+            filters: ["!^_"]
+
+# ⟨strict-safe⟩ The six writer files below (index, first-run, architecture,
+# reference/service-http, troubleshooting, contributing) are EXPECTED to be
+# missing at SETUP time — the writer/consistency-review agents land them
+# afterward. `strict: false` + `validation.nav.not_found: warn` lets
+# `mkdocs build` succeed tonight with warnings instead of failing on files
+# that don't exist yet. Once every nav target below exists, flip `strict`
+# to `true` and tighten the two `warn`s to `warn` -> the assembler agent's
+# job, not SETUP's — this comment is the flip instruction.
+strict: false
+validation:
+  nav:
+    omitted_files: warn
+    not_found: warn
+    absolute_links: warn
+  links:
+    not_found: warn
+    absolute_links: warn
+    unrecognized_links: warn
+
+nav:
+  - Home: index.md
+  - First run: first-run.md
+  - Architecture: architecture.md
+  - Reference:
+      - Service HTTP: reference/service-http.md
+      - MCP tools: reference/mcp-tools.md
+      - API:
+          - synapse_contracts: reference/api/contracts.md
+          - synapse_providers: reference/api/providers.md
+          - synapse_distiller: reference/api/distiller.md
+          - synapse_worker: reference/api/worker.md
+          - synapse_orchestrator: reference/api/orchestrator.md
+          - synapse_service: reference/api/service.md
+  - Troubleshooting: troubleshooting.md
+  - Contributing: contributing.md
+  - Architecture Decision Records:
+      - 0001 — Local orchestrator: adr/0001-local-orchestrator.md
+      - 0002 — Semantic merge and tombstones: adr/0002-semantic-merge-and-tombstones.md
+      - 0003 — Distiller compresses, does not judge: adr/0003-distiller-compresses-rather-than-judges.md
+      - 0004 — The log is append-only, state is a fold: adr/0004-the-log-is-append-only-and-state-is-a-fold.md
+      - 0005 — Synthesis output budget is derived: adr/0005-the-synthesis-output-budget-is-derived.md

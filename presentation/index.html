@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Synapse — presentation shell</title>
+<!--
+  Two-tab shell for the 7-minute slot (docs/demo-transcripts.txt:199-203):
+  one tab for the slide deck, one for the "Global View" / behind-the-scenes dev view with the
+  demo video embedded. The video sits LAST, after the slides give the concept — the audience
+  needs the concept explained before it watches the mechanism.
+
+  Self-contained on purpose: no external fonts, scripts, styles, or images. It opens straight
+  from file:// and from `python -m http.server` in this directory. The only sub-resource is
+  the sibling deck.html loaded in an iframe.
+-->
+<style>
+  :root {
+    --bg: #0b0d10;
+    --bg-raised: #14181d;
+    --bg-sunken: #090b0e;
+    --line: #262c34;
+    --text: #e9edf2;
+    --text-dim: #9aa5b1;
+    --text-faint: #6b7683;
+    --accent: #7fb0ff;
+    --warn: #f0b429;
+    --warn-bg: rgba(240, 180, 41, 0.09);
+    --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body { height: 100%; margin: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font);
+    font-size: 16px;
+    line-height: 1.5;
+    display: flex;
+    flex-direction: column;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  header {
+    flex: 0 0 auto;
+    border-bottom: 1px solid var(--line);
+    background: var(--bg-sunken);
+    display: flex;
+    align-items: center;
+    gap: 22px;
+    padding: 0 18px;
+    height: 52px;
+  }
+
+  .brand {
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    font-size: 16px;
+  }
+
+  .brand span { color: var(--text-faint); font-weight: 400; margin-left: 10px; font-size: 13px; }
+
+  nav.tabs { display: flex; gap: 4px; margin-left: auto; }
+
+  .tab {
+    appearance: none;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    color: var(--text-dim);
+    font: inherit;
+    font-size: 14px;
+    padding: 6px 14px;
+    cursor: pointer;
+  }
+
+  .tab:hover { color: var(--text); background: var(--bg-raised); }
+
+  .tab[aria-selected="true"] {
+    color: var(--text);
+    background: var(--bg-raised);
+    border-color: var(--line);
+    box-shadow: inset 0 -2px 0 var(--accent);
+  }
+
+  main { flex: 1 1 auto; position: relative; min-height: 0; }
+
+  .panel {
+    position: absolute;
+    inset: 0;
+    display: none;
+    overflow-y: auto;
+  }
+
+  .panel[data-active="true"] { display: block; }
+
+  /* ---------- deck tab ---------- */
+
+  #panel-deck { display: none; }
+  #panel-deck[data-active="true"] { display: flex; flex-direction: column; }
+
+  iframe.deck-frame {
+    flex: 1 1 auto;
+    width: 100%;
+    border: 0;
+    background: var(--bg);
+  }
+
+  .frame-hint {
+    flex: 0 0 auto;
+    font-size: 12px;
+    color: var(--text-faint);
+    padding: 6px 18px;
+    border-top: 1px solid var(--line);
+    background: var(--bg-sunken);
+  }
+
+  /* ---------- global view tab ---------- */
+
+  .wrap {
+    max-width: 980px;
+    margin: 0 auto;
+    padding: 32px 24px 56px;
+    display: flex;
+    flex-direction: column;
+    gap: 26px;
+  }
+
+  h1 { font-size: 28px; margin: 0; letter-spacing: -0.02em; }
+
+  h2 { font-size: 18px; margin: 0 0 8px; letter-spacing: -0.01em; }
+
+  p { margin: 0 0 10px; color: var(--text-dim); max-width: 74ch; }
+
+  p:last-child { margin-bottom: 0; }
+
+  .todo {
+    border: 2px dashed var(--warn);
+    background: var(--warn-bg);
+    border-radius: 10px;
+    padding: 18px 20px;
+  }
+
+  .todo-label {
+    display: inline-block;
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    font-weight: 700;
+    color: var(--warn);
+    border: 1px solid var(--warn);
+    border-radius: 4px;
+    padding: 2px 8px;
+    margin-bottom: 10px;
+  }
+
+  .todo h2 { color: var(--warn); }
+
+  a { color: var(--accent); }
+
+  .standin {
+    display: block;
+    margin-top: 12px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--bg-sunken);
+    padding: 14px 16px;
+  }
+
+  .standin .stand-label {
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+    font-weight: 600;
+    display: block;
+    margin-bottom: 6px;
+  }
+
+  .standin code { font-family: var(--mono); font-size: 14px; }
+
+  .video-frame {
+    border: 2px dashed var(--warn);
+    background: var(--warn-bg);
+    border-radius: 10px;
+    padding: 18px 20px;
+  }
+
+  video {
+    display: block;
+    width: 100%;
+    max-height: 62vh;
+    background: #000;
+    border-radius: 6px;
+    border: 1px solid var(--line);
+  }
+
+  .caption { font-size: 13px; color: var(--text-faint); margin-top: 10px; }
+
+  footer {
+    flex: 0 0 auto;
+    border-top: 1px solid var(--line);
+    background: var(--bg-sunken);
+    padding: 8px 18px;
+    font-size: 12px;
+    color: var(--text-faint);
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <span class="brand">Synapse <span>presentation shell — skeleton</span></span>
+  <nav class="tabs" role="tablist" aria-label="Presentation views">
+    <button class="tab" id="tab-deck" role="tab" aria-controls="panel-deck" aria-selected="true">Deck</button>
+    <button class="tab" id="tab-global" role="tab" aria-controls="panel-global" aria-selected="false">Global View</button>
+  </nav>
+</header>
+
+<main>
+
+  <!-- Tab 1: the deck, rendered from presentation/deck.html -->
+  <div class="panel" id="panel-deck" role="tabpanel" aria-labelledby="tab-deck" data-active="true">
+    <iframe class="deck-frame" id="deck-frame" src="deck.html" title="Synapse slide deck"></iframe>
+    <div class="frame-hint">Click inside the deck first, then use <strong>←</strong> / <strong>→</strong> to navigate and <strong>n</strong> for speaker notes. Deck also opens standalone at <code>deck.html</code>.</div>
+  </div>
+
+  <!-- Tab 2: global view + the demo video, video LAST (transcripts:199-203) -->
+  <div class="panel" id="panel-global" role="tabpanel" aria-labelledby="tab-global" data-active="false">
+    <div class="wrap">
+
+      <h1>Global View — behind the scenes</h1>
+      <p>The second half of the story: while the front/UX view shows what a developer sees, this view shows the system doing the work — findings arriving, triage decisions, merges landing. Record both side by side, correlatable 1:1.</p>
+
+      <section class="todo">
+        <span class="todo-label">TODO-HUMAN</span>
+        <h2>The live global-view URL goes here</h2>
+        <p>Decide and paste the URL the audience will actually see during the run — whichever host and port the global view is served from on the demo machine. Until that is decided, this panel deliberately names no address of its own.</p>
+        <span class="standin">
+          <span class="stand-label">Labelled stand-in — local service debug dashboard</span>
+          <a href="http://127.0.0.1:8899/debug" target="_blank" rel="noopener"><code>http://127.0.0.1:8899/debug</code></a>
+          <p class="caption">Only live when the service is running locally on this machine. This is a stand-in, not the presentation URL.</p>
+        </span>
+      </section>
+
+      <!-- Video is intentionally the LAST element on this panel: slides give the concept, video shows the mechanism (transcripts:199-203). -->
+      <section class="video-frame">
+        <span class="todo-label">TODO-HUMAN: demo video drops here</span>
+        <video
+          id="demo-video"
+          controls
+          preload="none"
+          poster="data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1280' height='720'%3E%3Crect width='100%25' height='100%25' fill='%23090b0e'/%3E%3Crect x='2' y='2' width='1276' height='716' fill='none' stroke='%23f0b429' stroke-width='4' stroke-dasharray='14 10'/%3E%3Ctext x='640' y='352' fill='%23f0b429' font-family='sans-serif' font-size='38' font-weight='700' text-anchor='middle'%3ETODO-HUMAN%3C/text%3E%3Ctext x='640' y='402' fill='%236b7683' font-family='sans-serif' font-size='26' text-anchor='middle'%3Edemo video drops here%3C/text%3E%3C/svg%3E">
+          <!-- Drop the recording next to this file and uncomment, e.g.:
+               <source src="demo.mp4" type="video/mp4">
+               Left empty on purpose so the skeleton makes zero requests. -->
+          Your browser does not support embedded video. The recording will be linked here.
+        </video>
+        <p class="caption">Poster is an inline placeholder. No source file is wired up yet — the element makes no network request until a human adds one.</p>
+      </section>
+
+    </div>
+  </div>
+
+</main>
+
+<footer>Skeleton per decision 010. Slide text comes from <code>docs/overnight/slide-content-outline.md</code>, which stays the single source of truth.</footer>
+
+<script>
+(function () {
+  var tabs = [
+    { tab: document.getElementById('tab-deck'), panel: document.getElementById('panel-deck') },
+    { tab: document.getElementById('tab-global'), panel: document.getElementById('panel-global') }
+  ];
+
+  function select(idx) {
+    tabs.forEach(function (t, n) {
+      var on = n === idx;
+      t.tab.setAttribute('aria-selected', on ? 'true' : 'false');
+      t.panel.setAttribute('data-active', on ? 'true' : 'false');
+    });
+    if (idx === 0) {
+      var frame = document.getElementById('deck-frame');
+      if (frame) { try { frame.contentWindow.focus(); } catch (e) { frame.focus(); } }
+    }
+  }
+
+  tabs.forEach(function (t, n) {
+    t.tab.addEventListener('click', function () { select(n); });
+    t.tab.addEventListener('keydown', function (e) {
+      if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+        var next = (n + (e.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length;
+        tabs[next].tab.focus();
+        select(next);
+        e.preventDefault();
+      }
+    });
+  });
+
+  select(0);
+}());
+</script>
+
+</body>
+</html>
