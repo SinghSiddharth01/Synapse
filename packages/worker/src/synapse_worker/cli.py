@@ -1,8 +1,10 @@
 """synapse-worker — follow a live agent conversation and condense it periodically.
 
     synapse-worker join <shared_id>                 # bind, once per session — see below
+    synapse-worker join <shared_id> --agent-session-id $CLAUDE_CODE_SESSION_ID
     geniex serve                                    # terminal 1
     uv run synapse-worker run                       # terminal 2
+    uv run synapse-worker run --agent-session-id $CLAUDE_CODE_SESSION_ID
     uv run synapse-worker run --interval 15 --ticks 4
     uv run synapse-worker status
     uv run synapse-worker replay                    # drain the write-ahead log
@@ -10,12 +12,21 @@
 `join` is Plan A.7 / Plan D.2's `synapse join <shared_id>`, run from a terminal
 — never from inside the agent conversation. Plan D Task D.3 is explicit that
 there is no `attach(shared_id)` surfaced to the agent: "the agent never needs
-to be told which Shared Session it is in." `join` binds whatever Agent Session
-detection currently finds live, the same heuristic `run` falls back to when
-nothing has been joined. It does not let you hand-pick a specific transcript
-file — two windows of the same agent product open at once is a documented
-ambiguity (Plan D, "one active Agent Session per Agent product per machine"),
-not something this CLI tries to resolve for you.
+to be told which Shared Session it is in." Without `--agent-session-id`, `join`
+binds whatever Agent Session detection currently finds live, the same heuristic
+`run` falls back to when nothing has been joined.
+
+`--agent-session-id` (on `join`, `run` and `replay`) names ONE conversation
+exactly, and every command that takes it refuses rather than falling back to
+another window's binding. It is not a human hand-picking a transcript file —
+the thing D.3 protects against — it is a conversation stating a fact about
+itself, from its own environment (`CLAUDE_CODE_SESSION_ID`). Since W2
+(2026-08-06) that is also what makes two windows of one product two separate
+participants: each writes its own `bindings/<agent>/<session>.json` instead of
+overwriting the other's, retiring Plan D's "one active Agent Session per Agent
+product per machine" limitation. Omit it and every one of these commands
+behaves exactly as it did before the flag existed — the most recently pinned
+binding, which is what reading the single file always meant.
 
 `run` attaches at the END of the transcript by default. Pass --from-start only
 deliberately: a live transcript is routinely several megabytes, and re-reading
@@ -31,7 +42,7 @@ import os
 import sys
 from pathlib import Path
 
-from synapse_contracts import LocalBinding, Segment, read_binding
+from synapse_contracts import LocalBinding, Segment
 from synapse_distiller import (
     Distiller,
     PromptDropError,
@@ -45,8 +56,11 @@ from synapse_worker.debug_server import DebugServer
 from synapse_worker.discovery import (
     AGENT_REGISTRY,
     ResolvedTranscript,
+    binding_dir_for_agent,
     binding_path_for_agent,
     join_session,
+    read_bindings_for_agent,
+    resolve_agent_binding,
     resolve_transcript,
 )
 from synapse_worker.loop import WorkerLoop
@@ -69,7 +83,7 @@ DEFAULT_SHARED_ID = "local-dev"  # `run`'s un-joined fallback; also what
 DEFAULT_DEBUG_PORT = 8790
 
 
-def _current_shared_id(state_dir: Path) -> str:
+def _current_shared_id(state_dir: Path, agent_session_id: str | None = None) -> str:
     """The Shared Session a Producer built OUTSIDE a WorkerLoop should treat
     as "current" for the re-join envelope's held/deliverable split
     (producer.py's module docstring, STATE.md trap #8): the pinned binding
@@ -83,8 +97,14 @@ def _current_shared_id(state_dir: Path) -> str:
     bound to anything at all. `WorkerLoop.__init__` handles the
     joined/running case itself (`producer.rebind(binding.shared_id)`);
     `cmd_status` and `cmd_replay` build their own Producer with no loop
-    around it, so they call this directly."""
-    joined = read_binding(binding_path_for_agent(state_dir, DEFAULT_AGENT))
+    around it, so they call this directly.
+
+    `agent_session_id`, when the caller knows which conversation it is
+    (`replay --agent-session-id`), picks that conversation's own binding out of
+    the several this machine may now hold. Omitted — `status`, and every
+    pre-W2 caller — resolves the most recently pinned binding, which is what
+    reading the single `bindings/<agent>.json` file always meant."""
+    joined = resolve_agent_binding(state_dir, DEFAULT_AGENT, agent_session_id)
     if joined is not None:
         return joined.shared_id
     last = read_last_bound_shared_id(state_dir / "wal")
@@ -184,13 +204,23 @@ def _resolve_agent_and_transcript(
     preserving today's behavior when it is the only agent in play): a
     `join`-pinned binding for ANY agent wins over every agent's heuristic,
     and the heuristic is only consulted once nothing anywhere is pinned.
+
+    `--agent-session-id` (W2) narrows all of that to one conversation: which
+    registered agent owns the id is still not something the caller has to
+    know, so every candidate is probed, but each probe demands that exact
+    binding and `resolve_transcript` refuses to answer with anything else. Two
+    windows on one machine are therefore two `run` processes, each following
+    its own transcript, instead of two processes racing for one binding file.
     """
     requested = getattr(args, "agent", None)
     candidates = [requested] if requested else list(AGENT_REGISTRY)
+    agent_session_id = getattr(args, "agent_session_id", None)
 
     first_heuristic: tuple[str, ResolvedTranscript] | None = None
     for agent in candidates:
-        resolved = resolve_transcript(Path.cwd(), state_dir, agent=agent)
+        resolved = resolve_transcript(
+            Path.cwd(), state_dir, agent=agent, agent_session_id=agent_session_id
+        )
         if resolved is None:
             continue
         if resolved.source == "pinned":
@@ -285,6 +315,14 @@ def _build(args: argparse.Namespace, debug_port: int = 0):
         # heuristic resolution, or DEFAULT_AGENT for an explicit --transcript
         # path whose dialect nothing here inferred.
         agent=binding.agent,
+        # False for exactly one branch above: `--transcript <path>`, where
+        # `agent_session_id` is the file's STEM and nothing has verified that
+        # it is an Agent Session id at all (for Codex it certainly is not --
+        # `rollout-<ts>-<uuid>.jsonl`). The loop uses this to decide whether
+        # "no per-session binding for my id" means "another window's join,
+        # not mine" (identified) or "I have no id to match with, so read the
+        # machine's single answer exactly as before W2" (not identified).
+        session_identified=resolved is not None,
     )
     source = resolved.source if resolved is not None else "explicit --transcript"
     return config, loop, transcript, producer, source, stats
@@ -304,7 +342,13 @@ async def cmd_join(args: argparse.Namespace) -> int:
     config = load_config()
     state_dir = Path(config.worker.state_dir)
 
-    bindings = join_session(args.shared_id, args.contributor, Path.cwd(), state_dir)
+    bindings = join_session(
+        args.shared_id,
+        args.contributor,
+        Path.cwd(),
+        state_dir,
+        agent_session_id=getattr(args, "agent_session_id", None),
+    )
 
     if not bindings:
         print(
@@ -416,15 +460,33 @@ async def cmd_status(args: argparse.Namespace) -> int:
     joined_any = False
     for agent in AGENT_REGISTRY:
         resolved = resolve_transcript(cwd, state_dir, agent=agent)
+        primary_session_id = None
         if resolved is not None and resolved.source == "pinned":
             binding = resolved.local_binding
+            primary_session_id = binding.agent_session_id
             print(f"joined session   [{agent}] shared_id={binding.shared_id!r} "
                   f"agent_session_id={binding.agent_session_id} "
                   f"transcript={resolved.path} (exists)")
             joined_any = True
+        # Since W2 one product can hold several bindings at once — one per
+        # conversation. `resolve_transcript` still answers with exactly one
+        # ("the most recently pinned"), which is the one `run` would follow
+        # without `--agent-session-id`; the rest are real joins too and a
+        # status that hid them would describe a two-window machine as if it
+        # were a one-window machine, which is the entire defect W2 fixes.
+        for other in read_bindings_for_agent(state_dir, agent):
+            if other.agent_session_id == primary_session_id:
+                continue
+            exists = "exists" if Path(other.transcript_path).is_file() else "MISSING"
+            print(f"also joined      [{agent}] shared_id={other.shared_id!r} "
+                  f"agent_session_id={other.agent_session_id} "
+                  f"transcript={other.transcript_path} ({exists})")
+            joined_any = True
     if not joined_any:
         checked = ", ".join(
-            str(binding_path_for_agent(state_dir, agent)) for agent in AGENT_REGISTRY
+            f"{binding_dir_for_agent(state_dir, agent)}/, "
+            f"{binding_path_for_agent(state_dir, agent)}"
+            for agent in AGENT_REGISTRY
         )
         print(f"joined session   none (checked {checked}) — run "
               f"`synapse-worker join <shared_id>`, or the worker falls back to "
@@ -473,7 +535,10 @@ async def cmd_replay(args: argparse.Namespace) -> int:
     # Both branches below share it: `--skipped` records new findings under
     # it, and the plain drain-the-log path needs it too, or a WAL populated
     # by a normal (possibly un-joined) `run` would read every entry as held.
-    producer = Producer(state_dir / "wal", sink, _current_shared_id(state_dir))
+    agent_session_id = getattr(args, "agent_session_id", None)
+    producer = Producer(
+        state_dir / "wal", sink, _current_shared_id(state_dir, agent_session_id)
+    )
 
     if args.skipped:
         log = TriageLog(state_dir)
@@ -492,7 +557,7 @@ async def cmd_replay(args: argparse.Namespace) -> int:
         # recovered findings to whatever "aditya"/"local-dev" happen to
         # default to right now, which may not be who or what was active
         # when the segment was actually skipped. Refuse rather than invent.
-        joined = read_binding(binding_path_for_agent(state_dir, DEFAULT_AGENT))
+        joined = resolve_agent_binding(state_dir, DEFAULT_AGENT, agent_session_id)
         if joined is None:
             print(
                 "No joined Shared Session -- refusing to replay skipped segments, "
@@ -604,6 +669,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     join.add_argument("shared_id")
     join.add_argument("--contributor", default="aditya")
+    join.add_argument(
+        "--agent-session-id", default=None,
+        help="bind EXACTLY this Agent Session instead of whatever detection "
+             "finds live (Claude Code exports it as CLAUDE_CODE_SESSION_ID). "
+             "Required to tell two windows of the same agent apart; an id that "
+             "matches no transcript binds nothing rather than guessing",
+    )
     join.set_defaults(func=cmd_join)
 
     run = sub.add_parser("run", help="follow and condense periodically")
@@ -617,6 +689,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="which Agent product to follow (default: auto-detect -- a "
              "`join`-pinned binding for any registered agent wins, else the "
              "first agent's live-transcript heuristic, tried in registry order)",
+    )
+    run.add_argument(
+        "--agent-session-id", default=None,
+        help="follow the binding for EXACTLY this Agent Session (one window of "
+             "one agent). Without it, the most recently pinned binding for the "
+             "product wins, which is a guess when two windows are open; with "
+             "it, no binding for that id means this refuses to start rather "
+             "than following a different conversation",
     )
     run.add_argument(
         "--from-start",
@@ -638,6 +718,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--skipped", action="store_true",
         help="re-distil segments triage skipped, then archive the skip log "
              "(requires a joined Shared Session — see `synapse-worker join`)",
+    )
+    replay.add_argument(
+        "--agent-session-id", default=None,
+        help="read Attribution (contributor/shared_id) from EXACTLY this Agent "
+             "Session's binding instead of the most recently pinned one",
     )
     replay.set_defaults(func=cmd_replay)
 

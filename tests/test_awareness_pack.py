@@ -20,6 +20,7 @@ import ast
 import http.server
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -38,25 +39,60 @@ HOOK = ROOT / "packs" / "claude-code" / "hooks" / "freshness_pointer.py"
 FAIL_OPEN_BUDGET_SECONDS = 3.0
 
 
-def _write_binding(state_dir: Path, *, agent: str = "claude-code",
-                   shared_id: str = "sess-a", agent_session_id: str = "as-1",
-                   pinned_at: str = "2026-08-05T10:00:00.000000Z") -> None:
-    """Same on-disk shape `synapse_contracts.binding.write_binding` produces
-    (field names, and `pinned_at` as a fixed-width-microsecond UTC ISO
-    string) -- hand-written here, deliberately not imported from
-    `synapse_contracts`, because the hook under test must not depend on that
-    package either, and a fixture that silently could would not prove it
-    doesn't."""
-    bindings_dir = state_dir / "bindings"
-    bindings_dir.mkdir(parents=True, exist_ok=True)
-    (bindings_dir / f"{agent}.json").write_text(json.dumps({
+def _binding_payload(*, agent: str, shared_id: str, agent_session_id: str,
+                     pinned_at: str, scope: str | None) -> dict:
+    payload = {
         "agent_session_id": agent_session_id,
         "shared_id": shared_id,
         "contributor": "sid",
         "agent": agent,
         "transcript_path": "/tmp/whatever.jsonl",
         "pinned_at": pinned_at,
-    }), encoding="utf-8")
+    }
+    # Omitted rather than defaulted when unset, so these fixtures also cover
+    # the shape of every binding file written before `scope` existed.
+    if scope is not None:
+        payload["scope"] = scope
+    return payload
+
+
+def _write_binding(state_dir: Path, *, agent: str = "claude-code",
+                   shared_id: str = "sess-a", agent_session_id: str = "as-1",
+                   pinned_at: str = "2026-08-05T10:00:00.000000Z",
+                   scope: str | None = None) -> None:
+    """The LEGACY per-product mirror, `bindings/<agent>.json` — same on-disk
+    shape `synapse_contracts.binding.write_binding` produces (field names,
+    and `pinned_at` as a fixed-width-microsecond UTC ISO string) --
+    hand-written here, deliberately not imported from `synapse_contracts`,
+    because the hook under test must not depend on that package either, and
+    a fixture that silently could would not prove it doesn't."""
+    bindings_dir = state_dir / "bindings"
+    bindings_dir.mkdir(parents=True, exist_ok=True)
+    (bindings_dir / f"{agent}.json").write_text(json.dumps(_binding_payload(
+        agent=agent, shared_id=shared_id, agent_session_id=agent_session_id,
+        pinned_at=pinned_at, scope=scope)), encoding="utf-8")
+
+
+# Mirrors `synapse_worker.discovery._UNSAFE_IN_FILENAME`, the writer's own
+# sanitizer -- copied rather than imported for the same reason
+# `_write_binding` hand-writes the JSON.
+_UNSAFE_IN_FILENAME = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def _write_session_binding(state_dir: Path, *, agent: str = "claude-code",
+                           shared_id: str = "sess-a",
+                           agent_session_id: str = "as-1",
+                           pinned_at: str = "2026-08-05T10:00:00.000000Z",
+                           scope: str | None = None) -> None:
+    """One PER-SESSION binding, `bindings/<agent>/<sanitized session>.json`
+    — what `synapse_worker.discovery.binding_path_for_session` writes since
+    W2, and the new source of truth this hook resolves against first."""
+    per_session = state_dir / "bindings" / agent
+    per_session.mkdir(parents=True, exist_ok=True)
+    stem = _UNSAFE_IN_FILENAME.sub("_", agent_session_id)
+    (per_session / f"{stem}.json").write_text(json.dumps(_binding_payload(
+        agent=agent, shared_id=shared_id, agent_session_id=agent_session_id,
+        pinned_at=pinned_at, scope=scope)), encoding="utf-8")
 
 
 def _make_handler(get_response, captured_paths: list[str] | None = None):
@@ -474,6 +510,163 @@ def test_state_is_scoped_per_agent_session_not_shared_across_a_rejoin(tmp_path, 
     assert second_check.returncode == 0
     payload = json.loads(second_check.stdout)
     assert "v4" in payload["hookSpecificOutput"]["additionalContext"]
+
+
+# ---------------------------------------------------------------------------
+# W2 (2026-08-06): several windows, several bindings. The worker now writes
+# one binding per Agent SESSION under `bindings/claude-code/<session>.json`
+# and keeps `bindings/claude-code.json` as a compatibility mirror of the
+# most recent one. The hook resolves per-session first, then falls back to
+# the mirror, whose `scope` decides whether a non-matching window is
+# enrolled (machine) or shut out (session) -- the hook module docstring's
+# "SEVERAL WINDOWS, SEVERAL BINDINGS" section.
+# ---------------------------------------------------------------------------
+
+def test_a_windows_own_per_session_binding_is_what_it_speaks_for(tmp_path, watermark):
+    """Two windows joined to two different Shared Sessions from one
+    machine. The mirror names whichever joined last; each window must
+    still report ITS OWN Shared Session, not the mirror's."""
+    state_dir = tmp_path / ".synapse"
+    _write_session_binding(state_dir, shared_id="sess-A", agent_session_id="as-A",
+                           pinned_at="2026-08-06T09:00:00.000000Z")
+    _write_session_binding(state_dir, shared_id="sess-B", agent_session_id="as-B",
+                           pinned_at="2026-08-06T10:00:00.000000Z")
+    # The mirror, as `_bind`'s dual write leaves it: the most recent join.
+    _write_binding(state_dir, shared_id="sess-B", agent_session_id="as-B",
+                   pinned_at="2026-08-06T10:00:00.000000Z")
+
+    _run_hook(state_dir, watermark.url, session_id="as-A")
+
+    assert len(watermark.paths) == 1
+    assert watermark.paths[0].startswith("/v1/sessions/sess-A/watermark")
+    assert "agent_session=as-A" in watermark.paths[0]
+
+
+def test_two_windows_on_one_machine_each_keep_their_own_notice_clock(tmp_path, watermark):
+    """The W2 scenario end to end at this hook: one machine, two
+    conversations, both joined, both firing this hook every turn. Window
+    B's first-ever check must establish B's own baseline silently -- it
+    must NOT consume window A's pending notice, and A must still get told
+    about the move afterwards."""
+    state_dir = tmp_path / ".synapse"
+    _write_session_binding(state_dir, shared_id="sess-shared", agent_session_id="as-A")
+    _write_session_binding(state_dir, shared_id="sess-shared", agent_session_id="as-B")
+    _write_binding(state_dir, shared_id="sess-shared", agent_session_id="as-B")
+
+    watermark.body["version"] = 1
+    assert _run_hook(state_dir, watermark.url, session_id="as-A").stdout == ""
+
+    watermark.body["version"] = 2  # news for A, whose baseline is v1
+    first_b = _run_hook(state_dir, watermark.url, session_id="as-B")
+    assert first_b.returncode == 0
+    assert first_b.stdout == ""  # B's own first-ever check: baseline only
+
+    a_again = _run_hook(state_dir, watermark.url, session_id="as-A")
+    payload = json.loads(a_again.stdout)
+    assert "v2" in payload["hookSpecificOutput"]["additionalContext"]
+
+
+def test_a_machine_scope_binding_enrols_every_window_under_its_own_id(tmp_path, watermark):
+    """`scripts/serve_local.py` writes a stand-in binding before any
+    conversation exists -- it cannot know a session id, so it declares
+    `scope: machine` instead of inventing one. Every window on the machine
+    is then enrolled, each speaking under its OWN real session id, which is
+    what keeps their notice clocks separate."""
+    state_dir = tmp_path / ".synapse"
+    _write_binding(state_dir, shared_id="sess-local", agent_session_id="as-sid",
+                   scope="machine")
+
+    result = _run_hook(state_dir, watermark.url, session_id="real-uuid-1")
+
+    assert result.returncode == 0
+    assert len(watermark.paths) == 1
+    assert watermark.paths[0].startswith("/v1/sessions/sess-local/watermark")
+    # The REAL conversation id, not the binding's `as-<contributor>` label.
+    assert "agent_session=real-uuid-1" in watermark.paths[0]
+
+
+def test_serve_local_writes_its_stand_in_binding_as_machine_scope(tmp_path, watermark):
+    """The other end of the arm above, and the reason it exists.
+
+    `scripts/serve_local.py` is the path docs/JOIN.md documents, so it is
+    where most sessions actually come from. It runs before any Claude Code
+    window exists and therefore cannot know a session id — it writes the
+    label `as-<contributor>`, which no real `session_id` can ever equal. With
+    that binding left at the default `scope: session`, this hook's
+    exact-match gate could never fire and the freshness pointer was
+    STRUCTURALLY silent on the demo path: verified by running the shipped
+    hook as a subprocess, a stdin `session_id` produced no output and no
+    network call at all, and only the TTY/no-id case spoke.
+
+    Read out of the script's source with `ast` rather than by running it (it
+    spawns three servers), and then exercised for real: the binding shape it
+    writes is handed to the hook, which must speak under the WINDOW's id."""
+    source = (ROOT / "scripts" / "serve_local.py").read_text(encoding="utf-8")
+    calls = [node for node in ast.walk(ast.parse(source))
+             if isinstance(node, ast.Call)
+             and getattr(node.func, "id", None) == "SessionBinding"]
+    assert len(calls) == 1, "serve_local.py must write exactly one stand-in binding"
+    keywords = {kw.arg: kw.value for kw in calls[0].keywords}
+    assert "scope" in keywords, (
+        "serve_local.py writes a binding no conversation's session id can match, "
+        "so it must declare scope='machine' or the freshness hook stays silent")
+    assert keywords["scope"].value == "machine"
+
+    state_dir = tmp_path / ".synapse"
+    _write_binding(state_dir, shared_id="local-dev", agent_session_id="as-sid",
+                   scope="machine")
+
+    result = _run_hook(state_dir, watermark.url, session_id="a-real-window-uuid")
+
+    assert result.returncode == 0
+    assert len(watermark.paths) == 1
+    assert "agent_session=a-real-window-uuid" in watermark.paths[0]
+
+
+def test_a_session_scope_binding_still_shuts_out_a_window_that_never_joined(tmp_path, watermark):
+    """The gate machine-scope relaxes must stay exactly as it was for
+    `scope: session`, which is every binding a real `synapse-worker join`
+    writes and the default for every file written before the field
+    existed."""
+    state_dir = tmp_path / ".synapse"
+    _write_binding(state_dir, shared_id="sess-a", agent_session_id="as-joined")
+    _write_session_binding(state_dir, shared_id="sess-a", agent_session_id="as-joined")
+
+    result = _run_hook(state_dir, watermark.url, session_id="as-stranger")
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert result.stderr == ""
+    assert len(watermark.paths) == 0  # never even reached the network
+
+
+def test_a_session_id_that_is_not_filename_safe_is_matched_on_file_contents(tmp_path, watermark):
+    """The per-session filename is a sanitized convenience (the writer's
+    `_UNSAFE_IN_FILENAME`); the match that counts is on `agent_session_id`
+    read back out of the file. A hook that compared stems would miss."""
+    state_dir = tmp_path / ".synapse"
+    weird = "conv/one:2"
+    _write_session_binding(state_dir, shared_id="sess-weird", agent_session_id=weird)
+
+    _run_hook(state_dir, watermark.url, session_id=weird)
+
+    assert len(watermark.paths) == 1
+    assert watermark.paths[0].startswith("/v1/sessions/sess-weird/watermark")
+
+
+def test_the_watermark_request_carries_the_contributor_as_well(tmp_path, watermark):
+    """CONTEXT.md's split: suppression is scoped to the Agent Session, the
+    watermark to the Contributor. `new_since` counts against
+    `store.last_seen(shared_id, contributor)`, so the count in this notice
+    only means "new to me" if the request says who "me" is."""
+    state_dir = tmp_path / ".synapse"
+    _write_session_binding(state_dir, shared_id="sess-c", agent_session_id="as-c")
+
+    _run_hook(state_dir, watermark.url, session_id="as-c")
+
+    assert len(watermark.paths) == 1
+    assert "contributor=sid" in watermark.paths[0]
+    assert "agent_session=as-c" in watermark.paths[0]
 
 
 # ---------------------------------------------------------------------------

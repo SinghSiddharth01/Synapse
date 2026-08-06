@@ -32,6 +32,20 @@ never looks at mtime. See docs/superpowers/specs/
 says — and `find_live_transcript_candidates` now reports when detection is
 guessing between near-simultaneous transcripts instead of quietly picking one.
 
+Bindings are stored one file per Agent SESSION since 2026-08-06 (W2):
+
+    <state_dir>/bindings/<agent>/<agent_session_id>.json   # source of truth
+    <state_dir>/bindings/<agent>.json                      # legacy mirror
+
+One agent invocation is one session, so two Claude Code windows on one machine
+are two participants and the second must not overwrite the first's binding —
+which is exactly what the single-file layout did. Every bind writes both files;
+`read_bindings_for_agent`/`resolve_agent_binding` read their union, so a tree
+written by an older version (legacy file only) resolves unchanged and a reader
+that has not been upgraded (the installed freshness hook, the orchestrator's
+single-binding resolvers) still finds the most recently joined session where it
+always looked.
+
 `join_session` loops over `AGENT_REGISTRY`, binding every currently-live
 Agent Session it finds, one per Agent product — Plan D.2's "one laptop holds
 several bindings ... Claude Code and Codex can sit in different Shared
@@ -54,7 +68,7 @@ import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from synapse_contracts import LocalBinding, SessionBinding, read_binding, write_binding
@@ -417,15 +431,199 @@ def bindings_dir(state_dir: Path) -> Path:
 
 
 def binding_path_for_agent(state_dir: Path, agent: str) -> Path:
-    """One file per Agent PRODUCT, not per Agent Session.
+    """The LEGACY single file per Agent PRODUCT — `bindings/claude-code.json`.
 
     Plan D.2: "one laptop holds several bindings — one per Agent Session;
     Claude Code and Codex can sit in different Shared Sessions." Combined with
     Plan D's documented limitation ("one active Agent Session per Agent product
-    per machine"), a binding is uniquely identified by which product it is —
-    `claude-code.json`, `codex.json` — never by a single fixed `active.json`.
+    per machine"), a binding used to be uniquely identified by which product it
+    is — `claude-code.json`, `codex.json` — never by a single fixed
+    `active.json`.
+
+    That limitation is what W2 lifts (2026-08-06): one agent INVOCATION is one
+    session, so a second Claude Code window on the same machine is a different
+    participant and must not overwrite the first window's binding. The per-
+    session layout below is the new source of truth; this path is still written
+    on every bind, as a compatibility mirror of the most recent one, and is
+    still read as a fallback. It is not dead: the *installed* copy of
+    `packs/claude-code/hooks/freshness_pointer.py` on a teammate's machine
+    reads exactly this filename by hand, and so does every un-upgraded reader
+    in the orchestrator. Removing it is a post-demo item, and the condition for
+    removal is that no installed reader still opens it by name.
     """
     return bindings_dir(state_dir) / f"{agent}.json"
+
+
+def binding_dir_for_agent(state_dir: Path, agent: str) -> Path:
+    """`bindings/<agent>/` — one file per Agent SESSION lives in here."""
+    return bindings_dir(state_dir) / agent
+
+
+# A session id reaches the filesystem only as a filename convenience. Claude
+# Code's is a uuid and Codex's is the uuid embedded in its rollout name, so in
+# practice nothing is ever rewritten; the substitution exists so that a future
+# adapter whose ids carry `/` or `:` cannot escape the bindings directory or
+# fail to open. Matching is ALWAYS done on `agent_session_id` read back out of
+# the file's CONTENTS (`read_bindings_for_agent`), never on the stem, so two ids
+# that sanitize to the same name cost one overwritten file, not a wrong match.
+_UNSAFE_IN_FILENAME = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def binding_path_for_session(state_dir: Path, agent: str, agent_session_id: str) -> Path:
+    """`bindings/<agent>/<agent_session_id>.json` — the per-session binding.
+
+    The writer target since W2. Two windows of one Agent product joining from
+    one machine now produce two files instead of one window clobbering the
+    other's.
+    """
+    stem = _UNSAFE_IN_FILENAME.sub("_", agent_session_id)
+    return binding_dir_for_agent(state_dir, agent) / f"{stem}.json"
+
+
+def _pinned_at_key(binding: SessionBinding) -> datetime:
+    """`pinned_at`, always comparable.
+
+    Everything this codebase writes is timezone-aware UTC, but a hand-authored
+    fixture (and there are several in the test suite) can legitimately carry a
+    naive datetime, and Python raises TypeError rather than answering when the
+    two are compared. A naive stamp is read as UTC — the only timezone anything
+    here ever writes — so "most recently pinned" never blows up on a file a
+    human wrote.
+    """
+    return (
+        binding.pinned_at
+        if binding.pinned_at.tzinfo is not None
+        else binding.pinned_at.replace(tzinfo=timezone.utc)
+    )
+
+
+def read_bindings_for_agent(state_dir: Path, agent: str) -> list[SessionBinding]:
+    """Every binding this machine holds for one Agent product, newest pin first.
+
+    The union of BOTH layouts: the per-session files in `bindings/<agent>/` and
+    the legacy `bindings/<agent>.json`. Deduplicated by `agent_session_id` —
+    the legacy file is a mirror of one of the per-session files on any tree
+    written by this version, so it would otherwise appear twice — keeping
+    whichever copy was pinned most recently. That union IS the migration: no
+    rewrite step, no flag day, and a tree half-written by an older version
+    resolves exactly as it did before, because its only binding is the legacy
+    one.
+    """
+    found: dict[str, SessionBinding] = {}
+
+    per_session = binding_dir_for_agent(state_dir, agent)
+    paths = sorted(per_session.glob("*.json")) if per_session.is_dir() else []
+    paths.append(binding_path_for_agent(state_dir, agent))
+
+    for path in paths:
+        binding = read_binding(path)
+        if binding is None:
+            continue
+        seen = found.get(binding.agent_session_id)
+        if seen is None or _pinned_at_key(binding) > _pinned_at_key(seen):
+            found[binding.agent_session_id] = binding
+
+    return sorted(found.values(), key=_pinned_at_key, reverse=True)
+
+
+def resolve_agent_binding(
+    state_dir: Path, agent: str, agent_session_id: str | None = None
+) -> SessionBinding | None:
+    """The binding for one Agent product, optionally for one exact conversation.
+
+    With `agent_session_id`: an EXACT match on the id stored inside the binding,
+    across both layouts, or None. Never an mtime/pinned_at fallback — the same
+    refusal discipline `find_transcript_by_session_id` applies, and for the same
+    reason: a caller that names its own session is asking for precision, and
+    quietly handing back the other window's binding is exactly the defect W2
+    exists to remove.
+
+    Without it: the most recently pinned binding for that product, which is
+    byte-for-byte today's semantics — on a tree with only the legacy file there
+    is only one candidate, and on a tree with several the legacy mirror names
+    the newest.
+    """
+    bindings = read_bindings_for_agent(state_dir, agent)
+    if agent_session_id is not None:
+        for binding in bindings:
+            if binding.agent_session_id == agent_session_id:
+                return binding
+        return None
+    return bindings[0] if bindings else None
+
+
+def has_per_session_bindings(state_dir: Path, agent: str) -> bool:
+    """Does this machine hold ANY per-session binding for `agent`?
+
+    False means nothing has joined under the W2 layout for this product — a
+    tree written by a pre-W2 version, or a machine-scope stand-in, in which
+    case the legacy file is the only binding there is and a reader that cannot
+    find its own session's binding may honour it. True means other
+    conversations are bound here, and "not mine" must be read as "not mine"
+    rather than as "fall back to the newest", which is precisely how one
+    window used to hijack another.
+    """
+    per_session = binding_dir_for_agent(state_dir, agent)
+    return per_session.is_dir() and any(per_session.glob("*.json"))
+
+
+# How long a per-session binding whose transcript has vanished is left alone
+# before housekeeping may delete it. Not a tuning knob — it is the whole of the
+# 2026-08-06 review fix for `prune_dead_bindings`. Reproduced there: window A
+# joins, A's transcript is moved/deleted (compaction, a cleaned `~/.claude`, an
+# external tool), window B joins minutes later, and B's join DELETED A's
+# binding — after which `run --agent-session-id A` refuses to start, because
+# `resolve_transcript` correctly refuses to guess. A binding minutes old
+# belongs to a conversation that is very likely still open; one whose
+# transcript has been gone for a week does not. Housekeeping exists to bound
+# accumulation over a machine's lifetime, which a week does, and never to
+# adjudicate liveness, which it cannot.
+_DEAD_BINDING_GRACE = timedelta(days=7)
+
+
+def prune_dead_bindings(state_dir: Path, agent: str) -> list[Path]:
+    """Delete LONG-dead per-session bindings. Returns what went.
+
+    "Long-dead" is: the transcript named by the binding no longer exists AND
+    the pin is older than `_DEAD_BINDING_GRACE`. Both halves are required —
+    see that constant for the sibling-window deletion the second half fixes.
+
+    Opportunistic housekeeping, called from `join_session`. One file per
+    conversation means files accumulate for as long as a machine keeps opening
+    agent windows, and a binding whose transcript has been gone for a week is
+    dead weight — `resolve_transcript` already refuses to act on it. Only the
+    per-session directory is swept: the legacy mirror is what un-upgraded
+    readers depend on and is overwritten, never deleted, here.
+    """
+    per_session = binding_dir_for_agent(state_dir, agent)
+    if not per_session.is_dir():
+        return []
+
+    cutoff = datetime.now(timezone.utc) - _DEAD_BINDING_GRACE
+    removed: list[Path] = []
+    for path in sorted(per_session.glob("*.json")):
+        binding = read_binding(path)
+        if binding is None or Path(binding.transcript_path).is_file():
+            continue
+        if _pinned_at_key(binding) > cutoff:
+            logger.debug(
+                "Binding %s names a transcript that is gone, but was pinned %s — "
+                "inside the %s grace window, so it is left alone: a conversation "
+                "whose transcript moved is not a conversation that ended.",
+                path, binding.pinned_at, _DEAD_BINDING_GRACE,
+            )
+            continue
+        try:
+            path.unlink()
+        except OSError as exc:  # a file we cannot delete is not worth failing a join over
+            logger.warning("Could not prune stale binding %s (%s)", path, exc)
+            continue
+        removed.append(path)
+        logger.info(
+            "Pruned stale binding %s — its transcript %s no longer exists",
+            path, binding.transcript_path,
+        )
+    return removed
 
 
 def _bind(
@@ -440,6 +638,14 @@ def _bind(
     produce byte-identical binding files — one binding format, one writer.
     Same discipline the spec applies to the orchestrator ("the orchestrator
     must not invent its own binding format"), applied one layer down.
+
+    Writes BOTH layouts, and that dual write is the whole migration story: the
+    per-session file is the new source of truth, and the legacy
+    `bindings/<agent>.json` is refreshed with identical content so every reader
+    that has not been upgraded yet — the installed freshness hook, the
+    orchestrator's single-binding resolvers — keeps seeing precisely what it
+    saw before, "the most recently joined session for this product". A tree in
+    any half-upgraded state therefore still runs.
     """
     binding = SessionBinding(
         agent_session_id=transcript.session_id,
@@ -448,6 +654,9 @@ def _bind(
         agent=transcript.agent,
         transcript_path=str(transcript.path),
         pinned_at=datetime.now(timezone.utc),
+    )
+    write_binding(
+        binding_path_for_session(state_dir, transcript.agent, transcript.session_id), binding
     )
     write_binding(binding_path_for_agent(state_dir, transcript.agent), binding)
     return binding
@@ -520,6 +729,13 @@ def join_session(
     """
     bound: list[SessionBinding] = []
 
+    # Housekeeping first, so a bind written by this call is never a candidate:
+    # one file per conversation accumulates for as long as this machine keeps
+    # opening agent windows, and a binding whose transcript is gone is already
+    # inert everywhere that reads it.
+    for registered in AGENT_REGISTRY:
+        prune_dead_bindings(state_dir, registered)
+
     if agent_session_id is not None:
         # Which agent owns the id is not something the caller has to know: an
         # agent session id is unique enough to identify itself, and asking a
@@ -590,6 +806,7 @@ def resolve_transcript(
     state_dir: Path,
     *,
     agent: str = "claude-code",
+    agent_session_id: str | None = None,
     projects_root: Path | None = None,
 ) -> ResolvedTranscript | None:
     """Prefer an explicit `synapse join` binding over the live-transcript heuristic.
@@ -603,8 +820,28 @@ def resolve_transcript(
     fallback dispatches through `AGENT_REGISTRY` too, so
     `resolve_transcript(..., agent="codex")` actually looks for a live Codex
     transcript rather than silently reusing Claude Code's finder.
+
+    `agent_session_id` names ONE conversation on a machine that may hold
+    several (W2). Given, it selects that conversation's own binding and, when
+    no such binding exists, resolves to NOTHING — not to the most recent
+    binding, and not to the live-transcript heuristic. Both fallbacks would
+    hand this caller a different conversation than the one it named, which is
+    the failure `--agent-session-id` exists to prevent; a worker that follows
+    the wrong window is worse than a worker that refuses to start. Omitted, the
+    resolution is exactly what it has always been: the most recently pinned
+    binding for this product, else detection.
     """
-    pinned: SessionBinding | None = read_binding(binding_path_for_agent(state_dir, agent))
+    pinned: SessionBinding | None = resolve_agent_binding(state_dir, agent, agent_session_id)
+
+    if pinned is None and agent_session_id is not None:
+        logger.warning(
+            "No binding for agent_session_id %s (agent %s); NOT falling back to "
+            "the most recent binding or to detection — either would follow a "
+            "different conversation than the one named. Run "
+            "`synapse-worker join <shared_id> --agent-session-id %s` first.",
+            agent_session_id, agent, agent_session_id,
+        )
+        return None
 
     if pinned is not None:
         transcript_path = Path(pinned.transcript_path)
@@ -615,6 +852,24 @@ def resolve_transcript(
                 source="pinned",
                 local_binding=pinned.to_local_binding(),
             )
+        if agent_session_id is not None:
+            # The SAME refusal as the no-binding case above, and it has to be
+            # (2026-08-06 review): a named conversation whose binding exists but
+            # whose transcript has been moved or deleted used to fall through to
+            # `find_live_transcript` below, which sorts by mtime and hands back
+            # whichever OTHER window wrote most recently. Reproduced: two joins,
+            # window A's transcript unlinked, `resolve_transcript(...,
+            # agent_session_id=A)` returned window B's file with
+            # `source="heuristic"` — precisely the substitution this argument
+            # exists to prevent, and invisible because the answer looks valid.
+            logger.warning(
+                "The binding for agent_session_id %s names transcript %s, which no "
+                "longer exists; NOT falling back to detection, because that would "
+                "follow a different conversation than the one named. Re-run "
+                "`synapse-worker join <shared_id> --agent-session-id %s`.",
+                agent_session_id, transcript_path, agent_session_id,
+            )
+            return None
         logger.warning(
             "Bound transcript %s no longer exists; falling back to detection. "
             "Run `synapse-worker join <shared_id>` again to re-bind.",

@@ -16,8 +16,22 @@ dependency on each other; both already depend on contracts.
 
 File presence is the only "is a session active" signal — there is no separate
 flag. One file, one binding: `CONTEXT.md`'s documented limitation of one active
-Agent Session per Agent product per machine is enforced by only ever writing to
-a single known path, not by anything more elaborate.
+Agent Session per Agent product per machine WAS enforced by only ever writing to
+a single known path. Since 2026-08-06 (W2) that limitation is lifted: the worker
+writes one file per Agent SESSION under `bindings/<agent>/<session>.json` and
+keeps refreshing the single-file `bindings/<agent>.json` as a compatibility
+mirror, so a reader that has not been upgraded still sees exactly the
+most-recently-joined binding it saw before. The record itself did not have to
+change for that — a binding names its own `agent_session_id` and always has.
+
+`scope` is the one field the split did need. It answers "who does this binding
+speak for": a `session`-scoped binding (every binding a real `join` writes) is
+one conversation's, and a reader comparing its own session id against it should
+refuse on a mismatch; a `machine`-scoped binding is a stand-in written before
+any conversation exists (`scripts/serve_local.py`), meaning "this machine is
+joined — any conversation here speaks for it, under its own real session id".
+Absent in every file written before this field existed, which is why the default
+is `session`: the stricter of the two, so an old file never silently widens.
 """
 
 from __future__ import annotations
@@ -25,8 +39,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import tempfile
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel
 
@@ -44,6 +60,7 @@ class SessionBinding(BaseModel):
     agent: str
     transcript_path: str
     pinned_at: datetime
+    scope: Literal["session", "machine"] = "session"
 
     def to_local_binding(self) -> LocalBinding:
         return LocalBinding(
@@ -61,12 +78,30 @@ def write_binding(path: Path, binding: SessionBinding) -> None:
     a crash mid-write must never leave a corrupt binding, since the worker
     would otherwise fail to start or silently fall back to the heuristic this
     file exists to replace.
+
+    The temp file gets a UNIQUE name (2026-08-06 review). It used to be
+    `<path>.tmp`, one fixed name per destination, and since W2 every bind
+    refreshes the SHARED mirror `bindings/<agent>.json` — so two windows
+    joining at once both wrote `bindings/claude-code.json.tmp` and both then
+    `os.replace`d it. The loser does not tear a read: it raises
+    `FileNotFoundError` out of `os.replace` (reproduced, 4000 iterations x 2
+    processes), which nothing up the call stack catches, so a concurrent
+    `synapse-worker join` dies with a traceback. `mkstemp` in the destination
+    directory keeps the replace atomic (same filesystem) while making the
+    two writers' temp files distinct, and the `finally` unlink means a failed
+    write leaves no litter behind.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(binding.model_dump_json(indent=2), encoding="utf-8")
-    os.replace(tmp, path)
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(binding.model_dump_json(indent=2))
+        os.replace(tmp_name, path)
+    finally:
+        # Present only if the replace never happened. `missing_ok` rather than
+        # a flag: the success path has already renamed it away.
+        Path(tmp_name).unlink(missing_ok=True)
 
 
 def read_binding(path: Path) -> SessionBinding | None:
