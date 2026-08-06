@@ -24,6 +24,7 @@ from synapse_providers.anthropic_provider import (
     AnthropicProvider,
     _tighten_schema,
     default_max_tokens_for,
+    supports_effort,
 )
 
 SCHEMA = {
@@ -182,6 +183,100 @@ async def test_effort_is_overridable() -> None:
     await provider.complete(messages=[{"role": "user", "content": "hi"}])
 
     assert client.messages.last_kwargs["output_config"]["effort"] == "medium"
+
+
+# --- correction #6: `effort` only where the endpoint accepts it -------------------
+#
+# `effort` is not a tuning knob that degrades gracefully -- it is a 400 on Haiku
+# 4.5 and Sonnet 4.5. claude-haiku-4-5 is the arm the 4096 pin below exists for,
+# so sent unconditionally it meant that arm failed on its FIRST request and
+# every max_tokens assertion in this file was pinning a cap on an arm that had
+# never run. The tests here are on the outbound request body for exactly that
+# reason: `_FakeClient.messages.create(**kwargs)` accepts any body at all, so
+# nothing else in this file can tell the difference.
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "claude-haiku-4-5",
+        "claude-haiku-4-5-20251001",
+        "CLAUDE-HAIKU-4-5",
+        "claude-sonnet-4-5",
+    ],
+)
+async def test_no_effort_is_sent_to_a_model_that_rejects_it(model: str) -> None:
+    """The demo's distiller arm. Swept over both Haiku spellings this repo
+    uses, the upper-case form, and Sonnet 4.5 -- the other model on the same
+    row of the same table."""
+    provider, client = _provider(_text_response("ok"), model=model)
+
+    await provider.complete(messages=[{"role": "user", "content": "hi"}])
+
+    assert "effort" not in client.messages.last_kwargs.get("output_config", {})
+
+
+@pytest.mark.parametrize(
+    "model",
+    ["claude-opus-5", "claude-opus-4-5", "claude-sonnet-5", "claude-fable-5"],
+)
+async def test_effort_is_still_sent_to_every_model_that_accepts_it(model: str) -> None:
+    """The other direction, and the guard on the gate. A fix that just deleted
+    the field would pass the test above and quietly stop keeping thinking
+    shallow on the default arm -- paying Opus-depth reasoning on every segment
+    of every session, silently, with no failing test anywhere.
+    """
+    provider, client = _provider(_text_response("ok"), model=model)
+
+    await provider.complete(messages=[{"role": "user", "content": "hi"}])
+
+    assert client.messages.last_kwargs["output_config"]["effort"] == "low"
+
+
+async def test_a_haiku_request_carries_no_output_config_at_all_without_a_schema() -> None:
+    """`{}` is not what "no output configuration" looks like on the wire, and
+    an empty object is a shape the endpoint has no reason to accept."""
+    provider, client = _provider(_text_response("ok"), model="claude-haiku-4-5")
+
+    await provider.complete(messages=[{"role": "user", "content": "hi"}])
+
+    assert "output_config" not in client.messages.last_kwargs
+
+
+async def test_haiku_still_gets_schema_enforcement_it_only_loses_effort() -> None:
+    """The gate is on the KEY, not the container -- structured output IS
+    supported on Haiku 4.5. Dropping `output_config` wholesale for Haiku would
+    have fixed the 400 by removing schema enforcement from the one arm this
+    provider pins a cap for, handing the Distiller un-enforced JSON and moving
+    the failure somewhere quieter.
+    """
+    provider, client = _provider(
+        _text_response('{"findings": []}'), model="claude-haiku-4-5"
+    )
+
+    await provider.complete(
+        messages=[{"role": "user", "content": "hi"}], response_schema=SCHEMA
+    )
+
+    sent = client.messages.last_kwargs["output_config"]
+    assert sent["format"]["type"] == "json_schema"
+    assert sent["format"]["schema"]["additionalProperties"] is False
+    assert "effort" not in sent
+
+
+def test_an_unknown_model_omits_effort_rather_than_risking_the_request() -> None:
+    """The fallback direction, stated on its own because it is the opposite of
+    the max-tokens table's and the two sit four lines apart. That one falls
+    back to the generous default so an unlisted model still works; this one
+    falls back to omitting, because a model nobody listed might be the next
+    Haiku and losing a tuning knob is cheaper than losing the arm.
+    """
+    assert supports_effort("some-model-released-next-month") is False
+    assert supports_effort("claude-opus-4-1") is False, (
+        "predates the parameter -- and the reason the fragments are "
+        "version-specific rather than a bare 'opus'"
+    )
+    assert supports_effort("claude-opus-5") is True
 
 
 # --- correction #1: schema tightened with additionalProperties: false ------------

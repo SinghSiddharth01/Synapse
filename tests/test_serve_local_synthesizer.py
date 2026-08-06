@@ -157,3 +157,67 @@ def test_every_value_is_a_string_because_the_environment_has_no_other_type(
     for npu in (True, False):
         env = serve_local.service_env_for(npu=npu, model_url=MODEL_URL)
         assert all(isinstance(v, str) for v in env.values()), env
+
+
+# --- and `main` actually uses it -------------------------------------------------
+#
+# Everything above calls `service_env_for` directly, which pins the helper and
+# nothing else. `service_env_for` was extracted from `main` precisely so it
+# could be asserted, and that extraction is only worth anything while `main`
+# still goes through it: re-inlining a dict at the call site leaves every test
+# above green while `--npu` stops reaching the service — the exact failure this
+# file's docstring claims to cover, back with a full suite behind it.
+#
+# Read off the source rather than run it: `main` spawns real subprocesses and
+# blocks on health checks, so calling it here would start the stack. The AST is
+# the honest way to assert the call site without doing that, and it fails on the
+# revert — which is the whole test.
+
+
+def _main_body(serve_local):
+    import ast
+    import inspect
+
+    tree = ast.parse(inspect.getsource(serve_local.main))
+    return next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "main"
+    )
+
+
+def test_main_builds_the_service_environment_through_the_helper(serve_local) -> None:
+    """The call site, with `--npu` threaded into it. A re-inlined dict fails
+    here; so does a call that hard-codes an arm and drops `args.npu`, which is
+    the shape the flag going dead would actually take."""
+    import ast
+
+    calls = [
+        node for node in ast.walk(_main_body(serve_local))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "service_env_for"
+    ]
+
+    assert len(calls) == 1, "main must build the service env in exactly one place"
+    passed = {kw.arg: ast.unparse(kw.value) for kw in calls[0].keywords}
+    assert passed == {"npu": "args.npu", "model_url": "model_url"}, passed
+
+
+def test_main_never_hand_rolls_the_synthesizer_environment(serve_local) -> None:
+    """The other half, and the one that catches a partial revert: a call to the
+    helper is no use if its result is then overwritten, or if a second inline
+    dict is what actually reaches `spawn`. SYNAPSE_SYNTHESIZER is the key that
+    decides the arm, so it must appear in `main` exactly nowhere.
+    """
+    import ast
+
+    literals = [
+        ast.unparse(node) for node in ast.walk(_main_body(serve_local))
+        if isinstance(node, ast.Constant) and node.value == "SYNAPSE_SYNTHESIZER"
+    ]
+
+    assert literals == [], (
+        "main sets SYNAPSE_SYNTHESIZER itself — service_env_for is no longer "
+        "the single source of the arm, and every test above is testing a "
+        "function nothing calls"
+    )

@@ -315,6 +315,13 @@ async def test_the_fake_fails_loudly_rather_than_answering_with_nothing(
 
     An empty script that answered blandly would reproduce the 282fd07 symptom
     exactly — queries returning nothing, with a 200, and no error anywhere.
+
+    Narrow on purpose. `pytest.raises(Exception)` was passing on a TypeError
+    from a signature change: renaming `response_schema` on `FakeProvider.
+    complete` kept this test green while it never reached the exhaustion path
+    it exists to assert. The point of the test is that the fake fails for the
+    RIGHT reason, so the reason is what gets asserted — the type and the
+    message, not merely that something was raised.
     """
     from synapse_providers import FakeProvider
 
@@ -322,5 +329,5 @@ async def test_the_fake_fails_loudly_rather_than_answering_with_nothing(
     provider = _provider()
 
     assert isinstance(provider, FakeProvider)
-    with pytest.raises(Exception):
+    with pytest.raises(RuntimeError, match=r"scripts exhausted after 0 call\(s\)"):
         await provider.complete(messages=[], response_schema=SCHEMA)

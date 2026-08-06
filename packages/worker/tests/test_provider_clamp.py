@@ -58,12 +58,26 @@ response_reserve = {reserve}
 
 @pytest.fixture(autouse=True)
 def _no_env_overrides(monkeypatch):
-    """Every SYNAPSE_* key `load_config` reads, cleared. Otherwise a stray
-    export in the runner's environment silently rewrites the numbers this file
-    exists to pin."""
+    """Every SYNAPSE_* key this file's numbers depend on, cleared. Otherwise a
+    stray export in the runner's environment silently rewrites the numbers this
+    file exists to pin.
+
+    The first block is what `load_config` reads. The second is what
+    `AnthropicProvider` reads, and it was missing: this file predates the
+    Anthropic arm, and `test_the_anthropic_arm_keeps_its_own_much_larger_budget`
+    below asserts on `provider.max_tokens` for a provider that resolves BOTH of
+    them. Measured, on the unfixed fixture: an exported
+    SYNAPSE_ANTHROPIC_MAX_TOKENS=100 turned that test red (`assert 100 > 500`)
+    on a tree with nothing wrong with it, and SYNAPSE_ANTHROPIC_MODEL=claude-
+    haiku-4-5 silently moved it from asserting against 16000 to asserting
+    against 4096 -- still green, still clearing both bars, no longer testing
+    what it says. `packages/providers/tests/test_anthropic_provider.py` has the
+    same fixture for the same reason; this is the copy that was missing.
+    """
     for key in (
         "MODEL", "PROMPT_PACK", "MAX_TOKENS", "SEGMENT_BUDGET", "BASE_URL",
         "MAX_SECONDS_PER_CALL", "DISTILLER",
+        "ANTHROPIC_MODEL", "ANTHROPIC_MAX_TOKENS",
     ):
         monkeypatch.delenv(f"SYNAPSE_{key}", raising=False)
 
