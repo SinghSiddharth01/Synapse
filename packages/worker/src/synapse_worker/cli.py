@@ -315,6 +315,14 @@ def _build(args: argparse.Namespace, debug_port: int = 0):
         # heuristic resolution, or DEFAULT_AGENT for an explicit --transcript
         # path whose dialect nothing here inferred.
         agent=binding.agent,
+        # False for exactly one branch above: `--transcript <path>`, where
+        # `agent_session_id` is the file's STEM and nothing has verified that
+        # it is an Agent Session id at all (for Codex it certainly is not --
+        # `rollout-<ts>-<uuid>.jsonl`). The loop uses this to decide whether
+        # "no per-session binding for my id" means "another window's join,
+        # not mine" (identified) or "I have no id to match with, so read the
+        # machine's single answer exactly as before W2" (not identified).
+        session_identified=resolved is not None,
     )
     source = resolved.source if resolved is not None else "explicit --transcript"
     return config, loop, transcript, producer, source, stats

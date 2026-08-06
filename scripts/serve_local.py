@@ -411,10 +411,23 @@ def main(argv: list[str] | None = None) -> int:
     scratch = STATE / "scratch-transcript.jsonl"
     scratch.parent.mkdir(parents=True, exist_ok=True)
     scratch.touch(exist_ok=True)
+    # `scope="machine"` is load-bearing, not decoration (W2, 2026-08-06). This
+    # script runs BEFORE any conversation exists, so it cannot know a real
+    # Agent Session id and `as-<contributor>` is a LABEL, never an id anything
+    # can match. Every real Claude Code window reports its own `session_id`, so
+    # the freshness hook's exact-match gate could never fire against this file
+    # and the pointer was structurally silent on the one path docs/JOIN.md
+    # documents — verified by running the shipped hook as a subprocess: with a
+    # stdin session_id it emitted nothing at all, and only the TTY/no-id case
+    # spoke. `scope="machine"` is what says "this MACHINE is joined; any
+    # conversation here speaks for it, under its own real session id", which
+    # both the hook (`_resolve_binding`) and the orchestrator
+    # (`_effective_binding`) act on.
     write_binding(STATE / "bindings" / "claude-code.json", SessionBinding(
         agent_session_id=f"as-{args.contributor}",
         shared_id=shared_id, contributor=args.contributor, agent="claude-code",
-        transcript_path=str(scratch), pinned_at=datetime.now(timezone.utc)))
+        transcript_path=str(scratch), pinned_at=datetime.now(timezone.utc),
+        scope="machine"))
 
     orchestrator_env = {"SYNAPSE_BASE_URL": model_url,
                         "SYNAPSE_DISTILLER": args.distiller}

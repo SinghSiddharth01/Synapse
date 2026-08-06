@@ -291,13 +291,19 @@ def test_a_binding_file_written_before_scope_existed_still_loads(tmp_path) -> No
 # pruning — one file per conversation accumulates; dead ones go
 # ---------------------------------------------------------------------------
 
-def test_join_prunes_per_session_bindings_whose_transcript_is_gone(tmp_path) -> None:
+def test_join_prunes_per_session_bindings_whose_transcript_is_long_gone(tmp_path) -> None:
+    """Housekeeping's job: bound accumulation over a machine's lifetime.
+
+    "Long gone" is both halves of the rule — the transcript is missing AND the
+    pin is older than `_DEAD_BINDING_GRACE`. The pin here is a month old, which
+    is what makes this file dead weight rather than a live sibling; the test
+    below pins the other half."""
     root = tmp_path / "projects"
     cwd = tmp_path / "repo"
     cwd.mkdir()
     state_dir = tmp_path / "state"
     live = _make_claude_transcript(root, cwd, SESSION_A)
-    base = datetime(2026, 8, 6, 10, 0, tzinfo=timezone.utc)
+    base = datetime.now(timezone.utc) - timedelta(days=30)
 
     dead_path = binding_path_for_session(state_dir, "claude-code", SESSION_B)
     write_binding(dead_path, _binding(SESSION_B, "sh-old", tmp_path / "deleted.jsonl",
@@ -328,6 +334,37 @@ def test_pruning_keeps_bindings_whose_transcript_still_exists(tmp_path) -> None:
 
     assert prune_dead_bindings(state_dir, "claude-code") == []
     assert keep.is_file()
+
+
+def test_a_recent_binding_survives_a_siblings_join_even_with_its_transcript_gone(
+    tmp_path,
+) -> None:
+    """2026-08-06 review, reproduced. Window A joins; A's transcript then goes
+    (compaction, a cleaned `~/.claude`, an external tool, a `mv`); window B
+    joins minutes later — and B's join DELETED A's binding, after which
+    `run --agent-session-id A` refuses to start at all, because
+    `resolve_transcript` correctly refuses to guess which conversation it is.
+    A binding minutes old belongs to a conversation that is very likely still
+    open. Housekeeping bounds accumulation; it does not adjudicate liveness,
+    which it has no way to do."""
+    root = tmp_path / "projects"
+    cwd = tmp_path / "repo"
+    cwd.mkdir()
+    state_dir = tmp_path / "state"
+    transcript_a = _make_claude_transcript(root, cwd, SESSION_A)
+    _make_claude_transcript(root, cwd, SESSION_B)
+
+    join_session("sh-a", "akhil", cwd, state_dir,
+                 projects_root=root, agent_session_id=SESSION_A)
+    a_binding = binding_path_for_session(state_dir, "claude-code", SESSION_A)
+    assert a_binding.is_file()
+
+    transcript_a.unlink()
+    join_session("sh-b", "akhil", cwd, state_dir,
+                 projects_root=root, agent_session_id=SESSION_B)
+
+    assert a_binding.is_file()
+    assert prune_dead_bindings(state_dir, "claude-code") == []
 
 
 # ---------------------------------------------------------------------------
@@ -385,6 +422,48 @@ def test_an_unbound_session_id_refuses_rather_than_following_the_other_window(
 
     assert resolve_transcript(cwd, state_dir, agent_session_id=SESSION_A,
                               projects_root=root) is None
+
+
+def test_a_named_session_whose_transcript_vanished_refuses_the_heuristic(
+    tmp_path,
+) -> None:
+    """2026-08-06 review, reproduced. The binding EXISTS for the named
+    conversation but its transcript has been moved or deleted — and that arm
+    used to fall through to `find_live_transcript`, which sorts by mtime and
+    hands back whichever OTHER window wrote most recently. Verified before the
+    fix: `resolve_transcript(..., agent_session_id=A)` returned window B's file
+    with `source="heuristic"`, which the caller has no way to notice, because a
+    resolved transcript looks exactly like a correct one.
+
+    The refusal is the same one the no-binding case already made, and for the
+    same reason: a caller that names its own conversation would rather have
+    nothing than somebody else's."""
+    root = tmp_path / "projects"
+    cwd = tmp_path / "repo"
+    cwd.mkdir()
+    state_dir = tmp_path / "state"
+    transcript_a = _make_claude_transcript(root, cwd, SESSION_A)
+    transcript_b = _make_claude_transcript(root, cwd, SESSION_B)
+
+    join_session("sh-a", "akhil", cwd, state_dir,
+                 projects_root=root, agent_session_id=SESSION_A)
+    join_session("sh-b", "akhil", cwd, state_dir,
+                 projects_root=root, agent_session_id=SESSION_B)
+    transcript_a.unlink()
+
+    # The premise: detection has an answer sitting right there, and the
+    # binding for A is still on disk — so this is a fall-through, not a miss.
+    assert resolve_transcript(cwd, state_dir, projects_root=root).path == transcript_b
+    assert resolve_agent_binding(state_dir, "claude-code", SESSION_A) is not None
+
+    assert resolve_transcript(cwd, state_dir, agent_session_id=SESSION_A,
+                              projects_root=root) is None
+
+    # And the un-named call is untouched: nobody asked for a particular
+    # conversation, so the most recently pinned live binding is still the
+    # answer, exactly as before W2.
+    unnamed = resolve_transcript(cwd, state_dir, projects_root=root)
+    assert (unnamed.source, unnamed.local_binding.shared_id) == ("pinned", "sh-b")
 
 
 def test_cli_run_resolution_threads_the_agent_session_id(tmp_path, monkeypatch) -> None:
@@ -483,6 +562,114 @@ async def test_a_second_windows_join_does_not_retarget_this_loop(tmp_path) -> No
     await loop.tick()
 
     assert producer.shared_id == "sh-a2"
+
+
+async def test_a_transcript_run_still_notices_its_own_rejoin(tmp_path) -> None:
+    """2026-08-06 review, reproduced. `run --transcript <path>` has no join
+    binding at all, so `cli._build` fills `agent_session_id` with the FILE'S
+    STEM — a string nothing verified and, for Codex
+    (`rollout-<ts>-<uuid>.jsonl`), certainly not a session id. It therefore
+    never matches a per-session binding, and the pass-1 narrowing
+    (`has_per_session_bindings`) then disabled the product-level fallback for
+    it the moment ANY other window had joined — silently turning trap #8's
+    live re-join back off for that whole class of runs.
+
+    Measured before the fix, same fixture: with only the mirror on disk the
+    re-join was seen (`shared_id == "shared-2"`); with a sibling's per-session
+    file present as well it was MISSED (`"shared-1"`). `session_identified`
+    is the distinction: a loop that cannot know which conversation it is has
+    no basis to refuse the machine's single answer."""
+    state_dir = tmp_path / "state"
+    transcript = tmp_path / "scratch.jsonl"
+    transcript.touch()
+    unidentified = LocalBinding(agent_session_id="scratch", shared_id="shared-1",
+                                contributor="akhil", agent="claude-code")
+    producer = Producer(state_dir / "wal", FileSink(tmp_path / "upstream.jsonl"))
+    loop = WorkerLoop(
+        transcript=transcript,
+        distiller=Distiller(FakeProvider(scripts=[]), unidentified,
+                            load_pack_by_name("v4-condense"), ["text"], "labelled"),
+        producer=producer,
+        binding=unidentified,
+        state_dir=state_dir,
+        budget_tokens=5000,
+        session_identified=False,      # what `--transcript` sets
+    )
+
+    # A sibling window joins — which under the pass-1 rule alone was enough to
+    # make this loop stop reading the mirror at all.
+    base = datetime(2026, 8, 6, 12, 0, tzinfo=timezone.utc)
+    write_binding(binding_path_for_session(state_dir, "claude-code", SESSION_B),
+                  _binding(SESSION_B, "shared-other", transcript, pinned_at=base))
+    # ...and then THIS window is re-joined from its own terminal, which writes
+    # the mirror (and a per-session file under the REAL session id, which this
+    # loop's stem still cannot match).
+    for path in (binding_path_for_session(state_dir, "claude-code", SESSION_A),
+                 binding_path_for_agent(state_dir, "claude-code")):
+        write_binding(path, _binding(SESSION_A, "shared-2", transcript,
+                                     pinned_at=base + timedelta(minutes=1)))
+
+    await loop.tick()
+
+    assert producer.shared_id == "shared-2"
+
+
+async def test_an_identified_loop_still_refuses_a_siblings_join(tmp_path) -> None:
+    """The other side of `session_identified`, so the fix above cannot be
+    "always fall back". A loop that DOES know its own conversation keeps the
+    pass-1 guarantee: somebody else's join is not a re-join of mine."""
+    state_dir = tmp_path / "state"
+    transcript = tmp_path / "t.jsonl"
+    transcript.touch()
+    binding_a = LocalBinding(agent_session_id=SESSION_A, shared_id="sh-a",
+                             contributor="akhil", agent="claude-code")
+    producer = Producer(state_dir / "wal", FileSink(tmp_path / "upstream.jsonl"))
+    loop = WorkerLoop(
+        transcript=transcript,
+        distiller=Distiller(FakeProvider(scripts=[]), binding_a,
+                            load_pack_by_name("v4-condense"), ["text"], "labelled"),
+        producer=producer,
+        binding=binding_a,
+        state_dir=state_dir,
+        budget_tokens=5000,
+        session_identified=True,
+    )
+    base = datetime(2026, 8, 6, 12, 0, tzinfo=timezone.utc)
+    for path in (binding_path_for_session(state_dir, "claude-code", SESSION_B),
+                 binding_path_for_agent(state_dir, "claude-code")):
+        write_binding(path, _binding(SESSION_B, "sh-b", transcript, pinned_at=base))
+
+    await loop.tick()
+
+    assert producer.shared_id == "sh-a"
+
+
+def test_build_marks_a_transcript_run_as_unidentified(tmp_path, monkeypatch) -> None:
+    """The wiring, not just the mechanism: `--transcript` is the ONLY branch of
+    `cli._build` that sets `session_identified=False`, and a resolved run (join-
+    pinned or detected) sets True."""
+    root = tmp_path / "projects"
+    cwd = tmp_path / "repo"
+    cwd.mkdir()
+    state_dir = tmp_path / "state"
+    transcript = _make_claude_transcript(root, cwd, SESSION_A)
+    monkeypatch.chdir(cwd)
+    monkeypatch.setenv("SYNAPSE_STATE_DIR", str(state_dir))
+
+    join_session("sh-a", "akhil", cwd, state_dir,
+                 projects_root=root, agent_session_id=SESSION_A)
+
+    resolved_args = argparse.Namespace(agent=None, agent_session_id=SESSION_A,
+                                       transcript=None, shared_id="x", contributor="akhil")
+    explicit_args = argparse.Namespace(agent=None, agent_session_id=None,
+                                       transcript=str(transcript), shared_id="x",
+                                       contributor="akhil")
+
+    _, resolved_loop, _, _, _, _ = cli._build(resolved_args)
+    _, explicit_loop, _, _, _, _ = cli._build(explicit_args)
+
+    assert resolved_loop.session_identified is True
+    assert explicit_loop.session_identified is False
 
 
 # ---------------------------------------------------------------------------

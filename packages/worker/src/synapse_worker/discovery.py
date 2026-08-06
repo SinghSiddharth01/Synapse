@@ -68,7 +68,7 @@ import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from synapse_contracts import LocalBinding, SessionBinding, read_binding, write_binding
@@ -567,24 +567,51 @@ def has_per_session_bindings(state_dir: Path, agent: str) -> bool:
     return per_session.is_dir() and any(per_session.glob("*.json"))
 
 
+# How long a per-session binding whose transcript has vanished is left alone
+# before housekeeping may delete it. Not a tuning knob — it is the whole of the
+# 2026-08-06 review fix for `prune_dead_bindings`. Reproduced there: window A
+# joins, A's transcript is moved/deleted (compaction, a cleaned `~/.claude`, an
+# external tool), window B joins minutes later, and B's join DELETED A's
+# binding — after which `run --agent-session-id A` refuses to start, because
+# `resolve_transcript` correctly refuses to guess. A binding minutes old
+# belongs to a conversation that is very likely still open; one whose
+# transcript has been gone for a week does not. Housekeeping exists to bound
+# accumulation over a machine's lifetime, which a week does, and never to
+# adjudicate liveness, which it cannot.
+_DEAD_BINDING_GRACE = timedelta(days=7)
+
+
 def prune_dead_bindings(state_dir: Path, agent: str) -> list[Path]:
-    """Delete per-session bindings whose transcript is gone. Returns what went.
+    """Delete LONG-dead per-session bindings. Returns what went.
+
+    "Long-dead" is: the transcript named by the binding no longer exists AND
+    the pin is older than `_DEAD_BINDING_GRACE`. Both halves are required —
+    see that constant for the sibling-window deletion the second half fixes.
 
     Opportunistic housekeeping, called from `join_session`. One file per
     conversation means files accumulate for as long as a machine keeps opening
-    agent windows, and a binding whose transcript no longer exists is already
-    dead weight — `resolve_transcript` skips it and falls back to detection.
-    Only the per-session directory is swept: the legacy mirror is what
-    un-upgraded readers depend on and is overwritten, never deleted, here.
+    agent windows, and a binding whose transcript has been gone for a week is
+    dead weight — `resolve_transcript` already refuses to act on it. Only the
+    per-session directory is swept: the legacy mirror is what un-upgraded
+    readers depend on and is overwritten, never deleted, here.
     """
     per_session = binding_dir_for_agent(state_dir, agent)
     if not per_session.is_dir():
         return []
 
+    cutoff = datetime.now(timezone.utc) - _DEAD_BINDING_GRACE
     removed: list[Path] = []
     for path in sorted(per_session.glob("*.json")):
         binding = read_binding(path)
         if binding is None or Path(binding.transcript_path).is_file():
+            continue
+        if _pinned_at_key(binding) > cutoff:
+            logger.debug(
+                "Binding %s names a transcript that is gone, but was pinned %s — "
+                "inside the %s grace window, so it is left alone: a conversation "
+                "whose transcript moved is not a conversation that ended.",
+                path, binding.pinned_at, _DEAD_BINDING_GRACE,
+            )
             continue
         try:
             path.unlink()
@@ -825,6 +852,24 @@ def resolve_transcript(
                 source="pinned",
                 local_binding=pinned.to_local_binding(),
             )
+        if agent_session_id is not None:
+            # The SAME refusal as the no-binding case above, and it has to be
+            # (2026-08-06 review): a named conversation whose binding exists but
+            # whose transcript has been moved or deleted used to fall through to
+            # `find_live_transcript` below, which sorts by mtime and hands back
+            # whichever OTHER window wrote most recently. Reproduced: two joins,
+            # window A's transcript unlinked, `resolve_transcript(...,
+            # agent_session_id=A)` returned window B's file with
+            # `source="heuristic"` — precisely the substitution this argument
+            # exists to prevent, and invisible because the answer looks valid.
+            logger.warning(
+                "The binding for agent_session_id %s names transcript %s, which no "
+                "longer exists; NOT falling back to detection, because that would "
+                "follow a different conversation than the one named. Re-run "
+                "`synapse-worker join <shared_id> --agent-session-id %s`.",
+                agent_session_id, transcript_path, agent_session_id,
+            )
+            return None
         logger.warning(
             "Bound transcript %s no longer exists; falling back to detection. "
             "Run `synapse-worker join <shared_id>` again to re-bind.",
