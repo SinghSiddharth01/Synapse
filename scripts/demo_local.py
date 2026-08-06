@@ -70,6 +70,46 @@ def detail(message: str) -> None:
     print(f"    {message}", flush=True)
 
 
+class Guide:
+    """Predict, then act, then confirm — the loop that makes a running system
+    legible.
+
+    Narrating a step only after it has happened is the difference between a
+    demo you watch and one you can follow: by the time the line is printed the
+    dashboard has already moved, and nothing tells you which change belonged to
+    which cause. So every beat first says what is about to happen and exactly
+    where on which page to watch for it, waits (when a human is driving), and
+    only then reports what actually occurred.
+    """
+
+    def __init__(self, paused: bool) -> None:
+        self.paused = paused
+        self.number = 0
+
+    def beat(self, title: str, *, doing: str, watch: list[str], why: str) -> None:
+        self.number += 1
+        print(f"\n\033[1m── {self.number}. {title}\033[0m", flush=True)
+        print(f"   I'm about to:  {doing}", flush=True)
+        print("   Watch for:", flush=True)
+        for line in watch:
+            print(f"      · {line}", flush=True)
+        print(f"   Why it matters: {why}", flush=True)
+        if self.paused:
+            try:
+                input("\n   [Enter] when you're looking at the page — ")
+            except EOFError:
+                self.paused = False
+
+    def happened(self, *lines: str) -> None:
+        print("   ↳ what happened:", flush=True)
+        for line in lines:
+            print(f"      {line}", flush=True)
+
+    def wait(self, seconds: float, what: str) -> None:
+        """A visible countdown, so a pause never looks like a hang."""
+        print(f"   (waiting up to {int(seconds)}s — {what})", flush=True)
+
+
 def http(method: str, url: str, body: dict | None = None, timeout: float = 60.0) -> Any:
     request = urllib.request.Request(
         url,
@@ -267,6 +307,42 @@ def _appended(stats: dict[str, Any]) -> int:
     })
 
 
+def print_dashboard_primer(paused: bool) -> None:
+    """What the two pages mean, once, before anything moves on them."""
+    print("""
+\033[1m── how to read the two pages\033[0m
+
+   The copper page (8790 / 8791) is ONE developer's laptop. Left to right it
+   follows a transcript into a finding:
+
+      TRANSCRIPT  lines read so far          HELD      lines in an unfinished turn
+      TRIAGE      keep · skip                NPU NOW   live timer while the model runs
+      PUSH        sent / queued (queued = the orchestrator is down; nothing is lost)
+
+   Below it, a feed tagged tick / triage / compaction / render / llm / push.
+   Click an `llm` row to see the actual prompt and the actual output.
+
+   The teal page (8899) is the shared side — every laptop's findings together:
+
+      INGEST  log entries, append-only     FOLD   visible · superseded · trivial
+      MERGE   reconciliations so far       QUERY  questions asked, suppression-aware
+
+   Below it, the log itself. That log IS the history: FINDINGAPPENDED when
+   something lands, MERGED when two become one. Nothing is ever deleted from
+   it — superseded findings are still there, still attributed.
+
+   The one thing to keep in mind: a worker only closes a segment after the
+   conversation goes QUIET for a moment, so every step below has a lag of
+   about 15 seconds before anything appears. That wait is real behaviour, not
+   the demo being slow.
+""", flush=True)
+    if paused:
+        try:
+            input("   [Enter] once both pages are open side by side — ")
+        except EOFError:
+            pass
+
+
 def triage_record(port: int) -> list[str]:
     """What the worker's own dashboard says triage decided, and why."""
     try:
@@ -319,6 +395,12 @@ def main(argv: list[str] | None = None) -> int:
                              "it off unless you are demonstrating the UI itself.")
     parser.add_argument("--exit-when-done", action="store_true",
                         help="stop everything after the walkthrough instead of leaving it up")
+    # Paced when a person is driving, continuous when a script is. Nobody
+    # should have to know a flag exists to be able to follow along.
+    parser.add_argument("--step", action=argparse.BooleanOptionalAction,
+                        default=sys.stdin.isatty(),
+                        help="pause before each beat so you can watch it happen "
+                             "(default: on when run from a terminal)")
     args = parser.parse_args(argv)
 
     claim_ports([18181, 8899, 8787] + [plan["port"] for plan in FEED.values()])
@@ -431,87 +513,139 @@ def main(argv: list[str] | None = None) -> int:
     detail(f"{SERVICE_URL}/debug   the service")
     time.sleep(3)
 
-    say("6. Aditya works: a lint pass, then the timing discovery")
+    guide = Guide(paused=args.step)
+    print_dashboard_primer(args.step)
+
     aditya = DEMO / "transcripts" / f"{sessions['aditya']}.jsonl"
-    for segment_id in FEED["aditya"]["segments"]:
-        append_segment(aditya, segment_id, sessions["aditya"])
-        detail(f"appended {segment_id} to {aditya.name}")
-        time.sleep(args.interval + args.idle_flush + 4)
+    sid = DEMO / "transcripts" / f"{sessions['sid']}.jsonl"
+    settle = args.interval + args.idle_flush + 4
+
+    guide.beat(
+        "Aditya runs a linter — work that is not worth remembering",
+        doing="append 8 lines to his transcript: a lint run that found and fixed 3 errors",
+        watch=[f"worker 8790 — TRANSCRIPT ticks up as the lines are read",
+               f"worker 8790 — a copper `triage` row appears saying SKIP",
+               f"worker 8790 — NPU NOW stays idle, PUSH stays 0: no model call at all",
+               f"service 8899 — nothing happens here. That is the point."],
+        why="triage decides before the model runs, so routine work costs no NPU "
+            "time. On a real day this is most of a transcript.",
+    )
+    append_segment(aditya, "seg-004", sessions["aditya"])
+    guide.wait(settle, "the turn has to go quiet before the segment closes")
+    time.sleep(settle)
+    guide.happened(*triage_record(FEED["aditya"]["port"]))
+
+    guide.beat(
+        "Aditya finds the real thing",
+        doing="append 2 more lines: he bisects the timing and lands on a ~40 ms window",
+        watch=["worker 8790 — `triage` row says KEEP this time",
+               "worker 8790 — NPU NOW lights up while the model runs, then an `llm` row",
+               "worker 8790 — `render` shows how many events reached the model, then PUSH 1 sent",
+               "service 8899 — INGEST goes to 1 and a FINDINGAPPENDED row lands in the log tail"],
+        why="this is the entire edge path in one move: transcript → segment → "
+            "triage → model → write-ahead log → out through the orchestrator.",
+    )
+    append_segment(aditya, "seg-005a", sessions["aditya"])
+    guide.wait(90, "segment close, then the model, then the push")
     landed = wait_for_findings(shared_id, 1, seconds=90)
-    detail(f"{landed} finding(s) in the service log")
-    # Read the worker's own triage record rather than asserting the outcome.
-    # `seg-004`'s golden is empty, so a triage regression that KEPT it would
-    # produce an identical finding count — the claim has to be checked where
-    # the decision was actually made.
-    for line in triage_record(FEED["aditya"]["port"]):
-        detail(line)
+    guide.happened(f"{landed} finding(s) in the service log",
+                   *triage_record(FEED["aditya"]["port"])[-1:])
 
     question = "why does the fec decode fail?"
 
-    say("7. the same question, asked by two different sessions")
+    guide.beat(
+        "the same question, asked by two different sessions",
+        doing=f"POST {question!r} twice — once as a stranger, once as Aditya himself",
+        watch=["service 8899 — two `query` rows appear in the bottom panel",
+               "service 8899 — one says `1 candidates, 1 ranked`, the other `0 candidates, 0 ranked`"],
+        why="shared memory is what OTHERS learned. Aditya already has this in "
+            "his own context window, so returning it to him is noise.",
+    )
     outsider = (http("POST", f"{SERVICE_URL}/v1/sessions/{shared_id}/query",
                      {"query": question, "agent_session": "as-observer"})
                 .get("findings") or [])
     mine = (http("POST", f"{SERVICE_URL}/v1/sessions/{shared_id}/query",
                  {"query": question, "agent_session": sessions["aditya"]})
             .get("findings") or [])
-    detail(f"a session that contributed nothing sees {len(outsider)}")
-    detail(f"the session that FOUND it sees {len(mine)}")
-    detail("what Aditya already has in his own context window is not news to "
-           "Aditya — invariant 3, suppression by attribution")
-    if not args.live:
-        # Say which half of retrieval this actually demonstrated. Suppression
-        # is real code and runs before the model; the ranking that follows it
-        # is the stand-in's identity function, so nothing here shows relevance.
-        detail("(offline: WHICH findings are offered is real suppression; the "
-               "ranking after it is the stand-in returning them in log order)")
+    guide.happened(
+        f"a session that contributed nothing sees {len(outsider)}",
+        f"the session that FOUND it sees {len(mine)}",
+        "same query, same store, different answer — invariant 3",
+        *([] if args.live else [
+            "(offline caveat: WHICH findings are offered is real suppression; "
+            "the ranking after it is the stand-in returning them in log order, "
+            "not a judgement)"]),
+    )
 
-    say("8. Sid hits the same wall, independently")
-    sid = DEMO / "transcripts" / f"{sessions['sid']}.jsonl"
+    guide.beat(
+        "Sid hits the same wall, in his own words",
+        doing="append his segment to the OTHER transcript — he says '40 milliseconds', "
+              "Aditya said '40 ms'",
+        watch=["worker 8791 — this is Sid's page; the same sequence runs there",
+               "service 8899 — INGEST goes to 2, a second FINDINGAPPENDED lands",
+               "service 8899 — FOLD briefly reads 2 visible"],
+        why="two people finding the same thing separately is the problem this "
+            "whole system exists for. Right now shared memory holds it twice.",
+    )
     append_segment(sid, "seg-005b", sessions["sid"])
-    detail("appended seg-005b to " + sid.name)
+    guide.wait(120, "Sid's segment through the same path")
     landed = wait_for_findings(shared_id, landed + 1, seconds=120)
-    detail(f"{landed} finding(s) in the service log")
+    guide.happened(f"{landed} finding(s) in the service log, from 2 contributors")
 
-    say("9. what synthesis did with them")
+    guide.beat(
+        "synthesis reconciles them",
+        doing="nothing — this already ran on Sid's push. Reading what it did.",
+        watch=["service 8899 — a MERGED row in the log tail, naming both source ids",
+               "service 8899 — FOLD flips to 1 visible · 2 superseded",
+               "service 8899 — the MERGE tile goes to 2 and WORKING MEMORY changes"],
+        why="the originals are superseded, never deleted, and the survivor "
+            "carries both contributors' attributions.",
+    )
     merged = wait_for_merge(shared_id, seconds=60)
-    for entry in merged[-3:]:
-        detail(f"MERGED  {entry.get('summary')}")
-    if not merged:
-        detail("no Merged entry — synthesis runs on every push; "
-               f"the log tail is on {SERVICE_URL}/debug")
     stats = service_stats(shared_id)
-    if working := stats.get("working_memory"):
-        detail(f"working memory: {working[:110]}")
     view = stats.get("view") or {}
-    detail(f"fold: {view.get('visible')} visible, {view.get('superseded')} superseded "
-           f"— the originals are tombstoned, never deleted, and still carry their "
-           f"attributions")
+    guide.happened(
+        *[f"MERGED  {e.get('summary')}" for e in merged[-2:]]
+        or ["no Merged entry — synthesis runs on every push; check the log tail"],
+        f"fold: {view.get('visible')} visible, {view.get('superseded')} superseded",
+        f"working memory: {(stats.get('working_memory') or '')[:100]}",
+    )
 
-    say("10. the same question again, now that the two are one")
+    guide.beat(
+        "ask once more, now that the two are one",
+        doing="the same question, as Aditya again",
+        watch=["service 8899 — one more `query` row",
+               "this time Aditya DOES get an answer back"],
+        why="the merged Finding carries both attributions, so it is no longer "
+            "only his — the team's version of what he knew is worth reading back.",
+    )
     after = (http("POST", f"{SERVICE_URL}/v1/sessions/{shared_id}/query",
                   {"query": question, "agent_session": sessions["aditya"]})
              .get("findings") or [])
-    for finding in after[:5]:
-        who = ", ".join(a["contributor"] for a in finding.get("attributions", []))
-        detail(f"→ ({finding['type']}, from {who or 'synthesis'}) {finding['text'][:88]}")
-    if not after:
-        detail("nothing returned")
-    detail("Aditya sees this one even though he half-wrote it: the merged Finding "
-           "carries BOTH attributions, so it is no longer only his — which is the "
-           "point, the team's version of what he knew is worth reading back")
+    guide.happened(*[
+        f"→ ({f['type']}, from {', '.join(a['contributor'] for a in f.get('attributions', []))}) "
+        f"{f['text'][:80]}" for f in after[:5]
+    ] or ["nothing returned"])
 
     if args.exit_when_done:
         say("done — stopping everything")
         stop_all()
         return 0
 
-    say("everything is still running. Ctrl-C to stop.")
+    say("everything is still running — now drive it yourself")
+    detail("The five processes stay up. Use the other script to send work in "
+           "one piece at a time and watch the pages react:")
+    print()
+    detail("uv run python scripts/demo_say.py --list")
+    detail("uv run python scripts/demo_say.py --as aditya --segment seg-003")
+    detail("uv run python scripts/demo_say.py --ask 'what do we know about timing?'")
+    detail("uv run python scripts/demo_say.py --ask 'timing?' --as aditya   # suppression")
+    print()
     for contributor, plan in FEED.items():
         detail(f"http://127.0.0.1:{plan['port']}/debug   {contributor}'s worker")
     detail(f"{SERVICE_URL}/debug   the service")
     detail(f"logs in {DEMO / 'logs'}")
-    detail(f"append more work with: python scripts/demo_local.py --help")
+    detail("Ctrl-C here stops everything.")
     try:
         # Not signal.pause(): that is Unix-only, and on Windows its
         # AttributeError fell straight through to the `finally` below, killing

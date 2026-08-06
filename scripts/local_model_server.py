@@ -133,17 +133,40 @@ def _tokens(text: str) -> int:
     return len(text) // 4
 
 
+def _distil_kinds() -> frozenset[str]:
+    """Which AgentEvent kinds actually reach the model, from the real config.
+
+    Load-bearing for matching. `distil_kinds` is `["text"]`, so a fixture's
+    `tool_use` and `tool_result` content is filtered out by the distiller
+    before a prompt is ever built — seg-003 carries 6 KB of tool_result that
+    the model is never shown. A matcher that required every event's text to
+    appear therefore declared perfectly healthy segments "unmatched" and
+    answered empty. Match against what the system actually sends.
+    """
+    try:
+        import tomllib
+        raw = tomllib.loads((REPO / "config" / "synapse.toml").read_text())
+        kinds = raw.get("distiller", {}).get("distil_kinds")
+        if kinds:
+            return frozenset(str(k) for k in kinds)
+    except Exception:  # noqa: BLE001 — a stub must not die on a config change
+        pass
+    return frozenset({"text"})
+
+
 class Corpus:
     """The repo's fixtures, indexed for matching a live prompt back to them."""
 
     def __init__(self) -> None:
+        kinds = _distil_kinds()
         self.segments: list[tuple[str, list[str], list[dict[str, Any]]]] = []
         for path in sorted(SEGMENTS.glob("*.json")):
             segment = json.loads(path.read_text())
             texts = [
                 str(e.get("content", "")).strip()
                 for e in segment.get("events", [])
-                if len(str(e.get("content", "")).strip()) > 40
+                if e.get("kind") in kinds
+                and len(str(e.get("content", "")).strip()) > 40
             ]
             golden_path = GOLDENS / f"{segment['id']}.findings.json"
             goldens = json.loads(golden_path.read_text()) if golden_path.exists() else []
@@ -152,12 +175,12 @@ class Corpus:
     def match(self, prompt: str) -> tuple[str, list[dict[str, Any]]] | None:
         """Which fixture segment is this prompt carrying?
 
-        EVERY substantive line of the fixture must appear verbatim. A partial
-        match returns None, because returning a fixture's whole golden set for
-        a prompt that carried only part of it is the masking path this file
-        exists to close: compaction truncating a segment, a render regression
-        dropping tool_result content, or a segmenter split would all still
-        produce a full set of findings for content the model never saw.
+        Every substantive line THE DISTILLER WOULD SEND (see `_distil_kinds`)
+        must appear verbatim. A partial match returns None, because returning a
+        fixture's whole golden set for a prompt that carried only part of it is
+        the masking path this file exists to close: compaction truncating a
+        segment, or a segmenter split, would otherwise still produce a full set
+        of findings for content the model never saw.
         """
         for seg_id, texts, goldens in self.segments:
             if texts and all(t in prompt for t in texts):

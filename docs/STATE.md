@@ -15,9 +15,22 @@ Full prior detail: **[`2026-08-04-implementation-report.md`](./2026-08-04-implem
 ## See it run, on any laptop
 
 ```
-uv run python scripts/demo_local.py          # offline, ~2 minutes, nothing to install
+uv run python scripts/demo_local.py          # offline, nothing to install
 uv run python scripts/demo_local.py --live   # a real model behind both model seams
 ```
+
+Run from a terminal it **paces itself**: before each beat it says what it is about to do, exactly which tile on which page will move, and why that matters — then waits for you. Piped or scripted, it runs straight through (`--step` / `--no-step` to force either). It opens with a short primer on how to read the two dashboards, including the one thing that confuses everyone first time: a worker only closes a segment after the conversation goes quiet, so every step has ~15 seconds of lag that is real behaviour, not slowness.
+
+When the walkthrough ends the five processes stay up, and you drive:
+
+```
+uv run python scripts/demo_say.py --list                        # what's available, who's running
+uv run python scripts/demo_say.py --as aditya --segment seg-003 # send work, watch 8790 react
+uv run python scripts/demo_say.py --ask "why do clients disconnect?"          # as an outsider
+uv run python scripts/demo_say.py --ask "why do clients disconnect?" --as aditya
+```
+
+Those last two are the invariant-3 contrast in two commands: after sending `seg-003` as Aditya, an outsider gets 3 findings back and Aditya gets 1 — his own two are suppressed, the merged one is not, because it carries Sid's attribution too.
 
 Five processes over real sockets — a model stand-in, the service, the orchestrator, and two workers each following a live transcript the script appends to *while they tail it*. Detection, segmentation, triage, the write-ahead log, egress through the orchestrator, the append-only log and fold, and suppression all run in real code, and both `/debug` dashboards are up the whole time (`:8790` and `:8791` for the workers, `:8899` for the service). The walkthrough ends on the flagship merge: two contributors hit the same ~40 ms DMA timing window in different words, synthesis reconciles them into one co-attributed Finding, and the originals are superseded rather than deleted. `seg-004` is in the feed on purpose — it is triaged out before the model ever sees it, and the demo prints the worker's own recorded triage decision rather than asserting it.
 
