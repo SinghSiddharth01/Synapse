@@ -206,6 +206,11 @@ def register_tools(server: FastMCP, *, resolve_binding, service_url: str, relay,
     from synapse_contracts import Provenance, Segment
     from synapse_contracts.binding import clear_binding, read_binding
 
+    # Function-local because `briefing` imports THIS module at import time
+    # (`SENTINEL`, `_DEFAULT_INSTRUCTIONS`); at module level the two would be a
+    # cycle. By the time `register_tools` runs, this module is fully loaded.
+    from synapse_orchestrator.briefing import fetch_arrival_summary
+
     # The ONE import of the worker from the orchestrator, and it is here on
     # purpose: the spec requires lifecycle binding writes to go through the
     # worker's existing writer ("one code path — the orchestrator must not
@@ -818,7 +823,17 @@ def register_tools(server: FastMCP, *, resolve_binding, service_url: str, relay,
         "conversation instead of the most recently active one. "
         "The result names the Shared Session id AND the transcript file it bound. "
         "Read both back to the user: a join that bound the wrong transcript looks "
-        "identical from inside this conversation to one that worked."))
+        "identical from inside this conversation to one that worked. "
+        # W5. The result now also carries the session's purpose and a summary
+        # of what the team has already established — the whole point of
+        # joining a session that is hours old. Said here as well as in the
+        # result itself because a tool description is read before the call and
+        # sets the expectation that there IS something to relay.
+        "The result also carries what this session is FOR and what the team has "
+        "already worked out in it, including anything new since you last looked. "
+        "Summarise that for the user in your own words as soon as you get it — "
+        "they cannot see tool results, and a join they hear nothing about is "
+        "indistinguishable from one that did not happen."))
     async def join_session(shared_id: str, agent_session_id: str | None = None) -> str:
         who = _identity()
         if who is None:
@@ -867,10 +882,36 @@ def register_tools(server: FastMCP, *, resolve_binding, service_url: str, relay,
             return (f"Registered as a member of {shared_id}, but this conversation was "
                     f"NOT bound to it — nothing here will reach the team until it is. "
                     f"{refusal}")
-        return (f"Joined Shared Session {shared_id} as {who}, and bound "
-                f"{_summarize(bindings)} to it. Findings from this conversation now go to "
-                f"{shared_id}. Call `query` before investigating anything — the team may "
-                "already know it.")
+        joined = (f"Joined Shared Session {shared_id} as {who}, and bound "
+                  f"{_summarize(bindings)} to it. Findings from this conversation now go "
+                  f"to {shared_id}.")
+        # THE ARRIVAL SUMMARY, delivered here rather than in `instructions` (W5).
+        #
+        # `instructions` is composed at MCP CONNECTION INIT, not at join
+        # (briefing.py's W5 amendment), so a conversation that connected before
+        # it joined — the demo's exact ordering, and the ordinary one for
+        # anybody who joins mid-conversation — was briefed about no session at
+        # all, and this result carried no memory content to make up for it. The
+        # join was silent: nothing the agent could read, therefore nothing it
+        # could say. Returning the summary IN THE TOOL RESULT is what makes the
+        # storyboard's awareness moment possible, because a tool result is the
+        # one surface an agent has just been handed and will speak from.
+        #
+        # AFTER the bind, deliberately. This is the only place the summary can
+        # be fetched with the identity the conversation actually holds, and a
+        # summary is worth nothing attached to a join that did not bind.
+        summary = await fetch_arrival_summary(
+            base, shared_id, contributor=who,
+            agent_session=bindings[0].agent_session_id if bindings else agent_session_id,
+            transport=transport)
+        if summary is None:
+            # Fail open, and say what to do instead: the join WORKED, so the
+            # agent must not report it as broken — but "call `query`" is the
+            # advice that was in this string before the summary existed, and it
+            # is exactly what recovers the missing context by hand.
+            return (f"{joined} Call `query` before investigating anything — the team may "
+                    "already know it.")
+        return f"{joined}\n\n{summary}"
 
     @server.tool(description=(
         "Detach THIS conversation from the Shared Session it is in, leaving the "
