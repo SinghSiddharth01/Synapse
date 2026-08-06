@@ -316,8 +316,18 @@ def main(argv: list[str] | None = None) -> int:
         service = None
     else:
         service_url = SERVICE_URL
-        service = spawn("service", [str(BIN / "synapse-service"),
-                                    "--host", args.host], {
+        # The synthesizer has to speak whatever is actually listening on
+        # model_url. The stand-in serves BOTH /chat/completions and
+        # /completions (see local_model_server.py's docstring), so aic100 --
+        # which needs /completions -- works against it. `geniex serve` does
+        # NOT: it has no /completions route at all, so aic100 against a real
+        # NPU 410s on every synthesis call and the host's own queries come
+        # back empty with a 200. Observed live 2026-08-06, and confirmed
+        # against Qualcomm's endpoint list.
+        service_env = {
+            "SYNAPSE_SYNTHESIZER": "npu",
+            "SYNAPSE_BASE_URL": model_url,
+        } if args.npu else {
             "SYNAPSE_SYNTHESIZER": "aic100",
             "INFERENCE_CLOUD_BASE_URL": model_url,
             "INFERENCE_CLOUD_API_KEY": "local-stand-in",
@@ -333,7 +343,9 @@ def main(argv: list[str] | None = None) -> int:
             # against the old 60s default).
             "INFERENCE_CLOUD_MAX_TOKENS": str(SYNTHESIS_MAX_TOKENS),
             "INFERENCE_CLOUD_TIMEOUT": str(SYNTHESIS_TIMEOUT_S),
-        })
+        }
+        service = spawn("service", [str(BIN / "synapse-service"),
+                                    "--host", args.host], service_env)
         if not wait_for(f"{service_url}/debug", service, "service"):
             raise SystemExit("the service did not come up")
         print(f"service    {service_url}  · dashboard {service_url}/debug", flush=True)

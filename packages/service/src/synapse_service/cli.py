@@ -18,6 +18,22 @@ def _provider():
     if mode == "aic100":
         from synapse_providers import AIC100Provider   # Task 5
         return AIC100Provider()
+    if mode == "npu":
+        # Synthesis against a local `geniex serve`. AIC100Provider CANNOT be
+        # pointed at one: it deliberately uses POST /completions (Cirrascale's
+        # /chat/completions eats emitted JSON into empty tool_calls -- see
+        # aic100.py), and GenieX serves only /chat/completions, /v1/models and
+        # /v1/models/{model}. So aic100-against-GenieX is a 410 Gone on every
+        # synthesis call, which retrieval.query_findings() then catches and
+        # turns into an empty result with a 200 -- a host whose queries return
+        # nothing while its own dashboard shows the findings.
+        from synapse_providers import NPUProvider
+        kwargs = {}
+        if base_url := os.environ.get("SYNAPSE_BASE_URL"):
+            kwargs["base_url"] = base_url
+        if model := os.environ.get("SYNAPSE_MODEL"):
+            kwargs["model"] = model
+        return NPUProvider(**kwargs)
     if mode == "anthropic":
         from synapse_providers import AnthropicProvider
         return AnthropicProvider()
