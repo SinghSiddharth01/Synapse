@@ -52,6 +52,40 @@ NPU_URL = "http://127.0.0.1:18181/v1"   # geniex serve listens here too
 processes: list[tuple[str, subprocess.Popen]] = []
 
 
+def _anthropic_key() -> str | None:
+    """The Anthropic key, from the environment or `secrets.jsonc`.
+
+    Sourced HERE rather than in `AnthropicProvider` on purpose: the house
+    pattern is that scripts read `secrets.jsonc` and packages read the
+    environment (aic100.py takes INFERENCE_CLOUD_API_KEY and knows nothing
+    about repo layout; local_model_server.py does the file reading). Keeping it
+    that way means `packages/` never grows knowledge of where this checkout
+    keeps its credentials.
+
+    Without this, a teammate who reasonably puts their key in the `anthropic`
+    block of secrets.jsonc — where every other credential in this project
+    lives — gets "Could not resolve authentication method" with nothing
+    pointing at the cause. The block was read by nothing at all.
+
+    Never returned to a caller that prints it: only injected into a child's
+    environment.
+    """
+    import json
+    import re
+
+    if key := os.environ.get("ANTHROPIC_API_KEY"):
+        return key
+    secrets = REPO / "secrets.jsonc"
+    if not secrets.exists():
+        return None
+    try:
+        data = json.loads(re.sub(r"^\s*//.*$", "", secrets.read_text(), flags=re.MULTILINE))
+    except json.JSONDecodeError:
+        return None
+    key = (data.get("anthropic") or {}).get("api_key")
+    return str(key) if key else None
+
+
 def lan_ip() -> str | None:
     """This machine's address on the LAN, for teammates to point at.
 
@@ -151,6 +185,11 @@ def main(argv: list[str] | None = None) -> int:
                         help="--live: the small model standing where the NPU sits")
     parser.add_argument("--synthesizer-model", default="Llama-3.3-70B",
                         help="--live: the large model standing where the cloud sits")
+    parser.add_argument("--distiller", choices=("npu", "anthropic"), default="npu",
+                        help="which model does the distilling. `anthropic` uses "
+                             "Claude Opus 5 with YOUR OWN key, so several people can "
+                             "run the full loop at once instead of contending for the "
+                             "one NPU box and the ~20-req/hour Cirrascale key.")
     parser.add_argument("--npu", action="store_true",
                         help="a real model is already serving on :18181 (geniex serve) — "
                              "do not start the stand-in")
@@ -246,10 +285,24 @@ def main(argv: list[str] | None = None) -> int:
         shared_id=shared_id, contributor=args.contributor, agent="claude-code",
         transcript_path=str(scratch), pinned_at=datetime.now(timezone.utc)))
 
+    orchestrator_env = {"SYNAPSE_BASE_URL": model_url,
+                        "SYNAPSE_DISTILLER": args.distiller}
+    if args.distiller == "anthropic":
+        key = _anthropic_key()
+        if not key:
+            raise SystemExit(
+                "--distiller anthropic needs a key. Either export "
+                "ANTHROPIC_API_KEY, or put it in secrets.jsonc:\n"
+                '  "anthropic": { "api_key": "sk-ant-..." }\n'
+                "secrets.jsonc is gitignored; the key is never printed or logged.")
+        orchestrator_env["ANTHROPIC_API_KEY"] = key
+        print("distiller  Claude Opus 5 (your own key — no shared rate limit). "
+              "Only synthesis still spends the Cirrascale budget.", flush=True)
+
     orchestrator = spawn("orchestrator", [
         str(BIN / "synapse-orchestrator"), "--port", "8787",
         "--service-url", service_url, "--state-dir", str(STATE),
-    ], {"SYNAPSE_BASE_URL": model_url})
+    ], orchestrator_env)
     if not wait_for(f"{ORCHESTRATOR_URL}/mcp", orchestrator, "orchestrator"):
         raise SystemExit("the orchestrator did not come up")
 
