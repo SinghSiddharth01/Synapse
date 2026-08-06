@@ -65,9 +65,13 @@ rest of this runbook is for.
 scripts/serve_local.py --npu` replaces T1–T4 below and, more importantly,
 *supervises* the NPU seam: it launches `geniex serve` itself when `:18181` is
 free (adopting one you already started otherwise), probes `GET /v1/models`
-every 15 seconds, and restarts the seam after 45 seconds of continuous
-silence — the observed idle-death signature, where the process stays alive and
-its HTTP server stops answering. It kills the port owner before respawning,
+every 15 seconds, and restarts the seam after four consecutive failures —
+roughly a minute of continuous silence, and up to ~80 seconds from the last
+healthy answer, because a probe that fails by timing out burns its own 5
+seconds before the next one is due. (The DEAD line prints the span it actually
+measured, not that estimate.) That silence is the observed idle-death
+signature, where the process stays alive and its HTTP server stops answering.
+It kills the port owner before respawning,
 because that failure leaves the port bound with no crash to clear it. Restarts
 back off 0s/30s/120s and stop after three in ten minutes with a banner naming
 the fallbacks. Everything it does prints to your terminal and appends to

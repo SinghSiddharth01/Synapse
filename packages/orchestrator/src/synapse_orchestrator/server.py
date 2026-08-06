@@ -264,10 +264,24 @@ def register_tools(server: FastMCP, *, resolve_binding, service_url: str, relay,
     base = service_url.rstrip("/")
     here = Path(cwd) if cwd is not None else Path.cwd()
 
-    def _client():
-        # 15s matches query()'s own client below. Deliberately NOT relay.py's
-        # synthesis-aware 120s: none of these routes runs a model.
-        return _httpx.AsyncClient(transport=transport, timeout=15.0)
+    # 15s for the lifecycle routes: create/join/leave/end run no model and a
+    # laptop on the same LAN answers them in milliseconds, so a longer timeout
+    # would only make a wedged host look like a slow one.
+    #
+    # `/query` is the exception and had been getting 15s by inheritance. It
+    # RANKS, which is a model call — docs/overnight/FLOW.md measures real
+    # rankings at 12.6-52.8s — so 15s cut off the majority of honest answers
+    # and delivered them as "Shared memory is unreachable right now
+    # (ReadTimeout)". That is the empty-200 failure wearing a different mask:
+    # the memory is fine, the answer exists, and the agent is told it does
+    # not. 90s clears the measured range with margin and still sits under the
+    # service's own synthesis timeout, so a genuinely dead backend surfaces as
+    # the typed 503 (decision 008) rather than as this client giving up first.
+    _LIFECYCLE_TIMEOUT_S = 15.0
+    _QUERY_TIMEOUT_S = 90.0
+
+    def _client(timeout: float = _LIFECYCLE_TIMEOUT_S):
+        return _httpx.AsyncClient(transport=transport, timeout=timeout)
 
     def _identity() -> str | None:
         """Who this conversation is, for the service.
@@ -525,7 +539,8 @@ def register_tools(server: FastMCP, *, resolve_binding, service_url: str, relay,
             return _NOT_JOINED
         url = f"{base}/v1/sessions/{binding.shared_id}/query"
         try:
-            async with _client() as client:
+            # The one route here that runs a model — see _QUERY_TIMEOUT_S.
+            async with _client(_QUERY_TIMEOUT_S) as client:
                 # BOTH identity fields, additively (2026-08-06). Suppression and
                 # the watermark are keyed on the Contributor now
                 # (`retrieval.visible_to`, `store.last_seen`), and the service
@@ -644,9 +659,25 @@ def register_tools(server: FastMCP, *, resolve_binding, service_url: str, relay,
         except Exception as exc:
             logger.warning("contribute: distillation failed (%s: %s)",
                            exc.__class__.__name__, exc)
-            return (f"Couldn't process that right now ({exc.__class__.__name__}) — "
-                    "your note was not recorded. Try again in a moment, or mention it "
-                    "to a teammate directly.")
+            # ⟨decision 008's sibling, post-review⟩ The write half gets the
+            # same treatment the read half got. "Couldn't process that right
+            # now" named nothing: not the seam, not that this is an OUTAGE
+            # rather than a problem with the prose, and not the ~2-minute
+            # self-heal `_RETRIEVAL_DOWN` promises on the query side. An agent
+            # reading it rephrases and retries — burning the user's turn on a
+            # rewrite that cannot help, because the model that would have read
+            # it is not answering.
+            return (
+                f"Your note was NOT recorded, and the reason is on THIS "
+                f"machine, not in what you wrote: the local model seam that "
+                f"distils prose into findings failed "
+                f"({exc.__class__.__name__}). Tell the user this is a local "
+                f"outage — do NOT rewrite the note and retry, the same seam "
+                f"would read the rewrite. If `scripts/serve_local.py` is "
+                f"running it supervises that seam and restarts it within "
+                f"~2 minutes, so retrying after that is worth one attempt; "
+                f"check `.synapse/logs/supervisor.log` if it keeps failing. "
+                f"Otherwise say the insight to your teammates directly.")
         for f in findings:
             f.provenance = Provenance.CONTRIBUTED
         if not findings:

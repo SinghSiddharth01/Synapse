@@ -10,6 +10,11 @@ note for W1 predicted these tests would be unaffected because they "use
 build_app directly, never cli.main" — that is true of the API suites and
 false here, since this file calls `_provider()` itself. Recorded rather than
 quietly patched over.
+
+⟨post-review⟩ Every preflight below is asserted on TWO things: the message,
+and the exit CODE. `raise SystemExit("message")` exits 1 — indistinguishable
+from a crash — so the three preflights print to stderr and exit 2, and these
+tests are what stop that regressing back to a one-liner that reads correct.
 """
 
 from __future__ import annotations
@@ -114,7 +119,7 @@ def test_fake_asked_for_explicitly_is_still_announced(monkeypatch, capsys) -> No
     assert "is not set" not in warned
 
 
-def test_a_typo_in_the_mode_is_an_exit_not_a_silent_fake(monkeypatch) -> None:
+def test_a_typo_in_the_mode_is_an_exit_not_a_silent_fake(monkeypatch, capsys) -> None:
     """`SYNAPSE_SYNTHESIZER=aic-100` used to fall through to the FakeProvider:
     the service booted clean, printed "synthesizer: aic-100" on its own
     startup line, and knew nothing. Same silent-seam class as the empty-200 —
@@ -124,14 +129,17 @@ def test_a_typo_in_the_mode_is_an_exit_not_a_silent_fake(monkeypatch) -> None:
     with pytest.raises(SystemExit) as exit_info:
         _provider()
 
-    message = str(exit_info.value)
+    # 2, not 1: a config error an operator can fix, distinguishable by an
+    # install script or a supervisor from the stack having crashed.
+    assert exit_info.value.code == 2
+    message = capsys.readouterr().err
     assert "aic-100" in message                      # names what they typed
     for mode in ("fake", "aic100", "npu", "anthropic"):
         assert mode in message                       # ...and every valid value
 
 
 def test_aic100_without_a_key_exits_at_boot_rather_than_401ing_per_call(
-        monkeypatch) -> None:
+        monkeypatch, capsys) -> None:
     """Without a key the provider builds fine, boots fine, and 401s on every
     synthesis AND every retrieval ranking — so the failure surfaces as a
     service that is up and knows nothing, hours after whoever started it
@@ -144,7 +152,8 @@ def test_aic100_without_a_key_exits_at_boot_rather_than_401ing_per_call(
     with pytest.raises(SystemExit) as exit_info:
         _provider()
 
-    message = str(exit_info.value)
+    assert exit_info.value.code == 2
+    message = capsys.readouterr().err
     assert "INFERENCE_CLOUD_API_KEY" in message
     assert "INFERENCE_CLOUD_API_KEYS" in message
     assert "secrets.jsonc" in message
@@ -161,7 +170,8 @@ def test_aic100_with_only_the_rotation_pool_set_still_boots(monkeypatch) -> None
     assert isinstance(_provider(), AIC100Provider)
 
 
-def test_npu_with_nothing_listening_exits_and_names_the_fix(monkeypatch) -> None:
+def test_npu_with_nothing_listening_exits_and_names_the_fix(
+        monkeypatch, capsys) -> None:
     """The hand-started service, pointed at a GenieX that is not there or has
     already gone idle-dead. serve_local verifies the seam before it spawns
     this process, so this exists for the other path — and it must name
@@ -174,7 +184,76 @@ def test_npu_with_nothing_listening_exits_and_names_the_fix(monkeypatch) -> None
     with pytest.raises(SystemExit) as exit_info:
         _provider()
 
-    message = str(exit_info.value)
+    assert exit_info.value.code == 2
+    message = capsys.readouterr().err
     assert "http://127.0.0.1:19181/v1/models" in message
     assert "geniex serve" in message
     assert "serve_local.py --npu" in message
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# The probe itself
+#
+# Every NPU test above monkeypatches `_npu_answers` away, for the reasons the
+# module docstring gives — so without these three, its body was covered by
+# nothing at all and `def _npu_answers(...): return True` passed the whole
+# suite. That mutant is the one that matters: it turns the preflight into
+# decoration and hands the operator back exactly the silent seam it exists to
+# catch. These drive the real function over a real socket.
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def _stub_seam(status: int, body: bytes = b'{"object":"list","data":[]}'):
+    """A one-route HTTP server on an ephemeral port. Ephemeral, not 19181:
+    two of these must be able to run at once, and a test that binds a fixed
+    port fails as an ERROR rather than a failure when anything else holds it."""
+    import http.server
+    import threading
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *_args):
+            pass
+
+        def do_GET(self):                             # noqa: N802
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+def test_the_seam_probe_says_yes_to_a_real_200() -> None:
+    server = _stub_seam(200)
+    try:
+        port = server.server_address[1]
+        assert cli._npu_answers(f"http://127.0.0.1:{port}/v1") is True
+    finally:
+        server.shutdown()
+
+
+def test_the_seam_probe_says_no_to_a_500(monkeypatch) -> None:
+    """A GenieX answering 500s is not a GenieX. The status check is the half
+    of this function a `return True` mutant deletes without touching the
+    network call, so it is asserted separately from the unreachable case."""
+    server = _stub_seam(500, b'{"error":"broken"}')
+    try:
+        port = server.server_address[1]
+        assert cli._npu_answers(f"http://127.0.0.1:{port}/v1") is False
+    finally:
+        server.shutdown()
+
+
+def test_the_seam_probe_says_no_when_nothing_is_listening() -> None:
+    import socket
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        free_port = probe.getsockname()[1]
+
+    assert cli._npu_answers(f"http://127.0.0.1:{free_port}/v1") is False

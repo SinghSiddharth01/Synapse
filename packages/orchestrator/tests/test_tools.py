@@ -357,6 +357,40 @@ async def test_query_says_DOWN_not_empty_when_the_service_reports_a_dead_retriev
     assert "unreachable right now" not in text
 
 
+async def test_query_gets_a_ranking_sized_timeout_and_lifecycle_keeps_15s(tmp_path):
+    """⟨post-review⟩ `/query` RANKS, which is a model call, and it had been
+    inheriting the lifecycle routes' 15s. FLOW.md measures real rankings at
+    12.6-52.8s, so the majority of honest answers were cut off and delivered
+    to the agent as "Shared memory is unreachable right now (ReadTimeout)" —
+    the empty-200 lie wearing a different mask: the memory is fine, the answer
+    exists, and the agent is told it does not.
+
+    Asserted on the wire (httpx puts the effective timeout in
+    `request.extensions`) rather than on a constant, because the bug was a
+    call site using the wrong client, not a wrong number."""
+    seen: dict[str, dict] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        ranking = request.url.path.endswith("/query")
+        seen["query" if ranking else "lifecycle"] = request.extensions["timeout"]
+        return httpx.Response(200, json={"findings": []} if ranking else {})
+
+    server = create_mcp()
+    relay = Relay(tmp_path, "http://svc", "sh-1", transport=httpx.MockTransport(handler))
+    register_tools(server, resolve_binding=_resolver(BINDING), service_url="http://svc",
+                   relay=relay, distiller_factory=lambda binding: None,
+                   transport=httpx.MockTransport(handler))
+
+    await server.call_tool("query", {"question": "timing?"})
+    await server.call_tool("leave_session", {})
+
+    # Clears the measured range with margin...
+    assert seen["query"]["read"] >= 60.0
+    # ...and the routes that run no model are untouched: a longer timeout there
+    # would only make a wedged host look like a slow one.
+    assert seen["lifecycle"]["read"] == 15.0
+
+
 @pytest.mark.parametrize("response", [
     httpx.Response(503, text="<html>502 Bad Gateway</html>"),      # an intermediary
     httpx.Response(503, json={"error": "something_else"}),          # someone else's 503
@@ -451,7 +485,17 @@ async def test_contribute_fails_open_when_the_npu_is_unreachable(tmp_path):
         transport=httpx.MockTransport(egress_handler),
     )
     result = str(await server.call_tool("contribute", {"text": "the retry backoff…"}))
-    assert "not recorded" in result
+    assert "NOT recorded" in result
+    # ⟨post-review⟩ Failing open is not enough on its own: "Couldn't process
+    # that right now (ConnectionError)" named neither the seam, nor that this
+    # was an OUTAGE rather than a problem with the prose, nor the ~2-minute
+    # self-heal the query side already promises. An agent reading that
+    # rephrases and retries — spending the user's turn on a rewrite the same
+    # dead seam will fail to read.
+    assert "ConnectionError" in result                 # what failed
+    assert "local outage" in result                    # ...and that it IS one
+    assert "do NOT rewrite" in result                  # ...and what not to do
+    assert "supervisor.log" in result                  # ...and where to look
     assert not (tmp_path / "findings.jsonl").exists()   # nothing durable from a failed distil
 
 
@@ -471,7 +515,8 @@ async def test_contribute_fails_open_on_a_tripped_prompt_drop_guard(tmp_path):
         transport=httpx.MockTransport(lambda r: httpx.Response(200)),
     )
     result = str(await server.call_tool("contribute", {"text": "the retry backoff…"}))
-    assert "not recorded" in result
+    assert "NOT recorded" in result
+    assert "PromptDropError" in result
 
 
 async def test_contribute_fails_open_on_a_bad_config(tmp_path):
@@ -491,7 +536,8 @@ async def test_contribute_fails_open_on_a_bad_config(tmp_path):
         transport=httpx.MockTransport(lambda r: httpx.Response(200)),
     )
     result = str(await server.call_tool("contribute", {"text": "the retry backoff…"}))
-    assert "not recorded" in result
+    assert "NOT recorded" in result
+    assert "FileNotFoundError" in result
 
 
 # ── round 3: tools registered unconditionally, resolved live per call ──────

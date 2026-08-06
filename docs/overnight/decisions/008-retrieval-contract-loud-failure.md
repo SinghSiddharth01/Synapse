@@ -98,8 +98,19 @@ rather than silently:
 
 ## How to undo
 
-    git revert --no-edit $(git log --format=%H -1 --grep="w1: retrieval failure is a typed 503")
+⟨post-review correction⟩ Two commits carry this decision now: the contract
+change and its test flips, and the `w1: review fixes` pass that made the same
+outage legible in the two places the first commit left it as a traceback or a
+shrug (`scripts/demo_say.py`, the orchestrator's `contribute`) and gave the
+boot preflights a real exit code. Revert both, newest first:
 
-(One commit carries the contract change and its test flips; the subject line
-is its grep key.) Reverting restores fail-closed-and-silent: empty list,
-200, no watermark skip — and re-opens the masking `282fd07` documented.
+    git revert --no-edit $(git log --format=%H -1 --grep="^w1: review fixes") \
+                         $(git log --format=%H -1 --grep="w1: retrieval failure is a typed 503")
+
+Reverting restores fail-closed-and-silent: empty list, 200, no watermark skip
+— and re-opens the masking `282fd07` documented. Note the fix commit is shared
+with decision 005: reverting it also backs out that decision's post-review
+corrections (the supervisor keeps working, less honestly). Check with
+`git revert --no-commit` first if that matters; if you only want the contract
+change gone, revert the older commit alone and resolve the conflicts the newer
+one leaves in `cli.py` and `orchestrator/server.py` by hand.

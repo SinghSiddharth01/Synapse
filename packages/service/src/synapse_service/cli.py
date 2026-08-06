@@ -17,6 +17,20 @@ MODES = ("fake", "aic100", "npu", "anthropic")
 
 NPU_PROBE_TIMEOUT_S = 3.0
 
+# A misconfigured seam exits 2, not 1. `raise SystemExit("some message")` reads
+# like it does both jobs and does not: CPython prints the string to stderr and
+# exits **1**, the same code as any uncaught error, so a supervisor or an
+# install script cannot tell "you configured this wrong, and here is what to
+# change" from "it crashed". Decision 005's design point is exit 2 for every
+# boot preflight in this file, and the only way to get a code and a message is
+# to write the message yourself.
+PREFLIGHT_EXIT = 2
+
+
+def _preflight_exit(message: str) -> SystemExit:
+    print(message, file=sys.stderr, flush=True)
+    return SystemExit(PREFLIGHT_EXIT)
+
 
 def _npu_answers(base_url: str) -> bool:
     """One zero-cost GET against the seam's metadata route.
@@ -55,7 +69,7 @@ def _provider():
         # the FakeProvider, so an operator who believed they were on the cloud
         # 70B got an empty-handed service that booted cleanly and said
         # "synthesizer: aic-100" on its own startup line.
-        raise SystemExit(
+        raise _preflight_exit(
             f"SYNAPSE_SYNTHESIZER={mode!r} is not a synthesizer this service "
             f"knows. Valid values: {', '.join(MODES)}.\n"
             f"Leave it unset to boot on the FakeProvider (tests, and any "
@@ -68,7 +82,7 @@ def _provider():
         # is up and knows nothing, hours after whoever started it walked away.
         if not (os.environ.get("INFERENCE_CLOUD_API_KEYS")
                 or os.environ.get("INFERENCE_CLOUD_API_KEY")):
-            raise SystemExit(
+            raise _preflight_exit(
                 "SYNAPSE_SYNTHESIZER=aic100 but no key resolved. Set "
                 "INFERENCE_CLOUD_API_KEY, or INFERENCE_CLOUD_API_KEYS for a "
                 "comma-separated rotation pool.\n"
@@ -101,7 +115,7 @@ def _provider():
         # up, reports "synthesizer: npu", and answers every query with a 503
         # for as long as it runs.
         if not _npu_answers(provider.base_url):
-            raise SystemExit(
+            raise _preflight_exit(
                 f"SYNAPSE_SYNTHESIZER=npu but nothing answers at "
                 f"{provider.base_url.rstrip('/')}/models "
                 f"(waited {NPU_PROBE_TIMEOUT_S:g}s).\n"

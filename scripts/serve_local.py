@@ -84,12 +84,24 @@ MODEL_PORT = 18181
 # --live proxy — it costs zero tokens and zero NPU inference, and it is the
 # exact route `wait_for` already trusts below.
 #
-# 4 x 15s = 45s before a death is declared. /models is metadata and runs no
-# inference, so an in-flight 30s synthesis does not occupy it; even in the
-# worst case where the seam serialises HTTP behind a generation, its own
-# design point is max_seconds_per_call = 30.0 (config/synapse.toml), so 45s
-# of continuous unresponsiveness exceeds it with 50% margin. A single slow
-# response costs one strike and is healed by the next success.
+# 4 consecutive failures before a death is declared: AT LEAST 45s of silence
+# (the strikes land at t+0/15/30/45 when probes return instantly) and in
+# practice ~60s, because a probe that fails by TIMING OUT burns its own 5s
+# before the next 15s sleep. The DEAD line therefore reports the span it
+# MEASURED between the first strike and the fourth, never the nominal 45 —
+# see `_declare_dead`. Detection latency from the last healthy answer is one
+# cadence longer again (~80s worst case).
+#
+# CORRECTION (post-review): the design note justified 45s as "50% margin over
+# the seam's own max_seconds_per_call = 30.0". That justification is wrong and
+# is not repeated here. `max_seconds_per_call` (config/synapse.toml) is a
+# SEGMENT-SIZING budget — prompt bytes divided by a measured prefill rate —
+# not a wall-clock bound on a seam call, and the real per-call bound on this
+# seam is OpenAICompatibleProvider's `timeout=300.0`. The honest reason 4x15s
+# separates slow from dead is narrower and still sufficient: /models is
+# metadata, runs no inference, and is answered off the accept loop, so a seam
+# that cannot produce it for a minute is not busy — it is not serving. A
+# single slow response costs one strike and is healed by the next success.
 #
 # The 5s probe timeout is what converts the OBSERVED failure — connection
 # accepted, no bytes ever sent — into strikes. Whether the process is alive
@@ -284,12 +296,23 @@ def port_owner_pids(port: int) -> list[int]:
     and nothing can rebind it. There is no crash to clear the way — something
     has to be willing to look up the owner and kill it.
 
-    Platform-conditional by necessity, and both arms are the boring documented
-    one-liner: `lsof -ti :PORT` on POSIX, `netstat -ano` on the Windows-on-
-    Snapdragon box the NPU actually lives on. Returns [] on any failure —
-    lsof missing, netstat output in an unexpected shape — because a supervisor
-    that raises while trying to recover is worse than one that reports it
-    could not find the owner and says so.
+    Platform-conditional by necessity: `lsof` on POSIX, `netstat -ano` on the
+    Windows-on-Snapdragon box the NPU actually lives on. Returns [] on any
+    failure — lsof missing, netstat output in an unexpected shape — because a
+    supervisor that raises while trying to recover is worse than one that
+    reports it could not find the owner and says so.
+
+    `-sTCP:LISTEN` is LOAD-BEARING, not tidiness. Plain `lsof -ti :PORT`
+    matches every socket with that port at EITHER end, so it returns the
+    CLIENTS too — and under `--npu` this process's own service child holds an
+    established connection to :18181 for the whole of a 300s generation
+    (OpenAICompatibleProvider's read timeout), precisely during the window in
+    which the seam has gone silent and the supervisor is about to kill "the
+    port owner". Without this filter the recovery kills the service it is
+    trying to keep working, and on the demo box that is indistinguishable from
+    the bug. Verified locally: with a listener plus one connected client,
+    `lsof -ti :19181` returned both pids and `lsof -ti tcp:19181
+    -sTCP:LISTEN` returned only the listener's.
     """
     try:
         if os.name == "nt":
@@ -304,8 +327,8 @@ def port_owner_pids(port: int) -> list[int]:
                         and parts[4].isdigit()):
                     pids.add(int(parts[4]))
             return sorted(pids)
-        out = subprocess.run(["lsof", "-ti", f":{port}"], capture_output=True,
-                             text=True, timeout=10).stdout
+        out = subprocess.run(["lsof", "-ti", f"tcp:{port}", "-sTCP:LISTEN"],
+                             capture_output=True, text=True, timeout=10).stdout
         return sorted({int(tok) for tok in out.split() if tok.isdigit()})
     except (OSError, subprocess.SubprocessError, ValueError):
         return []
@@ -330,7 +353,8 @@ def kill_port_owner(port: int, log) -> list[int]:
     line is the only way anyone will ever work that out.
     """
     pids = port_owner_pids(port)
-    finder = "netstat -ano" if os.name == "nt" else f"lsof -ti :{port}"
+    finder = ("netstat -ano" if os.name == "nt"
+              else f"lsof -ti tcp:{port} -sTCP:LISTEN")
     if not pids:
         log(f"SUPERVISOR: nothing found holding :{port} (via {finder}) — "
             f"respawning without killing anything.")
@@ -432,7 +456,9 @@ class SeamSupervisor:
         self.last_ok = now()
         self.restart_times: deque[float] = deque()
         self._restart_at: float | None = None
+        self._first_strike_at: float | None = None
         self._awaiting_restore: int | None = None
+        self._restart_error: str | None = None
         self._last_gave_up_banner = 0.0
 
     # ── logging ────────────────────────────────────────────────────────────
@@ -456,6 +482,25 @@ class SeamSupervisor:
         now = self._now()
 
         if self.status == GAVE_UP:
+            # STILL PROBED after giving up. Only the RESTARTING stopped: a cap
+            # on restart attempts is not a decision to stop looking. Whatever
+            # the operator did with the fallback commands — restarted GenieX by
+            # hand, swapped in the stand-in on the same port — the terminal
+            # must say the seam is answering again, because otherwise the last
+            # word on screen is a banner claiming an outage that is over, and
+            # the next person to read it walks the fallback path for nothing.
+            if self._probe() is None:
+                self.log(
+                    f"SUPERVISOR: model seam is ANSWERING again after GIVING "
+                    f"UP — down {int(now - self.last_ok)}s. This script did "
+                    f"not fix it and is no longer restarting anything; "
+                    f"whatever you just did, that was it. Supervision "
+                    f"resumes from here.")
+                self.restart_times.clear()      # the operator intervened
+                self._awaiting_restore = None
+                self._restart_error = None
+                self._alive(now)
+                return
             # Reprinted on a timer on purpose: the operator who walks back to
             # the laptop after the outage must not have to scroll to find out
             # why nothing works.
@@ -464,24 +509,46 @@ class SeamSupervisor:
                 self._last_gave_up_banner = now
             return
 
-        if self._restart_at is not None:
-            if now < self._restart_at:
-                return                     # serving the backoff delay
-            self._restart_at = None
-            self._perform_restart()
-            return
-
         # A child that EXITED is dead with NO strikes: there is nothing to be
-        # slow about in a process that is gone, and making the operator wait
-        # 45s to be told so would be theatre. This is the only immediate
+        # slow about in a process that is gone, and making the operator wait a
+        # minute to be told so would be theatre. This is the only immediate
         # death; the interesting one — process alive, server silent — has to
         # come the long way round, through the probe, precisely because
         # nothing about the process gives it away.
-        if self.child is not None and self.child.poll() is not None:
+        #
+        # Checked BEFORE the backoff branch: a child that has exited during
+        # the 120s delay is not news the supervisor should sit on, and the
+        # branch below would otherwise return without looking.
+        if (self._restart_at is None and self.child is not None
+                and self.child.poll() is not None):
             self.strikes = 0
             self._declare_dead(
                 now, f"the {self.seam_name} process exited "
                      f"(rc={self.child.returncode})", immediate=True)
+            return
+
+        # KEEP PROBING WHILE THE BACKOFF DELAY IS SERVED, and cancel the
+        # pending restart if the seam comes back on its own. Returning early
+        # here — the shape this had until review — meant a seam that recovered
+        # during a 120s delay was restarted anyway: a HEALTHY seam torn down,
+        # 30-60s of self-inflicted outage, and a restart counted against the
+        # window so the NEXT real death got a shorter leash. The delay exists
+        # to avoid hammering a seam that is failing, not to stop looking at it.
+        if self._restart_at is not None:
+            if self._probe() is None:
+                self.log(
+                    f"SUPERVISOR: model seam came back on its own during the "
+                    f"backoff delay — restart {len(self.restart_times)} "
+                    f"CANCELLED, nothing was killed. It stays on the ledger: "
+                    f"a seam that dies and self-heals repeatedly is still a "
+                    f"dying seam.")
+                self._restart_at = None
+                self._alive(now)
+                return
+            if now < self._restart_at:
+                return                     # still serving the backoff delay
+            self._restart_at = None
+            self._perform_restart()
             return
 
         reason = self._probe()
@@ -493,13 +560,29 @@ class SeamSupervisor:
     def _alive(self, now: float) -> None:
         if self._awaiting_restore is not None:
             down = int(now - self.last_ok)
-            self.log(f"SUPERVISOR: model seam RESTORED after restart "
-                     f"{self._awaiting_restore} — down {down}s total.")
+            if self._restart_error is None:
+                self.log(f"SUPERVISOR: model seam RESTORED after restart "
+                         f"{self._awaiting_restore} — down {down}s total.")
+            else:
+                # Credit where it is NOT due. The restart raised — it never
+                # ran — so something else brought the seam back, and a line
+                # reading "RESTORED after restart 1" would tell the operator
+                # this script recovered a box it did not touch. That is the
+                # exact false reassurance the whole workstream exists to
+                # remove, one level up.
+                self.log(f"SUPERVISOR: model seam RESTORED — down {down}s "
+                         f"total — but NOT by this script: restart "
+                         f"{self._awaiting_restore} itself failed "
+                         f"({self._restart_error}). Something else brought "
+                         f"the seam back; treat this box as unsupervised "
+                         f"until that error is fixed.")
             self._awaiting_restore = None
+            self._restart_error = None
         elif self.strikes:
             self.log(f"SUPERVISOR: model seam OK again after "
                      f"{self.strikes} failed probe(s) — no restart was needed.")
         self.strikes = 0
+        self._first_strike_at = None
         self.status = OK
         self.last_ok = now
 
@@ -509,6 +592,7 @@ class SeamSupervisor:
             # First strike only. Logging all four would train the operator to
             # ignore the line, and the fourth one already says everything.
             self.status = SUSPECT
+            self._first_strike_at = now
             self.log(f"SUPERVISOR: model seam SUSPECT — probe failed "
                      f"(1/{DEATH_STRIKES}): {reason}")
         if self.strikes >= DEATH_STRIKES:
@@ -528,12 +612,17 @@ class SeamSupervisor:
             self._last_gave_up_banner = now
             return
         delay = RESTART_DELAYS_S[attempt - 1]
-        # (STRIKES - 1) * INTERVAL, not STRIKES * INTERVAL: the strikes land
-        # at t+0/15/30/45 from the first failure, so the span of continuous
-        # unresponsiveness they measure is 45s.
+        # MEASURED, not derived. `(DEATH_STRIKES - 1) * PROBE_INTERVAL_S` = 45s
+        # is only what the strikes span when probes return instantly; a probe
+        # that fails by timing out spends its own PROBE_TIMEOUT_S first, so the
+        # real span on a hung socket is ~60s. The operator quotes this number
+        # when deciding whether the box is failing more often than it used to,
+        # so it has to be the elapsed time this supervisor actually observed —
+        # a constant would be wrong every single time it mattered.
+        span = int(now - self._first_strike_at) if self._first_strike_at else 0
         cause = (reason if immediate else
                  f"{DEATH_STRIKES} consecutive probe failures over "
-                 f"{(DEATH_STRIKES - 1) * PROBE_INTERVAL_S}s "
+                 f"{span}s "
                  f"(last OK {down}s ago; last reason: {reason})")
         self.log(
             f"SUPERVISOR: model seam DEAD — {cause}. "
@@ -548,6 +637,7 @@ class SeamSupervisor:
 
     def _perform_restart(self) -> None:
         attempt = len(self.restart_times)
+        self._restart_error = None
         try:
             self.child = self._restart(self.child, self.log)
         except SystemExit as exc:
@@ -555,8 +645,14 @@ class SeamSupervisor:
             # Swallowed here on purpose: the supervisor's whole job is to
             # outlive a seam that will not come up, and the next probe will
             # count the failure honestly.
+            # NOT recorded as a failed restart: the replacement WAS spawned,
+            # it merely had not answered by the deadline. If it answers a tick
+            # later, this script did restore the seam and the plain RESTORED
+            # line is true. Only an exception from the restarter itself —
+            # below — means no restart happened at all.
             self.log(f"SUPERVISOR: restart {attempt} did not come up ({exc}).")
         except Exception as exc:                                # noqa: BLE001
+            self._restart_error = f"{exc.__class__.__name__}: {exc}"
             self.log(f"SUPERVISOR: restart {attempt} raised "
                      f"{exc.__class__.__name__}: {exc}")
         # The judge is the next probe, not the restart call. RESTORED is
@@ -573,9 +669,27 @@ class SeamSupervisor:
             f"which is the honest outcome. Fallbacks: {self._fallbacks}.")
 
 
-def spawn(name: str, argv: list[str], env: dict[str, str] | None = None) -> subprocess.Popen:
+def spawn(name: str, argv: list[str], env: dict[str, str] | None = None,
+          append: bool = False) -> subprocess.Popen:
+    """Start a child with its stdout+stderr in `.synapse/logs/<name>.log`.
+
+    `append` is what a RESTART passes, and it is not a detail. A fresh
+    serve_local run truncates (a log from yesterday's run explaining today's
+    silence is worse than none). But a supervisor restart that truncated would
+    destroy the only artefact anyone has of WHY the seam died: the dying
+    process's last words — `FATAL: hexagon context lost` and its like — are in
+    this file and nowhere else, and the replacement's first line would land on
+    top of them within a second of the crash. Post-mortem beats tidiness on
+    the one box nobody can attach a debugger to.
+    """
     (STATE / "logs").mkdir(parents=True, exist_ok=True)
-    log = (STATE / "logs" / f"{name}.log").open("w")
+    path = STATE / "logs" / f"{name}.log"
+    log = path.open("a" if append else "w")
+    if append:
+        log.write(f"\n===== restarted by the supervisor at "
+                  f"{datetime.now(timezone.utc).isoformat(timespec='seconds')} "
+                  f"— everything above is the PREVIOUS {name} =====\n")
+        log.flush()
     process = subprocess.Popen(argv, cwd=REPO, env={**os.environ, **(env or {})},
                                stdout=log, stderr=subprocess.STDOUT)
     processes.append((name, process))
@@ -613,7 +727,7 @@ def standin_restarter(model_url: str, argv_model: list[str]):
     workstream exists to close."""
     def restart(previous: subprocess.Popen | None, log):
         _terminate_child(previous, "model", log)
-        child = spawn("model", argv_model)
+        child = spawn("model", argv_model, append=True)
         wait_for(f"{model_url}/models", child, "model", 25)
         return child
     return restart
@@ -637,7 +751,9 @@ def geniex_restarter(model_url: str):
             log("SUPERVISOR: `geniex` is not on PATH, so this script cannot "
                 "relaunch it. The seam stays DOWN.")
             return None
-        child = spawn("geniex", [geniex, "serve"])
+        # append=True: geniex.log holds the dying process's last words, and
+        # they are the only evidence of the idle death anyone will ever have.
+        child = spawn("geniex", [geniex, "serve"], append=True)
         wait_for(f"{model_url}/models", child, "geniex", 25)
         return child
     return restart
@@ -778,6 +894,27 @@ def main(argv: list[str] | None = None) -> int:
     # proxy path, which holds one key with no rotation (FLOW.md §1.5).
     dual = args.npu and args.live
     dual_key = dual_base_url = None
+    if dual and args.service_url:
+        # The DUAL half of `--npu --live` is a SERVICE configuration: it is
+        # the service that gets SYNAPSE_SYNTHESIZER=aic100 and the Cirrascale
+        # credentials. `--service-url` means no service is started here at
+        # all, so there is nothing to configure — the whole `--live` half
+        # would be resolved, validated and then dropped on the floor while the
+        # banner still announced "synthesis LIVE on <host>". That is the exact
+        # silent-drop this flag pair was fixed to stop doing, one combination
+        # further along, and it is worse than the original because the
+        # credentials really were read.
+        raise SystemExit(
+            "--npu --live --service-url cannot all be true at once.\n"
+            "`--npu --live` means: distil on YOUR NPU, synthesize on the real "
+            "70B — but synthesis is the SERVICE's job, and --service-url says "
+            "someone else is running the service. Whether their host "
+            "synthesizes on the cloud is their configuration, not yours.\n"
+            "Pick one:\n"
+            "  drop --live          — join their service, distil on your NPU "
+            "(this is the normal teammate-with-an-NPU shape)\n"
+            "  drop --service-url   — host the service yourself and run the "
+            "real split topology")
     if dual:
         dual_key, dual_base_url = _inference_credentials()
         missing = ([] if dual_key else ["an API key (INFERENCE_CLOUD_API_KEY, "
@@ -1102,11 +1239,28 @@ def main(argv: list[str] | None = None) -> int:
     if supervisor is not None:
         print(f"  Supervising the model seam: GET {model_url}/models every "
               f"{PROBE_INTERVAL_S}s, {DEATH_STRIKES} consecutive failures "
-              f"({(DEATH_STRIKES - 1) * PROBE_INTERVAL_S}s) = dead, then up to "
-              f"{len(RESTART_DELAYS_S)} restarts per "
+              f"(~{(DEATH_STRIKES - 1) * PROBE_INTERVAL_S}-"
+              f"{int((DEATH_STRIKES - 1) * (PROBE_INTERVAL_S + PROBE_TIMEOUT_S))}s, "
+              f"a failing probe costs its own {PROBE_TIMEOUT_S:g}s) = dead, "
+              f"then up to {len(RESTART_DELAYS_S)} restarts per "
               f"{RESTART_WINDOW_S // 60} minutes.", flush=True)
         print(f"  Every transition prints here and appends to {supervisor_log}.",
               flush=True)
+        if args.live and not args.npu:
+            # Say what is NOT covered. In --live the thing on :18181 is the
+            # local proxy, and its /models is answered from a static payload
+            # without touching Cirrascale (local_model_server.do_GET) — so
+            # this probe proves the proxy is up and says nothing whatsoever
+            # about the cloud behind it. A banner reading "supervising the
+            # model seam" over a run whose real model is remote and unwatched
+            # is the reassurance-without-coverage this workstream exists to
+            # delete.
+            print("  NOTE: that probe covers the LOCAL proxy only. Its "
+                  "/models answers from a static payload and never calls "
+                  "the cloud, so a Cirrascale outage is invisible to the "
+                  "supervisor — it surfaces as a 503 on query instead "
+                  "(decision 008), which is the honest signal for something "
+                  "no restart here could fix.", flush=True)
     print("  Ctrl-C to stop.", flush=True)
 
     # What used to be `time.sleep(3600)` — dead space in the one process every
