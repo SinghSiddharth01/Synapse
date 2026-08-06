@@ -61,6 +61,14 @@ class FakeElement {
   set innerHTML(html) {
     this.children = parseFragment(html);
     for (var i = 0; i < this.children.length; i++) this.children[i].parent = this;
+    // Retain the raw markup as well as the parsed children. parseFragment
+    // only understands <div>, so a renderer that emits a <table> (the brain
+    // page's roster) would otherwise be completely invisible to a driver --
+    // and it is the one element on that page most worth asserting on. Reading
+    // this back is the last-written HTML either way, which is what a real
+    // getter does; `esc()` still round-trips through the textContent setter
+    // below and is unaffected.
+    this._escaped = String(html);
   }
   get innerHTML() { return this._escaped; }
   set textContent(text) {
