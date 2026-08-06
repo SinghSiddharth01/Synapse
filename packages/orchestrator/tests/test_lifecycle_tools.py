@@ -509,6 +509,47 @@ async def test_leave_session_with_an_id_detaches_only_that_conversation(tmp_path
         "query", {"question": "x?", "agent_session_id": "conv-2"}))
 
 
+async def test_a_leave_that_takes_the_mirror_with_it_leaves_the_sibling_resolvable(
+    tmp_path,
+):
+    """2026-08-06 review, reproduced: the orchestrator went BLIND after a
+    leave. `cli._resolve_binding` globbed `bindings/*.json` only, so when the
+    departing conversation happened to own the legacy mirror — it does
+    whenever it joined last — deleting it left a machine whose only remaining
+    binding was one level down, and every tool answered "not joined" to a
+    window that was still joined and whose worker was still feeding the
+    session.
+
+    Window B here has NO mirror of its own: only `bindings/claude-code/
+    conv-2.json`, which is the state the fix has to read."""
+    urls: list[str] = []
+    wiring = _wire(tmp_path, _service(urls=urls))
+    window_b = wiring.state_dir / "bindings" / "claude-code" / "conv-2.json"
+    write_binding(window_b,
+                  SessionBinding(agent_session_id="conv-2", shared_id="sh-1",
+                                 contributor="sid", agent="claude-code",
+                                 transcript_path="/tmp/cc-2.jsonl", pinned_at=TS))
+    # Window A joined later, so it owns the mirror.
+    later = datetime(2026, 8, 7, tzinfo=timezone.utc)
+    for path in (wiring.state_dir / "bindings" / "claude-code" / "conv-1.json",
+                 wiring.binding_file):
+        write_binding(path,
+                      SessionBinding(agent_session_id="conv-1", shared_id="sh-1",
+                                     contributor="sid", agent="claude-code",
+                                     transcript_path="/tmp/cc-1.jsonl", pinned_at=later))
+
+    await wiring.server.call_tool("leave_session", {"agent_session_id": "conv-1"})
+
+    assert not wiring.binding_file.exists()        # the mirror went with A
+    assert window_b.exists()
+    # ...and B is still joined, both when it names itself and when it does not.
+    assert _NOT_JOINED not in str(await wiring.server.call_tool(
+        "query", {"question": "x?", "agent_session_id": "conv-2"}))
+    assert _NOT_JOINED not in str(await wiring.server.call_tool(
+        "query", {"question": "x?"}))
+    assert "POST http://svc/v1/sessions/sh-1/query" in urls
+
+
 async def test_leave_session_still_removes_the_member_when_nobody_else_holds_it(
     tmp_path,
 ):
