@@ -44,6 +44,42 @@ def is_turn_boundary(event: AgentEvent) -> bool:
     return event.role == "user" and event.kind == "text"
 
 
+def _split_oversized(event: AgentEvent, budget_tokens: int) -> list[AgentEvent]:
+    """`event`, or the pieces of it that each fit the budget.
+
+    Cutting inside one event's content is a genuine loss of coherence, so it is
+    done only when the alternative is worse: an event over the budget cannot be
+    distilled at all, and is dropped after the model fails on it twice. A cut
+    that prefers the nearest preceding newline keeps the damage at a line
+    boundary rather than mid-sentence where it can.
+    """
+    max_chars = int(budget_tokens * _CHARS_PER_TOKEN)
+    if max_chars <= 0 or len(event.content) <= max_chars:
+        return [event]
+
+    parts: list[AgentEvent] = []
+    text = event.content
+    while text:
+        if len(text) <= max_chars:
+            cut = len(text)
+        else:
+            cut = max_chars
+            # Only accept a newline in the last 40% of the window: nearer the
+            # start it would produce tiny fragments and many more model calls.
+            newline = text.rfind("\n", int(max_chars * 0.6), max_chars)
+            if newline > 0:
+                cut = newline + 1
+        parts.append(event.model_copy(update={"content": text[:cut]}))
+        text = text[cut:]
+
+    logger.info(
+        "A single %s/%s event of %d chars exceeded the %d-token budget; "
+        "split into %d parts",
+        event.role, event.kind, len(event.content), budget_tokens, len(parts),
+    )
+    return parts
+
+
 @dataclass
 class Segmenter:
     """Accumulates events across ticks and emits complete Segments.
@@ -109,6 +145,15 @@ class Segmenter:
         """
         if not turn:
             return []
+
+        # Chunking below can only ever split BETWEEN events, so a single event
+        # larger than the budget used to defeat it entirely: the `current and`
+        # guard admits the first event unconditionally, producing a segment that
+        # cannot fit the model's context no matter what follows. One long
+        # assistant message is enough, which is not rare. Split those first so
+        # every event entering the loop is known to fit on its own.
+        turn = [part for event in turn
+                for part in _split_oversized(event, self.budget_tokens)]
 
         chunks: list[list[AgentEvent]] = []
         current: list[AgentEvent] = []

@@ -9,6 +9,7 @@ from synapse_contracts import FindingType, LocalBinding, Provenance
 from synapse_providers import FakeProvider
 
 from synapse_distiller import Distiller, PromptDropError, load_pack_by_name
+from synapse_distiller.distiller import RETRY_NUDGE
 from synapse_distiller.fixtures import load_goldens, load_segment
 from synapse_distiller.prompt import build_messages, render_segment
 
@@ -108,6 +109,34 @@ async def test_malformed_then_valid_recovers_on_the_retry() -> None:
     assert [f.text for f in findings] == ["recovered"]
     assert stats.attempts == 2
     assert stats.dropped_malformed == 1
+
+
+async def test_the_retry_sends_a_different_prompt_than_the_first_attempt() -> None:
+    """A retry that resends byte-identical messages to a temperature-0 model is
+    not a retry — the decode is deterministic, so it reproduces the first
+    failure exactly and spends a second run of NPU time doing it. Observed
+    live: a malformed response came back in the same shape twice. So attempt 2
+    appends a corrective instruction, which is the only lever available here
+    (temperature belongs to the provider, not this call)."""
+
+    class _Recording(FakeProvider):
+        def __init__(self, scripts):
+            super().__init__(scripts=scripts)
+            self.seen: list[list[dict]] = []
+
+        async def complete(self, messages, response_schema=None):
+            self.seen.append(list(messages))
+            return await super().complete(messages, response_schema)
+
+    segment = load_segment("seg-001")
+    provider = _Recording(["garbage", _scripted([{"type": "learning", "text": "ok"}])])
+
+    findings, stats = await Distiller(provider, BINDING).distil(segment)
+
+    assert stats.attempts == 2 and [f.text for f in findings] == ["ok"]
+    assert provider.seen[0] != provider.seen[1], "the second call must differ"
+    assert provider.seen[1][-1] == RETRY_NUDGE
+    assert provider.seen[1][:-1] == provider.seen[0], "only the nudge is added"
 
 
 async def test_ids_are_unique_within_a_batch() -> None:

@@ -45,6 +45,17 @@ logger = logging.getLogger(__name__)
 # retrying past that burns NPU time that the next Segment needs.
 MAX_ATTEMPTS = 2
 
+# Appended to the SECOND attempt only. See the call site for why a retry has to
+# change the prompt to be a retry at all.
+RETRY_NUDGE = {
+    "role": "user",
+    "content": (
+        "Your previous reply was not valid JSON. Reply with ONLY the JSON "
+        'object — {"findings": [...]} — and no prose, no code fence, and no '
+        "text before or after it."
+    ),
+}
+
 _VALID_TYPES = {t.value for t in FindingType}
 
 
@@ -116,8 +127,15 @@ class Distiller:
         parsed: dict[str, Any] | None = None
         for attempt in range(1, MAX_ATTEMPTS + 1):
             stats.attempts = attempt
+            # Resending byte-identical messages to a temperature-0 model cannot
+            # produce a different decode — it is the same call, and the retry
+            # was observed reproducing the first failure exactly. So the second
+            # attempt changes the prompt, which is the only lever available
+            # without varying temperature (a config-level property here).
+            # aic100.py states the same principle for the same reason.
+            attempt_messages = messages if attempt == 1 else messages + [RETRY_NUDGE]
             result = await self.provider.complete(
-                messages=messages, response_schema=RESPONSE_SCHEMA
+                messages=attempt_messages, response_schema=RESPONSE_SCHEMA
             )
 
             # Before anything is read from the response. A model that dropped its
@@ -139,11 +157,17 @@ class Distiller:
                 break
 
             stats.dropped_malformed += 1
+            # The raw text is the whole diagnosis — truncated mid-object, prose
+            # wrapped around the JSON, or the repetition a small model falls
+            # into near its context ceiling all look identical without it, and
+            # it was already being captured into stats and then never shown.
             logger.warning(
-                "Distiller: unparseable output for segment %s on attempt %d/%d",
+                "Distiller: unparseable output for segment %s on attempt %d/%d; "
+                "raw[:200]=%r",
                 segment.id,
                 attempt,
                 MAX_ATTEMPTS,
+                (stats.raw_outputs[-1] if stats.raw_outputs else "")[:200],
             )
 
         if parsed is None:

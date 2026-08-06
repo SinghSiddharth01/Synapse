@@ -21,6 +21,42 @@ def ev(role: str, kind: str, content: str, minute: int = 0) -> AgentEvent:
     )
 
 
+def test_one_event_larger_than_the_budget_is_split_rather_than_emitted_whole() -> None:
+    """Chunking can only split BETWEEN events, and the loop admits the first
+    event unconditionally — so before this, a single long assistant message
+    produced a Segment that could not fit the model's context no matter what.
+    The model then failed on it twice and the worker dropped it, losing the
+    whole turn. Long agent messages are ordinary, so this was not a rare path.
+    """
+    budget = 100
+    huge = "\n".join(f"line {i} of a very long assistant message" for i in range(60))
+    segmenter = Segmenter(budget_tokens=budget, agent_session_id="sess-1")
+    segmenter.add([ev("user", "text", "go", 0), ev("assistant", "text", huge, 1)])
+
+    segments = segmenter.drain(flush_incomplete=True)
+
+    assert len(segments) > 1, "the oversized event must have been split up"
+    for segment in segments:
+        for event in segment.events:
+            assert len(event.content) <= int(budget * 3.5), "a part still overruns"
+    # Nothing invented and nothing lost: the parts concatenate back to the input.
+    rejoined = "".join(e.content for s in segments for e in s.events
+                       if e.role == "assistant")
+    assert rejoined == huge
+
+
+def test_an_event_within_the_budget_is_never_cut() -> None:
+    """The split is a last resort — cutting inside one event costs coherence,
+    so an event that already fits must pass through byte-identical."""
+    segmenter = Segmenter(budget_tokens=1000, agent_session_id="sess-1")
+    body = "short enough\nto stay whole"
+    segmenter.add([ev("user", "text", "go", 0), ev("assistant", "text", body, 1)])
+
+    segments = segmenter.drain(flush_incomplete=True)
+
+    assert [e.content for s in segments for e in s.events] == ["go", body]
+
+
 def test_user_text_is_a_boundary_but_tool_result_is_not() -> None:
     """Claude Code records tool results with role 'user'. Treating those as
     boundaries would cut a turn at every tool call."""
