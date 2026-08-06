@@ -217,10 +217,21 @@ def render(summary: ArrivalSummary) -> str:
                f"{summary.new_since} version(s) since you last read it, but no "
                "finding you have not already seen came with it.")
     else:
+        # `new_since` is a VERSION delta and `new_count` is a FINDING count, and
+        # they genuinely disagree: a push is queryable immediately and only bumps
+        # the version when synthesis gets round to it. "0 version(s) of movement"
+        # next to "1 finding you have not seen" reads like a contradiction, so
+        # the zero case says what is actually true instead — the findings are
+        # here, the narrative has not caught up. (That this case exists at all is
+        # why the new-since slice counts arrivals rather than versions; a
+        # version-derived list would have reported nothing new.)
+        movement = (f", across {summary.new_since} version(s) of movement"
+                    if summary.new_since > 0 else
+                    " — pushed since your last read and not yet folded into the "
+                    "working memory")
         new = "\n".join(
             [f"NEW SINCE YOU LAST LOOKED — {summary.new_count} finding(s) you have not "
-             f"seen ({_counts(summary.new_by_type)}), across {summary.new_since} "
-             f"version(s) of movement:"]
+             f"seen ({_counts(summary.new_by_type)}){movement}:"]
             + list(summary.new_items))
 
     text = f"{head}\n\n{accumulated}\n\n{new}"

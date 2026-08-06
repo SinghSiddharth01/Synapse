@@ -163,6 +163,35 @@ async def test_a_rejoin_from_a_new_conversation_reports_only_what_landed_since()
     assert "frames drop past the 40 ms window" in body["text"]
 
 
+def test_findings_that_landed_before_synthesis_caught_up_are_still_reported():
+    """The case that proves the slice must count ARRIVALS, not versions.
+
+    A push is queryable the instant it lands; `memory_version` only moves when
+    synthesis runs a verdict round over it, which the debounce delays by up to
+    a minute. So between those two moments there are findings a joiner has
+    never seen and a version delta of ZERO — and a "new since" derived from the
+    version would report nothing new, in exactly the window a demo joins in.
+
+    OBSERVED LIVE 2026-08-06 on port 15899 with the fake synthesizer (which
+    never bumps the version at all): four findings, `new_since` 0, and this
+    section correctly listing the one the asker had not read.
+
+    The prose is checked too, because "0 version(s) of movement" sitting next
+    to "1 finding you have not seen" reads as a contradiction rather than as
+    the true statement it is."""
+    store, sid = _store_with(_finding("f-1", text="the first thing"))
+    store.mark_seen(sid, "aditya")
+    store.upsert(sid, [_finding("f-2", text="landed but not yet synthesised")])
+
+    summary = compute(store, sid, contributor="aditya", agent_session="as-1")
+
+    assert summary.new_since == 0                  # no verdict round has run
+    assert summary.new_count == 1                  # ...and it is still news
+    assert "not yet folded into the working memory" in summary.text
+    assert "version(s) of movement" not in summary.text
+    assert "landed but not yet synthesised" in summary.text
+
+
 async def test_reading_the_arrival_summary_does_not_move_the_watermark():
     """`/arrival` is a read, and a repeatable one: an orchestrator may fetch it
     on a join whose binding then fails, and a joining agent may be handed it
