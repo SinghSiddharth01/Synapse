@@ -14,7 +14,7 @@ Nothing is injected unprompted, and raw transcript content never leaves the mach
 4. **Retrieval** ranks over the Finding Log, not the working memory, across several lanes (`lanes.py`); the topic lane ships off (`lanes.py:79` `DEFAULT_TOPIC_LANE = False`). The service does the ranking, so reading costs you no model locally.
 5. **Agents** reach all of it through six MCP tools — `query`, `contribute`, `create_session`, `join_session`, `leave_session`, `end_session` (`server.py:472, 569, 640, 731, 794, 856`).
 
-Ports, once running: service `8899`, orchestrator `8787`, local model seam or `geniex serve` `18181` (`scripts/serve_local.py:53-56`).
+Ports, once running: service `8899`, orchestrator `8787`, local model seam or `geniex serve` `18181` (`scripts/serve_local.py:65-68`).
 
 ## Start here
 
@@ -29,6 +29,6 @@ Design and vocabulary: `CONTEXT.md` at the repo root is the vocabulary authority
 ## What is honestly true today
 
 - **The memory is in-process.** Restart the host's service and the Shared Session is genuinely empty; the shared-id changes too.
-- **The service has no auth.** `serve_local.py` binds `0.0.0.0` by default so teammates can reach it — anyone who can reach port 8899 can read and write the team's memory (`serve_local.py:352-355`). Pass `--host 127.0.0.1` to keep it local.
+- **The service has no auth.** `serve_local.py` binds `0.0.0.0` by default so teammates can reach it — anyone who can reach port 8899 can read and write the team's memory (`serve_local.py:364-367`). Pass `--host 127.0.0.1` to keep it local.
 - **Distillation abstracts, it does not redact.** Measured verbatim overlap is 0.10 (`docs/JOIN.md:170`). Point the passive worker only at a conversation you would be happy to read aloud.
 - **Codex.** The adapter exists and is registered (`packages/worker/src/synapse_worker/sources/codex.py`, `discovery.py:279-284`), but it was built from the Codex source tree rather than against a live transcript — see `fixtures/raw_lines/codex/README.md` for exactly what was and was not verified. Claude Code is the path with live evidence behind it.

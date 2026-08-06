@@ -13,9 +13,23 @@ If instead you are joining a session a teammate is already hosting, go straight 
 - **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** — the agent that connects over MCP
 - Nothing else. No NPU and no API key are required for this walkthrough; `scripts/serve_local.py` starts a model stand-in for you.
 
-A one-command installer (`install.sh` / `install.ps1`) is being added — use it once it is merged; until then the steps below are the path.
-
 ## 1. Get the code running
+
+There is a one-command installer, and it is the shorter path. It clones, syncs, asserts the `mcp==1.9.4` pin, creates `secrets.jsonc` from the template, registers the MCP server, copies the awareness pack, runs the pre-flight doctor, and starts the stack — in that order, in your terminal, in the foreground.
+
+```bash
+curl -LsSf https://raw.githubusercontent.com/SinghSiddharth01/Synapse/main/install.sh | sh -s -- --purpose "first run"
+```
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/SinghSiddharth01/Synapse/main/install.ps1))) -Purpose "first run"
+```
+
+`sh -s --` and the `[scriptblock]::Create` wrapper are load-bearing: they are what let arguments through the pipe. Without them the flags are silently dropped. `install.bat` is the double-clickable form of the PowerShell line and removes the execution-policy question.
+
+**Check the machine before you change it.** `./install.sh --doctor-only` (`.\install.bat -DoctorOnly`) runs the eight pre-flight checks and stops: no clone side effects you did not ask for, no `secrets.jsonc`, no MCP registration, no pack copy, nothing started. From a checkout you already have, the same checks are `uv run python scripts/doctor.py`. See [Troubleshooting → Ask the machine first](troubleshooting.md#ask-the-machine-first).
+
+Or, step by step:
 
 ```bash
 git clone https://github.com/SinghSiddharth01/Synapse.git && cd Synapse
@@ -29,7 +43,7 @@ Credentials live in `secrets.jsonc` at the repo root. It is gitignored, distribu
 
 | block | who reads it | needed for |
 |---|---|---|
-| `anthropic.api_key` | `serve_local.py:82-92` (falls back to `$ANTHROPIC_API_KEY`) | `--distiller anthropic` |
+| `anthropic.api_key` | `serve_local.py:73-104` (`_anthropic_key`; falls back to `$ANTHROPIC_API_KEY` at `:94-95`) | `--distiller anthropic` |
 | `inference_cloud` | `scripts/local_model_server.py` in proxy mode | `--live` |
 
 Keys are only injected into a child process's environment — never printed, never logged. Do not paste one into a chat with an agent either: anything in a transcript is in that transcript for good.
@@ -56,11 +70,11 @@ This starts the service (`:8899`), the model stand-in (`:18181`) and your orches
 model      stand-in on http://127.0.0.1:18181/v1 (replays this repo's corpus; …)
 service    http://127.0.0.1:8899  · dashboard http://127.0.0.1:8899/debug
            reachable on the LAN at http://192.168.x.x:8899 — no auth, …
-orchestr.  http://127.0.0.1:8787/mcp  ← point Claude Code here
+orchestr.  http://127.0.0.1:8787/mcp  <- point Claude Code here
 session    sh-xxxxxxxx  (contributor: <your-name>)
 ```
 
-followed by the `claude mcp add` line, the log directory (`.synapse/logs`), and — because the service is bound to the LAN — the exact command to hand a teammate, with your IP and shared-id already filled in (`serve_local.py:494-509`). Ctrl-C stops everything.
+followed by the `claude mcp add` line, the log directory (`.synapse/logs`), and — because the service is bound to the LAN — the exact command to hand a teammate, with your IP and shared-id already filled in (`serve_local.py:509-544`). Ctrl-C stops everything.
 
 Two things to read rather than skim:
 
@@ -77,7 +91,7 @@ Two things to read rather than skim:
 | Claude on your **subscription**, no key at all | `--distiller claude-cli --claude-model haiku` |
 | no NPU, no key, read-only | `--listen` |
 
-The two Claude arms want different spellings: `anthropic` takes a full Messages API id, `claude-cli` takes the short alias the binary accepts (`serve_local.py:235-244`). `--claude-model` with `--distiller npu` is refused rather than ignored.
+The two Claude arms want different spellings: `anthropic` takes a full Messages API id, `claude-cli` takes the short alias the binary accepts (`serve_local.py:247-256`). `--claude-model` with `--distiller npu` is refused rather than ignored (`:272-275`).
 
 With no flags a stand-in answers locally. It only knows this repo's fixture corpus, so **your own words will not distil into findings** — it returns empty for anything unfamiliar, deliberately, because a stub that invented findings would be lying about which component did the work. Fine for proving the wiring, not for real use. `--live` proxies the seam to the real models in `secrets.jsonc` and costs real requests (~20/hour/key).
 
@@ -104,7 +118,7 @@ You should now have six tools, prefixed `mcp__synapse__` (`server.py:472, 569, 6
 | `leave_session()` | detach this conversation; the session lives on |
 | `end_session()` | close it for everyone — creator only, and it refuses while other members are joined |
 
-`serve_local`'s banner still names only `query` and `contribute` (`serve_local.py:491`); the other four are there.
+`serve_local`'s banner still names only `query` and `contribute` (`serve_local.py:506`); the other four are there.
 
 ## 6. Install the awareness pack
 
@@ -129,7 +143,17 @@ Then ask for it back. **The working memory can lag by up to 60 seconds** — syn
 
 ## Adding a second machine
 
-Hand your teammate the command `serve_local` printed for you — it already carries your LAN IP and shared-id:
+Hand your teammate the command `serve_local` printed for you — it already carries your LAN IP and shared-id. It prints three forms, in the order the banner puts them (`serve_local.py:509-544`), and the first one is the one to paste: it installs `uv`, clones, syncs and joins from nothing, so a teammate with only `git` and a browser needs no prior setup.
+
+```bash
+curl -LsSf https://raw.githubusercontent.com/SinghSiddharth01/Synapse/main/install.sh | sh -s -- --service-url http://<your-lan-ip>:8899 --shared-id sh-xxxxxxxx --contributor <their-name>
+```
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/SinghSiddharth01/Synapse/main/install.ps1))) -ServiceUrl http://<your-lan-ip>:8899 -SharedId sh-xxxxxxxx -Contributor <their-name>
+```
+
+Both are single unwrapped lines on purpose: a command broken across `\` continuations is not pasteable into a chat window, and PowerShell does not honour `\` at all. Only if they already have a synced checkout is the third form shorter:
 
 ```bash
 uv run python scripts/serve_local.py \

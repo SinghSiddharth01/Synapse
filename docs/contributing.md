@@ -4,7 +4,7 @@ For a new contributor: how the repo is laid out, how to get the tests running, w
 
 ## Repo layout
 
-Synapse is a `uv` workspace: one root `pyproject.toml` (`/Users/siddharthsingh/Dev/synapse/pyproject.toml`) with `[tool.uv.workspace] members = ["packages/*"]`, and six packages under `packages/`, each its own installable distribution with its own `pyproject.toml` and its own `tests/` directory:
+Synapse is a `uv` workspace: one root `pyproject.toml` at the repo root with `[tool.uv.workspace] members = ["packages/*"]`, and six packages under `packages/`, each its own installable distribution with its own `pyproject.toml` and its own `tests/` directory:
 
 | Package | Distribution name | What it owns |
 |---|---|---|
@@ -54,7 +54,7 @@ This is the pattern used throughout the plan execution logs in `docs/plans/exec/
 
 - **Framework:** `pytest` with `pytest-asyncio` (`asyncio_mode = "auto"` — async test functions need no decorator), `pytest-httpserver` for HTTP-boundary tests, `pytest-cov` for coverage.
 - **Location:** each package's tests live in its own `packages/<name>/tests/` directory, mirroring the package's `src/` modules by filename (`test_store.py` tests `store.py`, etc.). Repo-level tests that check documentation rather than one package's code live in the top-level `tests/`.
-- **Scale:** the suite is large — 846 `def test_*` functions collected statically across `packages/` and `tests/` at time of writing. Do not hand-copy this number into a doc; it drifts every session. If you need it, derive it (`uv run pytest --collect-only -q | tail -1` or equivalent) rather than typing a remembered figure — stale test-count claims are a recurring, specifically-flagged failure mode in this repo's docs (see `docs/overnight/w10a-docs-audit.md` item 14).
+- **Scale:** the suite is large — four figures short of a thousand at the time of writing, and this page deliberately does not say which. Do not hand-copy a test count into a doc; it drifts every session, and a static `def test_*` grep and pytest's own collection do not even agree (parametrised cases multiply). Derive it when you need it (`uv run pytest --collect-only -q | tail -1`) rather than typing a remembered figure — stale test-count claims are a recurring, specifically-flagged failure mode in this repo's docs (see `docs/overnight/w10a-docs-audit.md` item 14).
 - **Coverage exclusion:** the `if __name__ == "__main__":` guard in every CLI module is excluded from coverage (`[tool.coverage.report] exclude_lines` in `pyproject.toml`) because it only runs on direct invocation, not under pytest — `scripts/verify_orchestrator.py` is what actually exercises it live. This keeps 100% a reachable target instead of a number nobody can hit.
 - **Tests as a doc-truth mechanism:** two files in the top-level `tests/` exist specifically to stop documentation from silently going wrong:
   - `tests/test_vocabulary.py` asserts that every term the plans use in prose (`Triage`, `Distiller`, `Edge Worker`, `Tombstone`, `View`, `Lane`, `Candidate`, `Lane yield`, `Fold`, `Topic`) still has a bolded definition in `CONTEXT.md`. It exists because a `git merge` resolution can delete a definition with no error anywhere else. It checks *presence*, not *truth* — a definition can exist and still assert something the code no longer does, which a doc audit has to catch by reading code, not by running this test.

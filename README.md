@@ -31,7 +31,7 @@ Edge distillation on Snapdragon plus cloud synthesis on Cloud AI 100 is the divi
 - **On-device SLM inference** on the Snapdragon X Elite NPU
 - **Qualcomm Cloud AI 100** for synthesis and retrieval
 - **MCP** (Model Context Protocol) for the agent-facing interface
-- **Claude Code and Codex** as the demo pair — the worker auto-detects which agent is running; the design is agent-agnostic
+- **Claude Code** as the demo agent — the worker auto-detects which agent product is running, and a Codex adapter is registered alongside it (`packages/worker/src/synapse_worker/discovery.py:279-284`), built from the Codex source tree rather than against a live transcript. The design is agent-agnostic; Claude Code is the path with live evidence behind it.
 
 ## Five-Day Plan
 
@@ -56,7 +56,7 @@ Our demo highlights one concrete use case: a team debugging a shared issue, comb
 
 - Python 3.12+
 - [`uv`](https://docs.astral.sh/uv/) for dependency management and running the workspace
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) as the agent to connect (the worker auto-detects the agent product; Codex support is unbuilt — see Stretch Goals)
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) as the agent to connect (the worker auto-detects the agent product; the Codex adapter is registered but unverified against a live transcript — see `fixtures/raw_lines/codex/README.md`)
 - (Optional) a Snapdragon X Elite machine running `geniex serve` on `:18181` for real on-device NPU inference, and Cirrascale/Cloud AI 100 credentials for real cloud synthesis. Without either, `scripts/serve_local.py` (below) starts a model stand-in automatically, so the full pipeline is runnable on any machine.
 
 ### Setup (from scratch)
@@ -122,7 +122,7 @@ uv run pytest
 
 - [`docs/demo-script.md`](docs/demo-script.md) — the full scripted walkthrough (multiple contributors, cross-teammate retrieval, and recovery after a service restart)
 - [`packs/claude-code/INSTALL.md`](packs/claude-code/INSTALL.md) — optional awareness hooks that make shared-memory updates surface proactively inside a Claude Code session, rather than only on demand via `query`
-- [`docs/architecture.html`](docs/architecture.html) — architecture deep-dive
+- [`docs/architecture.md`](docs/architecture.md) — architecture deep-dive (`docs/architecture.html` is a standalone rendered copy of the same material; the Markdown is the one the docs site publishes and the one to edit)
 - [`CONTEXT.md`](CONTEXT.md) — vocabulary and design invariants
 
 ## Team

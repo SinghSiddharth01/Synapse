@@ -2,6 +2,23 @@
 
 Failures a teammate actually hits, in the order you hit them: getting the code running, starting your half, joining a session, watching memory move, and cleaning up. Each row is symptom → cause → fix. Citations are `file:line` against this checkout.
 
+## Ask the machine first
+
+Before reading any section below, run the doctor. It answers the eight questions the rest of this page spends paragraphs diagnosing — `uv`, the interpreter (including the ARM64-under-Prism trap), `mcp == 1.9.4`, the Unicode canary, the three ports, `secrets.jsonc`, the awareness pack, and the MCP registration — and it starts nothing, stops nothing, and makes no network request (`scripts/doctor.py:1-35`).
+
+```sh
+./install.sh --doctor-only            # or, on Windows:  .\install.bat -DoctorOnly
+uv run python scripts/doctor.py       # the same checks, from a checkout you already have
+uv run python scripts/doctor.py --json
+```
+
+`--doctor-only` is an inspection: it creates no `secrets.jsonc`, registers no MCP server, copies no pack, writes no log into the checkout, and starts nothing. Exit code is `1` if any check FAILs; a WARN never fails the run, because "a Synapse is already running on this machine" is a normal state and not a fault.
+
+Two WARNs are worth knowing before you chase them:
+
+- **`WARN  ports`** does not mean you cannot start. `serve_local.py` claims `8787` always, `8899` unless `--service-url`, and `18181` unless `--listen`/`--npu` (`scripts/serve_local.py:277-278`). Only a port your run actually needs is a problem — see [`ports already in use`](#ports-already-in-use-18181-or-87878899) below.
+- **`WARN  secrets`** is expected on a first run. Nothing in `secrets.jsonc` is required for the stand-in arm.
+
 ## Setup
 
 ### `uv sync` fails with a Rust/`cryptography` build error (Windows/ARM64)
@@ -25,13 +42,13 @@ If the path is wrong on your box: `Get-ChildItem "$env:LOCALAPPDATA\Programs\Pyt
 
 ### `--distiller anthropic` says "Could not resolve authentication method"
 
-**Cause.** The key lives in the `anthropic` block of `secrets.jsonc` (where every other credential in this project lives), but `scripts/serve_local.py` only reads `ANTHROPIC_API_KEY` from the environment or that same block — a key placed anywhere else in the file, or a malformed `secrets.jsonc`, is silently treated as absent (`scripts/serve_local.py:61-92`, `_anthropic_key` returns `None` on a `JSONDecodeError` rather than raising).
+**Cause.** The key lives in the `anthropic` block of `secrets.jsonc` (where every other credential in this project lives), but `scripts/serve_local.py` only reads `ANTHROPIC_API_KEY` from the environment or that same block — a key placed anywhere else in the file, or a malformed `secrets.jsonc`, is silently treated as absent (`scripts/serve_local.py:73-104`, `_anthropic_key` returns `None` on a `JSONDecodeError` rather than raising).
 
-**Fix.** Either `export ANTHROPIC_API_KEY=sk-ant-...`, or add `"anthropic": {"api_key": "sk-ant-..."}` to `secrets.jsonc`. The script's own error names both options (`scripts/serve_local.py:433-438`). `secrets.jsonc` is gitignored (`.gitignore:4-6`) and the key is never printed or logged.
+**Fix.** Either `export ANTHROPIC_API_KEY=sk-ant-...`, or add `"anthropic": {"api_key": "sk-ant-..."}` to `secrets.jsonc`. The script's own error names both options (`scripts/serve_local.py:445-450`). `secrets.jsonc` is gitignored (`.gitignore:6`, under the comment at `:4-5`) and the key is never printed or logged.
 
 ### `secrets.jsonc` / `api-1.json` show up in `git status`
 
-**Cause/fix.** These are the canonical credentials file and are meant to be gitignored (`.gitignore:4-6`, comment: *"secrets.jsonc is the canonical team credentials file, distributed offline only"*). If either is staged, unstage it — do not commit. `secrets.example.jsonc` is the committed template.
+**Cause/fix.** These are the canonical credentials files and are meant to be gitignored (`secrets.jsonc` at `.gitignore:6`, `api-1.json` at `:7`, under the comment at `:4-5`: *"secrets.jsonc is the canonical team credentials file, distributed offline only"*). If either is staged, unstage it — do not commit. `secrets.example.jsonc` is the committed template.
 
 ## Starting your half (`serve_local.py`)
 
@@ -55,29 +72,29 @@ Get-CimInstance Win32_Process |
 
 then confirm the ports are actually free with `Get-NetTCPConnection -LocalPort 8787,18181 -State Listen` — no output means free. (`docs/JOIN-WINDOWS.md:49-67`)
 
-`claim_ports` (`scripts/serve_local.py:147-177`) is what raises this message before anything else runs; it exists specifically because a second `serve_local` on the same machine used to sail past the orchestrator's own bind failure — the *existing* orchestrator answers its health check, so the new one looks up — and by then it had already overwritten `.synapse/bindings/claude-code.json` with its own contributor, silently turning the host's agent into somebody else (observed 2026-08-06, comment at `scripts/serve_local.py:150-157`). If you're trying to **listen** alongside a host you're already running, you don't need a second process at all — your existing orchestrator is already connected to that session; the message says so.
+`claim_ports` (`scripts/serve_local.py:159-189`) is what raises this message before anything else runs; it exists specifically because a second `serve_local` on the same machine used to sail past the orchestrator's own bind failure — the *existing* orchestrator answers its health check, so the new one looks up — and by then it had already overwritten `.synapse/bindings/claude-code.json` with its own contributor, silently turning the host's agent into somebody else (observed 2026-08-06, comment at `scripts/serve_local.py:162-168`). If you're trying to **listen** alongside a host you're already running, you don't need a second process at all — your existing orchestrator is already connected to that session; the message says so.
 
 ### `--npu given but nothing is serving on :18181`
 
 **Cause.** `--npu` tells the script *"a real model is already serving on :18181, don't start the stand-in"* — it does not start `geniex serve` for you.
 
-**Fix.** Start `geniex serve` first, then re-run with `--npu`, or drop the flag to use the stand-in instead. (`scripts/serve_local.py:281-285`)
+**Fix.** Start `geniex serve` first, then re-run with `--npu`, or drop the flag to use the stand-in instead. (`scripts/serve_local.py:293-297`)
 
 ### Queries come back empty with an HTTP 200, only when `--npu` is set
 
 **Cause.** The stand-in serves both `/chat/completions` and `/completions`; `geniex serve` (the real NPU endpoint) has **no `/completions` route at all**. `AIC100Provider` — the synthesizer — needs `/completions`, so against a real NPU it 410s on every synthesis call, and separately the host's own queries can come back empty with a 200. Observed live 2026-08-06, confirmed against Qualcomm's published endpoint list.
 
-**Fix.** No code fix exists for this yet; know it's the endpoint shape, not a broken query, before you go looking elsewhere. (`scripts/serve_local.py:318-326`)
+**Fix.** No code fix exists for this yet; know it's the endpoint shape, not a broken query, before you go looking elsewhere. (`scripts/serve_local.py:330-338`)
 
 ### `nothing is answering at <service-url>` when joining with `--service-url`
 
-**Cause.** `serve_local.py` probes `<service-url>/debug` before doing anything else and refuses if nothing answers within 8s (`scripts/serve_local.py:306-313`) — either the host hasn't started their service, or they bound it to `127.0.0.1` instead of the LAN (`serve_local.py` binds `0.0.0.0` by default; `--host 127.0.0.1` opts out).
+**Cause.** `serve_local.py` probes `<service-url>/debug` before doing anything else and refuses if nothing answers within 8s (`scripts/serve_local.py:318-325`) — either the host hasn't started their service, or they bound it to `127.0.0.1` instead of the LAN (`serve_local.py` binds `0.0.0.0` by default; `--host 127.0.0.1` opts out).
 
 **Fix.** Ask the host to confirm the service is up and reachable, and that they didn't pass `--host 127.0.0.1`.
 
 ### `<service-url> is up but holds no Shared Session yet`
 
-**Cause.** You joined with `--service-url` but no `--shared-id`, and the host's service currently has zero sessions (`scripts/serve_local.py:367-371`) — `serve_local.py` deliberately refuses to create one for you here, because a session created on your machine alone would look like success (a working stack, an empty memory, no error anywhere) while being exactly the isolated-memory outcome joining exists to avoid (`scripts/serve_local.py:362-366`).
+**Cause.** You joined with `--service-url` but no `--shared-id`, and the host's service currently has zero sessions (`scripts/serve_local.py:379-383`) — `serve_local.py` deliberately refuses to create one for you here, because a session created on your machine alone would look like success (a working stack, an empty memory, no error anywhere) while being exactly the isolated-memory outcome joining exists to avoid (`scripts/serve_local.py:375-378`).
 
 **Fix.** Ask the host for the `sh-…` id and pass `--shared-id` explicitly.
 
@@ -87,7 +104,7 @@ then confirm the ports are actually free with `Get-NetTCPConnection -LocalPort 8
 
 **Cause.** No session binding exists yet for this agent.
 
-**Fix.** Call `create_session` or `join_session <shared_id>` from the agent, or re-run `serve_local.py` with `--shared-id`. No restart needed — `resolve_binding` re-checks the binding on every call (`packages/orchestrator/src/synapse_orchestrator/server.py:125-130`).
+**Fix.** Call `create_session` or `join_session <shared_id>` from the agent, or re-run `serve_local.py` with `--shared-id`. No restart needed — `resolve_binding` re-checks the binding on every call — the sentence is the tool's own refusal text at `packages/orchestrator/src/synapse_orchestrator/server.py:125-130`, and the mechanism it describes is documented at `:179-192`.
 
 ### `/mcp` says failed, "unable to connect"
 
@@ -103,7 +120,7 @@ then confirm the ports are actually free with `Get-NetTCPConnection -LocalPort 8
 
 ### "Refusing to guess which claude-code conversation this is" (ambiguity refusal)
 
-**Cause.** Two or more live transcripts for the same agent product were written within the ambiguity window of each other, and binding intentionally does not fall back to "pick the most recently modified one" — that would bind a different conversation than you meant, silently. (`packages/orchestrator/src/synapse_orchestrator/server.py:106-121`)
+**Cause.** Two or more live transcripts for the same agent product were written within the ambiguity window of each other, and binding intentionally does not fall back to "pick the most recently modified one" — that would bind a different conversation than you meant, silently. (`packages/orchestrator/src/synapse_orchestrator/server.py:446-452`, inside `_bind`)
 
 **Fix.** Call the tool again passing `agent_session_id` explicitly — Claude Code exports it as `$CLAUDE_CODE_SESSION_ID`. It's an exact match on the transcript filename and never consults modification times.
 
@@ -111,7 +128,7 @@ then confirm the ports are actually free with `Get-NetTCPConnection -LocalPort 8
 
 **Cause.** You passed an `agent_session_id` that doesn't match any detected transcript. The tool will not fall back to the most-recently-modified conversation, because that would silently bind the wrong one.
 
-**Fix.** Check the id — `echo $CLAUDE_CODE_SESSION_ID` (bash) / `echo $env:CLAUDE_CODE_SESSION_ID` (PowerShell) — and confirm it matches what you passed. (`server.py:150-163`)
+**Fix.** Check the id — `echo $CLAUDE_CODE_SESSION_ID` (bash) / `echo $env:CLAUDE_CODE_SESSION_ID` (PowerShell) — and confirm it matches what you passed. (`server.py:456-463`)
 
 ### `contribute` says "nothing durable extracted" / declines politely
 
@@ -135,15 +152,15 @@ then confirm the ports are actually free with `Get-NetTCPConnection -LocalPort 8
 
 These three causes produce the *same* symptom — findings are queryable immediately, but the synthesized working memory (what a *query*'s ranking draws on, what the briefing summarizes) doesn't move — and they need different fixes. `push_findings`'s response distinguishes them: `synthesized` (did the version actually move this round), `deferred` (did we choose not to run synthesis at all), and `pending` (how many findings are waiting). (`packages/service/src/synapse_service/api.py:559-561`)
 
-### Deferred: "N second(s) since last round (minimum 60s)"
+### Deferred: "Ns since last round (minimum 60s), N finding(s) pending"
 
-**Cause.** The debounce. Synthesis is rate-governed by `SYNAPSE_MERGE_MIN_INTERVAL_S` (default 60s) so a live `synapse-worker run` pushing every couple of minutes doesn't blow through the hourly token/request ceiling on the shared synthesis key. Findings are queryable the instant they're pushed; only the *synthesized* memory lags — it catches up next round with the whole accumulated batch. (`api.py:483-510`, ADR 0005 §7)
+**Cause.** The debounce. Synthesis is rate-governed by `SYNAPSE_MERGE_MIN_INTERVAL_S` (default 60s) so a live `synapse-worker run` pushing every couple of minutes doesn't blow through the hourly token/request ceiling on the shared synthesis key. Findings are queryable the instant they're pushed; only the *synthesized* memory lags — it catches up next round with the whole accumulated batch. (`api.py:504-509`, ADR 0005 §7)
 
 **Fix.** Wait out the interval, or call `POST /v1/sessions/{sid}/synthesize` to force a round now, ignoring the debounce — the documented mid-demo override. It also drains the pending queue so the next push doesn't re-offer what this round already synthesized. (`api.py:563-598`)
 
 ### Deferred on BUDGET, not latency
 
-**Cause.** The interval has passed but the hourly token/request budget is exhausted — a separate governor tracks real spend (including failed rounds: a truncated verdict burns the same tokens as a good one) and defers rather than blow past the shared synthesis key's ceiling. Distinct log line on purpose: `"Synthesis for %s deferred on BUDGET, not latency"` (`api.py:517-522`).
+**Cause.** The interval has passed but the hourly token/request budget is exhausted — a separate governor tracks real spend (including failed rounds: a truncated verdict burns the same tokens as a good one) and defers rather than blow past the shared synthesis key's ceiling. Distinct log line on purpose: `"Synthesis for %s deferred on BUDGET, not latency"` (`api.py:518-522`).
 
 **Fix.** More keys (`SYNAPSE_SYNTHESIS_KEYS` / `INFERENCE_CLOUD_API_KEYS`) — lowering `SYNAPSE_MERGE_MIN_INTERVAL_S` does nothing here, that's the point of logging the two cases distinctly. One key holds roughly 6 rounds/hour under the governor (ADR 0005, "One key cannot deliver 60-second latency"), which is why quiet periods get their 60s and busy periods stretch.
 
@@ -151,7 +168,7 @@ These three causes produce the *same* symptom — findings are queryable immedia
 
 **Cause.** A truncated verdict. This was a real 2026-08-06 outage: the prompt asked for a working memory "under 500 words" while the provider's output cap made that arithmetically impossible, so every response was cut off mid-JSON and the parser returned `None`. `SynthesisBudget.derive` (`packages/service/src/synapse_service/synthesis.py`) now derives the working-memory word cap and verdict room from the actual `max_tokens` instead of stating them independently, and refuses to start on an impossible configuration rather than fail silently at merge time. Full account: ADR 0005.
 
-**Fix.** If you see this today, it means the running configuration has `max_tokens` too small for the current working memory size — the numbers to check are `INFERENCE_CLOUD_MAX_TOKENS` and the derived budget row it produces (ADR 0005's table: 800 → 270 words / 4 merges; 1600 → 500 words / 10 merges, which is what `serve_local.py` sets: `scripts/serve_local.py:50-51,336-345`). This is a config problem, not a crash to route around — do not raise `max_tokens` without also raising `INFERENCE_CLOUD_TIMEOUT`, or you trade this failure for a `ReadTimeout` that produces the identical "landed, memory unchanged" symptom from a different cause (ADR 0005, "Raising max_tokens without raising the timeout…").
+**Fix.** If you see this today, it means the running configuration has `max_tokens` too small for the current working memory size — the numbers to check are `INFERENCE_CLOUD_MAX_TOKENS` and the derived budget row it produces (ADR 0005's table: 800 → 270 words / 4 merges; 1600 → 500 words / 10 merges, which is what `serve_local.py` sets: `scripts/serve_local.py:62-63`, exported to the service at `:356-357`). This is a config problem, not a crash to route around — do not raise `max_tokens` without also raising `INFERENCE_CLOUD_TIMEOUT`, or you trade this failure for a `ReadTimeout` that produces the identical "landed, memory unchanged" symptom from a different cause (ADR 0005, "Raising max_tokens without raising the timeout…").
 
 ### A push you retried shows up twice in the dashboard's log tail
 
@@ -161,7 +178,7 @@ These three causes produce the *same* symptom — findings are queryable immedia
 
 ## Orphaned processes / cleanup
 
-`serve_local.py` starts **three** processes per run (service, orchestrator, model stand-in), all children of the script. A plain `Ctrl-C` is caught and runs `stop_all()`, which terminates them in reverse order and force-kills anything that doesn't exit within 5s (`scripts/serve_local.py:189-197, 514-528`). If the parent script itself dies uncleanly (killed, crashed, terminal closed), the children are orphaned and hold their ports — this is what produces `ports already in use` on the next start. The kill patterns above (`pkill -f synapse-service; pkill -f synapse-orchestrator; pkill -f local_model_server` / the `Get-CimInstance` equivalent on Windows) match all three process names and are the standard way to clear a stuck state before starting fresh.
+`serve_local.py` starts **three** processes per run (service, orchestrator, model stand-in), all children of the script. A plain `Ctrl-C` is caught and runs `stop_all()`, which terminates them in reverse order and force-kills anything that doesn't exit within 5s (`stop_all` at `scripts/serve_local.py:201-209`, wired to the `finally` at `:559-566`). If the parent script itself dies uncleanly (killed, crashed, terminal closed), the children are orphaned and hold their ports — this is what produces `ports already in use` on the next start. The kill patterns above (`pkill -f synapse-service; pkill -f synapse-orchestrator; pkill -f local_model_server` / the `Get-CimInstance` equivalent on Windows) match all three process names and are the standard way to clear a stuck state before starting fresh.
 
 ## Freshness pointer (signal ③) silent when you expect a nudge
 
@@ -184,8 +201,8 @@ These three causes produce the *same* symptom — findings are queryable immedia
 
 | port | what |
 |---|---|
-| 8787 | your own orchestrator (`ORCHESTRATOR_URL`, `scripts/serve_local.py:54`) — MCP always points here, never the host's |
-| 8899 | the Synapse Service (`SERVICE_URL`, `scripts/serve_local.py:53`) — yours if hosting, the host's if `--service-url` |
-| 18181 | model seam: the stand-in or `geniex serve` (`STANDIN_URL`/`NPU_URL`, `scripts/serve_local.py:55-56`) |
+| 8787 | your own orchestrator (`ORCHESTRATOR_URL`, `scripts/serve_local.py:66`) — MCP always points here, never the host's |
+| 8899 | the Synapse Service (`SERVICE_URL`, `scripts/serve_local.py:65`) — yours if hosting, the host's if `--service-url` |
+| 18181 | model seam: the stand-in or `geniex serve` (`STANDIN_URL`/`NPU_URL`, `scripts/serve_local.py:67-68`) |
 | 8790 | `synapse-worker --debug-port` dashboard, first worker (`packages/worker/src/synapse_worker/cli.py:69`, `DEFAULT_DEBUG_PORT`) |
-| 8791 | second worker's debug dashboard in the two-worker demo shape (`scripts/demo_local.py:58-59`) — not a fixed default, just what the demo script assigns |
+| 8791 | second worker's debug dashboard in the two-worker demo shape (`scripts/demo_local.py:68-69`, the `FEED` table) — not a fixed default, just what the demo script assigns |

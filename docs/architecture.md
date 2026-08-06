@@ -24,10 +24,12 @@ Two processes per developer machine, one service anywhere.
 | Synapse Service (`synapse-service`) | `8899` | `service/cli.py` | one Shared Memory per Shared Session, synthesis, retrieval, `/debug` |
 | Model stand-in | `18181` | `scripts/serve_local.py` | replays this repo's corpus so the pipeline runs with no NPU and no cloud key |
 
-`scripts/serve_local.py` boots the service, the orchestrator and the stand-in and
-then binds a Shared Session (`scripts/serve_local.py:53-56`, `:200+`). It does
-**not** start a worker (`scripts/serve_local.py:347-348`) — the passive path is a
-separate `synapse-worker run`.
+`scripts/serve_local.py` boots the service, the orchestrator and the stand-in
+(the four URLs at `scripts/serve_local.py:65-68`) and then writes the Shared
+Session binding at `scripts/serve_local.py:426`. It does **not** start a worker,
+and it deliberately binds a *scratch* transcript path rather than a real one
+(`scripts/serve_local.py:20-27`) — the passive path is a separate
+`synapse-worker run`.
 
 The orchestrator's MCP transport is streamable HTTP, never stdio, and that is a
 decision rather than a preference: stdio spawns one server process per client,
@@ -118,7 +120,7 @@ in its own prompt (`docs/adr/0003-distiller-compresses-rather-than-judges.md`).
 Judgment moved upstream to triage and downstream to synthesis.
 
 Prompts are versioned packs in `config/prompts/*.toml`; the shipped pack is
-`v4-condense` (`config/synapse.toml:71,96`).
+`v4-condense` (`config/synapse.toml:35`).
 
 Three provider arms exist, selected by `SYNAPSE_DISTILLER`
 (`worker/cli.py:119-156`, mirrored at `orchestrator/cli.py:114-165`):
@@ -246,7 +248,7 @@ forwarding property (`providers/recording.py:88-121`).
 | `output_tokens` | working memory | verdict room | max merges |
 |---|---|---|---|
 | 800 — `AIC100Provider` default (`providers/aic100.py:152`) | 270 words | 301 tok | 4 |
-| 1600 — set by `scripts/serve_local.py:50` | 500 words | 710 tok | 10 |
+| 1600 — set by `scripts/serve_local.py:62` (`SYNTHESIS_MAX_TOKENS`, exported as `INFERENCE_CLOUD_MAX_TOKENS` at `:356`) | 500 words | 710 tok | 10 |
 | 543 | refused — `SynthesisBudgetError` | | |
 
 The derived numbers are **stated into the prompt** by `synth_system(words,
