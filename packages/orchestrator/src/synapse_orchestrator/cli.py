@@ -40,7 +40,7 @@ from synapse_orchestrator.app import build_app
 from synapse_orchestrator.briefing import (
     DEFAULT_REFRESH_SECONDS,
     attach_briefing_refresher,
-    build_briefing,
+    compose_instructions,
 )
 from synapse_orchestrator.ended import ended_session_ids, record_ended
 from synapse_orchestrator.relay import Relay
@@ -511,7 +511,12 @@ def main(argv: list[str] | None = None, *,
                   ended_sessions=ended_session_ids(state_dir),
                   on_session_ended=partial(record_ended, state_dir))
 
-    briefing = asyncio.run(build_briefing(binding, args.service_url, transport=transport))
+    # `compose_instructions`, not `build_briefing` (finding #1): on the path
+    # docs/JOIN.md documents, this string is the ONLY thing the joining agent is
+    # handed — serve_local.py writes the binding itself, so `join_session` (the
+    # other place the arrival body is delivered) is never called at all.
+    briefing = asyncio.run(compose_instructions(binding, args.service_url,
+                                                transport=transport))
     server = create_mcp(briefing)
     # Registered UNCONDITIONALLY, even when nothing is joined yet — round 3
     # review's fix for the tools-frozen-at-boot blocker. `resolve_binding` is

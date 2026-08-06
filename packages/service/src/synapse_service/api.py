@@ -24,7 +24,8 @@ from starlette.routing import Route
 from synapse_contracts import Finding, SessionStatus
 from synapse_providers import CallLog, ModelProvider, RecordingProvider
 
-from synapse_service.debug import Feed, debug_routes
+from synapse_service.arrival import SummaryCache
+from synapse_service.debug import Feed, WorkingMemoryLog, debug_routes
 from synapse_service.lanes import DEFAULT_TOP_K
 from synapse_service.log import MarkedTrivial, Merged
 from synapse_service.retrieval import (RetrievalUnavailable, query_findings,
@@ -175,6 +176,13 @@ def build_app(provider: ModelProvider, *, debug: bool = True,
     # nothing retains a call/prompt history no one can ever look at.
     call_log = CallLog() if debug else None
     feed = Feed() if debug else None
+    # ⟨W4a, decisions/003⟩ Same gating, same reason, third of a set: the
+    # Finding Log has no entry kind carrying the Working Memory prose, so a
+    # rewrite is overwritten and gone the moment the next merge lands. This
+    # retains the last ten per session so the brain page can show the memory
+    # CHANGING rather than only its current value. Nothing outside /debug
+    # reads it, and it does not exist at all when debug is off.
+    wm_log = WorkingMemoryLog() if debug else None
     synthesis_provider = (
         RecordingProvider(provider, "synthesis", call_log) if debug else provider
     )
@@ -202,6 +210,13 @@ def build_app(provider: ModelProvider, *, debug: bool = True,
     # scope rather than per session: the ceiling belongs to the KEY, and two
     # busy sessions share one.
     _spend: list[tuple[float, int]] = []
+
+    # The arrival summary's memo (W5, decisions/004). Closure scope like the
+    # debounce state above and for the same reason: two apps in one test
+    # process must not serve each other's cached summaries. Invalidation is
+    # structural -- the key holds the session's content fingerprint -- so no
+    # route has to remember to clear it; see `SummaryCache`.
+    _summaries = SummaryCache()
 
     def _record_spend() -> None:
         """Charge the round that just ran, at its real cost when the provider
@@ -305,6 +320,13 @@ def build_app(provider: ModelProvider, *, debug: bool = True,
         trivial = [e for e in entries if isinstance(e, MarkedTrivial)]
         trivial_count = sum(len(e.finding_ids) for e in trivial)
         ctx = store.get_context(sid)
+        # `synthesis.merge` does `set_context` then `bump_version`, so the ctx
+        # read here carries the new prose AND the new version together --
+        # which is the whole reason the recorder lives at this one call site
+        # rather than inside synthesis. `WorkingMemoryLog.record` drops an
+        # empty or unchanged text itself, so a verdict that omitted the
+        # rewrite books no revision.
+        wm_log.record(sid, ctx.working_memory, ctx.memory_version)
         feed.event(
             "synthesis",
             f"{sid}: {len(merged)} merge(s), {trivial_count} trivial, "
@@ -669,6 +691,43 @@ def build_app(provider: ModelProvider, *, debug: bool = True,
             "members": list(store.get_session(sid).members),
         })
 
+    async def arrival(request: Request) -> JSONResponse:
+        """What a JOINER is told (W5). Two parts: what has accumulated, and
+        what is new since this person last read the memory.
+
+        Sits alongside `/watermark` rather than inside it. The watermark is a
+        HEADLINE — counts and a version delta, composed into the MCP server's
+        `instructions` on every connection and refreshed on a timer, so it has
+        to stay small and cheap. This is a body, fetched once, at join, and
+        rendered into a tool result the joining agent reads out loud. Merging
+        them would make every ten-second briefing refresh pay for a summary
+        nobody asked for. `briefing.py` composes its headline within its own
+        hard cap and then appends THIS body, separately capped, so the two
+        surfaces stay separately bounded rather than one growing into the
+        other. (The number in that cap moved in the same branch that wrote this
+        docstring; naming it here would only give it a second place to go
+        stale, so it is named nowhere but `briefing._MAX_BRIEFING_CHARS`.)
+
+        DOES NOT `mark_seen`. Reading the summary is not reading the memory:
+        this route is idempotent, an orchestrator may call it on a join that
+        then fails to bind, and moving somebody's watermark here would mean the
+        first call silently erased the "new since" the second one is for. The
+        watermark still moves where it always did -- on `/query`.
+
+        Identity is read exactly as `/watermark` reads it: `contributor` for
+        the watermark half, `agent_session` for suppression (decisions/001),
+        with the same `_asking_*` fallbacks, so an un-upgraded client that
+        sends only one of them is not anonymous here either.
+        """
+        sid = request.path_params["sid"]
+        if (gate := _unavailable(sid)) is not None:
+            return gate
+        summary = _summaries.get(
+            store, sid,
+            contributor=_asking_contributor(request.query_params),
+            agent_session=_asking_agent_session(request.query_params))
+        return JSONResponse(summary.to_json())
+
     async def query(request: Request) -> JSONResponse:
         sid = request.path_params["sid"]
         if (gate := _unavailable(sid)) is not None:
@@ -730,6 +789,16 @@ def build_app(provider: ModelProvider, *, debug: bool = True,
             cands = store.candidates(sid, body["query"], top_k=TOP_K, exclude=suppressed)
             candidates = [c.finding for c in cands.candidates]
 
+        # THE WATERMARK IS TAKEN HERE, not after the await below. `candidates`
+        # is now fixed, so this is the instant the asker's view of the memory
+        # was decided; `query_findings` is a model call that docs/FLOW.md
+        # measures at 12.6–52.8 seconds, and every finding a teammate pushes
+        # inside that window belongs to the asker's NEXT read, not this one.
+        # Reading the position after the await marked those findings seen by
+        # somebody who was never shown them — and `_seen_count` is an arrival
+        # index, so they were dropped from that person's "new since" slice for
+        # good rather than until the next round (store.mark_seen's `at=`).
+        position = store.read_position(sid)
         try:
             ranked = await query_findings(
                 retrieval_provider,
@@ -767,8 +836,9 @@ def build_app(provider: ModelProvider, *, debug: bool = True,
                 status_code=503)
         # By CONTRIBUTOR, unchanged by the split: the watermark is a fact
         # about a person, so a query from either of one human's windows moves
-        # the place they resume from.
-        store.mark_seen(sid, contributor)
+        # the place they resume from. `at=` is the position snapshotted before
+        # the ranking call, not the position now — see above.
+        store.mark_seen(sid, contributor, at=position)
         if feed is not None:
             # Counts alone could not answer "what did the asker actually get
             # back?", which is the only thing an operator watching a query
@@ -786,6 +856,12 @@ def build_app(provider: ModelProvider, *, debug: bool = True,
                 # `d.asked_by` (debug.py:549) and this is a Contributor now,
                 # which is what an operator wanted to read there anyway.
                 asked_by=contributor or "anonymous",
+                # ⟨W4a⟩ ...and the Agent Session alongside it, which was in
+                # scope and discarded. It is what makes the brain page's "last
+                # query" a fact about THIS CONVERSATION rather than about the
+                # person -- the distinction W2 made real, and the one the page
+                # labels explicitly when it has to fall back.
+                asked_by_session=asking_session,
                 candidates=len(candidates),
                 ranked=len(ranked),
                 suppressed=withheld,
@@ -806,14 +882,18 @@ def build_app(provider: ModelProvider, *, debug: bool = True,
         Route("/v1/sessions/{sid}/findings", push_findings, methods=["POST"]),
         Route("/v1/sessions/{sid}/synthesize", synthesize, methods=["POST"]),
         Route("/v1/sessions/{sid}/watermark", watermark, methods=["GET"]),
+        Route("/v1/sessions/{sid}/arrival", arrival, methods=["GET"]),
         Route("/v1/sessions/{sid}/query", query, methods=["POST"]),
     ]
     if debug:
-        routes.extend(debug_routes(store, call_log, feed))
+        routes.extend(debug_routes(store, call_log, feed, wm_log))
 
     app = Starlette(routes=routes)
     app.state.store = store          # test seam: no route reads it
     # test seam: lets a test confirm no CallLog exists at all when debug is
     # disabled (not merely that it's unreachable) -- no route reads this.
     app.state.call_log = call_log
+    # Same seam, same reason: a disabled dashboard must not leave a ring of
+    # Working Memory prose retained where nothing can read it.
+    app.state.working_memory_log = wm_log
     return app

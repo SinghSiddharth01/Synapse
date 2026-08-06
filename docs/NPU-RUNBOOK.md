@@ -108,8 +108,11 @@ Open side by side:
 - `http://127.0.0.1:8790/debug` — the copper page: **NPU-now should tick
   live** while a segment distils; triage skips appear with reasons; `llm`
   entries expand to real prompt/output previews.
-- `http://127.0.0.1:8899/debug` — the teal page: `FindingAppended` entries,
-  then `Merged` the moment synthesis reconciles anything.
+- `http://127.0.0.1:8899/debug/log` — the teal log page: `FindingAppended`
+  entries, then `Merged` the moment synthesis reconciles anything.
+  (`http://127.0.0.1:8899/debug` is now the *brain page* — working memory,
+  its revisions, the participant roster. The log tail lives at `/debug/log`
+  since W4a, 2026-08-06.)
 
 **Gate:** a finding you can trace end to end — transcript line → triage keep
 → NPU distil (watch the seconds) → push → service log tail → retrievable by

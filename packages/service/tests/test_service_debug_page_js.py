@@ -61,7 +61,8 @@ def _run_scenario(script: str, tmp_path: Path) -> dict:
 async def test_an_expanded_llm_entry_survives_the_next_poll(tmp_path) -> None:
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=build_app(FakeProvider(scripts=[]))),
                                  base_url="http://svc") as client:
-        r = await client.get("/debug")
+        # ⟨W4a⟩ this page moved verbatim to /debug/log; /debug is the brain page.
+        r = await client.get("/debug/log")
         assert r.status_code == 200
         body = r.text
 

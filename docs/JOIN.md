@@ -105,6 +105,14 @@ claude mcp add --transport http --scope project synapse http://127.0.0.1:8787/mc
 Then start a **new** Claude Code session and **approve** the server when it
 asks. `claude mcp list` should say `✔ Connected  synapse`.
 
+**What you should see on that first message.** Your agent is handed the
+session's purpose, who is in it, a compact summary of what the team has already
+established, and anything that has landed since *you* last read the memory — so
+its first reply should tell you, in its own words, what it just walked into.
+Step 3 already joined this machine, so there is nothing for you to run: if the
+agent says nothing about the shared session at all, the orchestrator did not
+reach the service (check `claude mcp list`, then step 3's terminal).
+
 Note the URL is your **own** localhost, not the host's machine. See the rule
 at the bottom.
 
