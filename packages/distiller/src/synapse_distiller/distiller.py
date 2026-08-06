@@ -12,9 +12,11 @@ out. Nothing else in the system ever sees the Segment.
 
 from __future__ import annotations
 
+import difflib
 import logging
+import re
 import uuid
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -118,6 +120,101 @@ def is_degenerate(text: str) -> bool:
     return distinct_shingle_ratio(text) < _DEGENERATE_DISTINCT_RATIO
 
 
+# --- why a FINDING was dropped ---------------------------------------------------
+#
+# The three above classify a whole unparseable *response*. This one classifies a
+# single finding inside a well-formed one, alongside `dropped_invalid_type` and
+# `dropped_empty_text`, and it is the only one of those three that is a content
+# judgement rather than a schema one.
+#
+# WHAT IT IS FOR. Measured live on 2026-08-06 (docs/overnight/w7-live-evidence.md,
+# F1): one contributed paragraph produced nine findings, and six of them were
+# v4-condense's own few-shot outputs paraphrased — durable brokers and template
+# caches the contributor never wrote a word about — landing in shared memory as
+# `Provenance.CONTRIBUTED` under a real engineer's name. They were schema-valid,
+# typed correctly, fluent, and passed every guard we had:
+# `assert_prompt_conditioned` asks whether the model read its prompt (it did, far
+# too well), and `test_fixture_contamination.py` checks the inverse direction —
+# that no fixture duplicates a pack. Nothing checked the direction that failed.
+#
+# The proximate cause was the claude-cli arm flattening the few-shot turns into an
+# unmarked blob (fixed in `claude_cli_provider._flatten_prompt`). This guard is
+# here because that fix is unverifiable without a live call and applies to one arm:
+# any model, on any arm, that reads its examples too literally produces the same
+# poisoning, and the parse path is the last place to catch it before a Finding is
+# minted and attributed.
+DROP_EXAMPLE_ECHO = "example_echo"
+
+# The measure: order-aware token similarity against the pack's own example
+# outputs (`PromptPack.example_finding_texts`, derived from the few-shots so new
+# examples are covered without touching this file).
+#
+# Order-aware rather than a bag of words, because a paraphrase keeps the sentence
+# walking the same way and an unrelated finding that happens to reuse the
+# vocabulary does not. Measured against the real W7 payload — the six echoes, the
+# three genuine findings returned in the same response, six constructed findings
+# about genuine queue/broker/cache/render/latency work, and every golden finding
+# in the shipped fixture corpus scored against every shipped pack
+# (packages/distiller/tests/test_example_echo.py carries all of them):
+#
+#   the six observed echoes                 0.667 - 0.938
+#   the three genuine findings, same run    0.103 - 0.163
+#   genuine work on the examples' topics    0.118 - 0.462
+#   every shipped golden vs every pack      <= 0.160
+#
+# So the honest bar sits anywhere in 0.462 - 0.667, and 0.60 is placed nearer the
+# top of that gap on purpose: a wrongly-kept echo is visible in the log line below
+# and in the next query, while a wrongly-dropped finding is unrecoverable — the
+# worker never re-reads a transcript position, as this module's docstring says.
+ECHO_SIMILARITY_THRESHOLD = 0.60
+
+# Below this many words a note is exempt entirely. Short strings collide by
+# accident: "Page latency has not been measured." scores 0.600 against an example
+# it shares no intent with, and "The queue was switched." is a subsequence of one.
+# The pack asks for one or two sentences, so the observed echoes all run 15-28
+# words and lose nothing to this floor, while the false-positive band sits under
+# it. A guard that eats short real findings to catch short fake ones is a bad
+# trade in the only direction that cannot be undone.
+ECHO_MIN_WORDS = 10
+
+_ECHO_WORD = re.compile(r"[a-z0-9]+")
+
+
+def _echo_words(text: str) -> list[str]:
+    """Words only, lowercased. Punctuation, possessives and hyphenation are what
+    a paraphrase changes first, so none of them may carry weight here."""
+    return _ECHO_WORD.findall(text.lower())
+
+
+def example_echo_match(text: str, examples: Sequence[str]) -> tuple[float, str]:
+    """Closest of the pack's own example outputs, and how close it sits.
+
+    Returns `(0.0, "")` for a note too short to judge — see `ECHO_MIN_WORDS` —
+    so the caller never has to special-case length, exactly as
+    `distinct_shingle_ratio` returns 1.0 for text too short to call a loop.
+    """
+    words = _echo_words(text)
+    if len(words) < ECHO_MIN_WORDS:
+        return 0.0, ""
+
+    best, nearest = 0.0, ""
+    for example in examples:
+        other = _echo_words(example)
+        if not other:
+            continue
+        score = difflib.SequenceMatcher(None, words, other).ratio()
+        if score > best:
+            best, nearest = score, example
+        if best >= 1.0:
+            break
+    return best, nearest
+
+
+def is_example_echo(text: str, examples: Sequence[str]) -> bool:
+    """Whether this finding is the prompt's own example wearing a contributor's name."""
+    return example_echo_match(text, examples)[0] >= ECHO_SIMILARITY_THRESHOLD
+
+
 def classify_drop(text: str, output_tokens: int, max_tokens: int | None) -> str:
     """Which of the three failures produced this unparseable response.
 
@@ -146,6 +243,13 @@ class DistillStats:
     dropped_malformed: int = 0
     dropped_invalid_type: int = 0
     dropped_empty_text: int = 0
+    # Findings that were the pack's own few-shot output handed back as extraction.
+    # A counter AND the texts, because the counter alone cannot tell an operator
+    # whether the guard is doing its job or eating real work — and the eval
+    # harness needs to be able to say which example was echoed. See
+    # DROP_EXAMPLE_ECHO.
+    dropped_example_echo: int = 0
+    example_echoes: list[str] = field(default_factory=list)
     latency_ms: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
@@ -166,6 +270,14 @@ class DistillStats:
     # segment) from one the model looped on (a prompt or model problem) from one
     # it simply wrapped in prose (a parser problem). All three used to land here
     # as the same number and the same sentence.
+    #
+    # Example-echo drops are deliberately NOT appended here: this list is one
+    # entry per increment of `dropped_malformed` (a whole response that would not
+    # parse), and an echo is one finding inside a response that parsed fine. They
+    # share the `reason=` log convention so an operator greps for both the same
+    # way; they do not share a counter, because a reader comparing
+    # `len(drop_reasons)` against `dropped_malformed` must keep getting the same
+    # number.
     drop_reasons: list[str] = field(default_factory=list)
 
 
@@ -187,6 +299,10 @@ class Distiller:
         self.pack = pack if pack is not None else load_pack_by_name("v2-hardened")
         self.kinds = tuple(kinds) if kinds is not None else DEFAULT_KINDS
         self.render_style = render_style
+        # Read once, off whichever pack is wired in, so the echo guard covers a
+        # pack swapped at runtime and any example added to a pack's TOML without
+        # anyone remembering this line exists.
+        self._example_texts = self.pack.example_finding_texts
 
     async def distil(self, segment: Segment) -> tuple[list[Finding], DistillStats]:
         stats = DistillStats(
@@ -311,6 +427,27 @@ class Distiller:
             text = str(item.get("text", "")).strip()
             if not text:
                 stats.dropped_empty_text += 1
+                continue
+
+            # LAST GATE BEFORE A Finding EXISTS. Everything past this point is
+            # attributed to a named human and treated downstream as that human's
+            # verified experience, so the pack's own fiction has to stop here.
+            similarity, nearest = example_echo_match(text, self._example_texts)
+            if similarity >= ECHO_SIMILARITY_THRESHOLD:
+                stats.dropped_example_echo += 1
+                stats.example_echoes.append(text)
+                logger.warning(
+                    "Distiller: dropping finding from segment %s; reason=%s "
+                    "similarity=%.2f threshold=%.2f pack=%s "
+                    "echoed_example=%r text=%r",
+                    segment.id,
+                    DROP_EXAMPLE_ECHO,
+                    similarity,
+                    ECHO_SIMILARITY_THRESHOLD,
+                    self.pack.name,
+                    nearest[:120],
+                    text[:160],
+                )
                 continue
 
             findings.append(

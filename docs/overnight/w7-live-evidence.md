@@ -286,6 +286,30 @@ tonight is record-and-move-on for anything structural. **This is the single
 highest-value thing to fix before the demo**, because it is visible in the one
 screen the demo spends the most time on.
 
+**Fixed later the same night** (this section is left as written, so the evidence
+stays the evidence). The cause turned out to be *this arm's prompt assembly*, not
+the model: `ClaudeCliProvider` took the message list `build_messages` produces —
+system, then one user/assistant pair per few-shot, then the request — and joined
+every non-system turn with blank lines into `-p`'s single prompt argument. That
+erased the only thing marking the few-shots as few-shots: their inputs carry the
+same `developer:`/`agent:` labels the renderer puts on the real Segment, their
+outputs land as bare JSON, and the pack's suffix then says *"Rewrite the session
+above as notes."* The session above was the examples too. 2 + 4 example notes is
+exactly the six. Arms that pass a real message list (NPU/aic100, anthropic) never
+had this shape, which answers the open question at the end of this section for
+the prompt-assembly half — though not for the model half.
+
+Two changes: `claude_cli_provider._flatten_prompt` now names each block, and
+`distiller._to_findings` drops any finding scoring ≥ 0.60 order-aware token
+similarity against `PromptPack.example_finding_texts` (derived from the pack's
+few-shots, so new examples are covered automatically), logging
+`reason=example_echo`. The nine findings quoted in §3 are now a replayed test
+fixture: `packages/distiller/tests/test_example_echo.py` asserts the six drop and
+the three survive. `system`, `task_suffix` and the few-shots themselves are
+byte-identical — growing them would invalidate `calibration.overhead_tokens =
+809`, which is only re-measurable on the NPU and which the pinned
+`segment_budget = 2787` has exactly zero headroom against.
+
 Unknown, and worth measuring: whether the NPU (`Qwen3-4B`) and Anthropic arms do
 this too, or whether it is specific to `claude-cli`/haiku with `--max-turns 1`.
 The pack's calibration line says it was measured against
