@@ -344,9 +344,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.shared_id:
         shared_id = args.shared_id
-        http("POST", f"{service_url}/v1/sessions",
-             {"purpose": args.purpose, "created_by": args.contributor,
-              "shared_id": shared_id})
+        served = http("POST", f"{service_url}/v1/sessions",
+                      {"purpose": args.purpose, "created_by": args.contributor,
+                       "shared_id": shared_id}) or {}
     elif args.service_url:
         # Adopt the session the host already has. Creating one here would put
         # this developer alone in a Shared Session nobody else is in, which is
@@ -357,16 +357,43 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit(
                 f"{service_url} is up but holds no Shared Session yet. Ask the host "
                 f"for the id and pass --shared-id.")
-        shared_id = listed[0]["shared_id"]
+        served = listed[0]
+        shared_id = served["shared_id"]
         print(f"           adopted the host's session: {shared_id}"
               + (f"  (of {len(listed)}; pass --shared-id to pick another)"
                  if len(listed) > 1 else ""), flush=True)
     else:
-        shared_id = http("POST", f"{service_url}/v1/sessions",
-                         {"purpose": args.purpose,
-                          "created_by": args.contributor})["shared_id"]
+        served = http("POST", f"{service_url}/v1/sessions",
+                      {"purpose": args.purpose,
+                       "created_by": args.contributor}) or {}
+        shared_id = served["shared_id"]
     http("POST", f"{service_url}/v1/sessions/{shared_id}/members",
          {"contributor": args.contributor})
+
+    # Retain the session's identity the way the MCP tools do (server.py's
+    # `_remember`). Found 2026-08-06 by the lifecycle audit: `record_session`
+    # had exactly ONE production call site — the create_session/join_session
+    # MCP tools — so a session stood up by THIS script, which is the path
+    # docs/JOIN.md documents and therefore where most sessions actually come
+    # from, left no local record at all. `.synapse/sessions.json` did not exist
+    # on either checkout on the author's machine. The consequence is quiet:
+    # after a restart, `synapse-orchestrator resync` recreates the session with
+    # `created_by=null` and the creator-only end gate falls through to the
+    # membership arm, so the fix that exists to keep the real creator loses
+    # them on the one path everybody uses.
+    #
+    # Records what the SERVICE returned, never what we sent. `POST /v1/sessions`
+    # is create-or-return, so against a session that already exists the body is
+    # the ORIGINAL creator and purpose — recording our own arguments would
+    # overwrite a teammate's ownership with ours on every `--shared-id` join.
+    # `record_session` is first-write-wins per field and never raises, so a
+    # `None` here (an older service that does not report it, or the adopt path
+    # reading a stats.json without the field) leaves what is already known
+    # alone rather than erasing it.
+    from synapse_orchestrator.session_meta import record_session
+    record_session(STATE, shared_id,
+                   created_by=served.get("created_by"),
+                   purpose=served.get("purpose"))
 
     from synapse_contracts import SessionBinding, write_binding
     scratch = STATE / "scratch-transcript.jsonl"
