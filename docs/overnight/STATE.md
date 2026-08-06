@@ -1,37 +1,40 @@
 # Overnight state — per workstream
 
 Rewritten to current truth at every transition. Times PDT, 2026-08-06.
-Last rewrite: **08:32**.
+Last rewrite: **09:50**. One workstream still running (W3b).
 
-| ws | what | status | where | notes |
-|---|---|---|---|---|
-| W11/W9 | transcript → two checklists | **✅ merged** | `10783f4` | HUMAN-TODO.md deadline-ordered |
-| W3a | flow investigation | **✅ merged** | `2074873` | FLOW.md |
-| W10a | docs audit | **✅ merged** | `2074873` | |
-| W8a | install scope + review | **✅ merged** | `2074873` | |
-| slides | outline + skeleton | **✅ merged** | `c2ca4b9`+`c1d768f` | decisions/010 |
-| W6 | stress/regression | **✅ merged** | `d03547e` | 1032 tests at merge; 4K pin (decisions/006); post-merge fix agent running for confirmed review findings (incl. the `output_config.effort`-on-Haiku bug) |
-| W2 | multi-session | **✅ merged** | `a7845c1` | 1080 tests; per-session bindings + agent_session_id on all tools + suppression/watermark split (decisions/001). Pass-2 died mid-flight; the review caught it, the fix agent implemented it — the pipeline shape worked. |
-| W8b | install scripts | **✅ merged** | `9ed1361` | install.sh + install.ps1 + install.bat + doctor; reviews found 4 HIGHs (missing ps1, PATH bug, doctor rc discarded, secrets drift) — all fixed pre-merge; doctor rc 0; ALL BEATS PASS on shifted ports |
-| W10b | docs site | **✅ merged** | `9ed1361` | six areas + mkdocs --strict clean; consistency-reviewed |
-| W7 | lifecycle E2E | dev ✅ merged · **live arc running** (wf_a7b121a5) | → overnight/w7-live | real ports 8899/8787, claude-cli Haiku arm (API key empty — see below) |
-| W1 | GenieX idle death | **🔄 fix+audit re-running** (resumed) | overnight/w1-geniex | dev done, 927 on branch; review found HIGH `kill_port_owner` client-kill bug; merge pending |
-| W5 | arrival summary at join | **🔄 running** (wf_f946e3d5) | → overnight/w5-arrival | join_session returns purpose + summary + new-since |
-| W4a | dashboard Page 1 | **🔄 running** (wf_5be786e9) | → overnight/w4a-dashboard | extends /debug (decisions/003) |
-| W3b | worker rate limiter | queued — after W1 merges | — | |
-| W4b | dashboard Pages 2+3 | expendable | — | unlikely to be reached |
+| ws | what | status | merged at | suite | notes |
+|---|---|---|---|---|---|
+| W11/W9 | transcript → two checklists | ✅ | `10783f4` | 888 | HUMAN-TODO.md deadline-ordered |
+| W3a | flow investigation (FLOW.md) | ✅ | `2074873` | — | file:line cited |
+| W10a | docs audit | ✅ | `2074873` | — | |
+| W8a | install scope + adversarial review | ✅ | `2074873` | — | |
+| slides | outline + two-tab skeleton | ✅ | `c1d768f` | 888 | decisions/010; outline = source of truth |
+| W6 | regression cover + 4K pin + stress | ✅ | `d03547e` + postfix `d6c48cd` | 1125 | decisions/006; effort-key gate; crc32 seeds |
+| W2 | multi-session | ✅ | `a7845c1` | 1080 | decisions/001; two windows = two participants, proven live in W7 |
+| W8b | install.sh/.ps1/.bat + doctor | ✅ | `9ed1361` | 1109 | 4 HIGHs fixed pre-merge; ALL BEATS PASS shifted |
+| W10b | MkDocs site, six areas | ✅ | `9ed1361` | 1109 | --strict clean; consistency-reviewed |
+| W1 | GenieX idle death | ✅ | `b460684` | 1191 | decisions/005+008; typed 503; supervisor live-verified kill→respawn |
+| W7 | live lifecycle arc | ✅ | `c8baded` | 1191 | **ran clean twice on real ports**; evidence verified; caught F1 |
+| F1 | few-shot echo contamination | ✅ | `3c132bf` | 1214 | root cause: claude-cli prompt flatten; parse-time guard + marked blocks |
+| W5 | arrival summary at join | ✅ | `64a422f` | 1265 | decisions/004; beat fires on BOTH join paths |
+| W4a | dashboard Page 1 (brain page) | ✅ | `a789db5` | 1299 | decisions/003; `/debug` = brain, old page at `/debug/log`; nothing fabricated |
+| W3b | worker rate limiter + /query metering | **🔄 running** (wf_4f1ccc2d) | — | — | decisions/002 pending |
+| W4b | dashboard Pages 2+3 | not reached | — | — | explicitly expendable; parked by runway, not by failure |
 
-**Main:** `9ed1361` (via `4c495be` journal) — **1109 tests green.** Suite growth
-tonight: 888 → 1109. Every merge gated on a full green run.
+**Main:** `2e57f6f` · suite **1299 green** at the last workstream merge.
+Growth tonight: **888 → 1299** (+411), every merge gated on a full green run.
 
-**Finding for Sid:** `secrets.jsonc`'s `anthropic.api_key` is an **empty string**
-(the inference_cloud block is fine). The live Haiku stress and any
-`--distiller anthropic` path need a real key; tonight's live work uses the
-claude-cli arm instead. Neither the doctor nor serve_local named this clearly
-before — the doctor now warns on empty blocks.
+**Live evidence:** `docs/overnight/w7-live-evidence.md` — the full lifecycle arc
+twice against the real stack on 8899/8787 (claude-cli Haiku arm), reviewer
+verdict "the evidence holds". Ports verified free afterwards.
 
-**Morning cleanup for Sid** (5 min): stale worktrees under `.claude/worktrees/`
+**Needs Sid (full list in TLDR/HUMAN-TODO):** anthropic key in secrets.jsonc is
+an empty string; Microsoft Form + 3× survey today; slide production from the
+outline; AI-100 keys (~10 for 60s latency).
+
+**Morning cleanup** (5 min): stale worktrees under `.claude/worktrees/`
 (`w1-geniex`, `w2-multisession`, `w6-stress`, `w8-install`, `w10-docs`,
-`w11-transcript`, `agent-*`, `wf_*`) + their stale local branches — origin refs
-are the truth. Stash `4630ba2` on `overnight/journal` looks redundant — verify,
-then drop.
+`w11-transcript`, `agent-*`, `wf_*`) + stale local branches — origin refs are
+the truth. Stash `4630ba2` on `overnight/journal` (redundant-looking; verify,
+drop).
