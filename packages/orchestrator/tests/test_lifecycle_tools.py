@@ -434,6 +434,142 @@ async def test_leave_session_detaches_every_product_bound_to_that_session(tmp_pa
     assert _NOT_JOINED in str(await wiring.server.call_tool("query", {"question": "x?"}))
 
 
+def _two_windows(wiring, *, shared_a="sh-1", shared_b="sh-1", contributor="sid"):
+    """Two Claude Code conversations bound on one machine, W2 layout: a
+    per-session file each, plus the legacy mirror naming whichever joined last
+    (window B). Returns their two paths."""
+    window_a = wiring.state_dir / "bindings" / "claude-code" / "conv-1.json"
+    window_b = wiring.state_dir / "bindings" / "claude-code" / "conv-2.json"
+    write_binding(window_a,
+                  SessionBinding(agent_session_id="conv-1", shared_id=shared_a,
+                                 contributor=contributor, agent="claude-code",
+                                 transcript_path="/tmp/cc-1.jsonl", pinned_at=TS))
+    later = datetime(2026, 8, 7, tzinfo=timezone.utc)
+    for path in (window_b, wiring.binding_file):
+        write_binding(path,
+                      SessionBinding(agent_session_id="conv-2", shared_id=shared_b,
+                                     contributor=contributor, agent="claude-code",
+                                     transcript_path="/tmp/cc-2.jsonl", pinned_at=later))
+    return window_a, window_b
+
+
+async def test_leave_session_without_an_id_clears_every_binding_and_says_so(tmp_path):
+    """W2 pass 1 put the source of truth in `bindings/<agent>/<session>.json`
+    and kept `bindings/<agent>.json` as a mirror for un-upgraded readers. A
+    leave that swept only the mirror would leave every window's real binding
+    behind still naming the session — the worker would resolve one and keep
+    distilling into a Shared Session the conversation was just told it had
+    left, which is the exact falsehood the multi-product sweep above exists to
+    end, one layer down.
+
+    With no `agent_session_id` there is nothing to tell the conversations
+    apart, so the sweep is still machine-wide — and the RESULT now says that
+    out loud, which is the 2026-08-06 review's finding: a caller told "left"
+    reasonably reads "this conversation", while every sibling window has just
+    been detached too."""
+    urls: list[str] = []
+    wiring = _wire(tmp_path, _service(urls=urls))
+    window_a, window_b = _two_windows(wiring)
+
+    text = str(await wiring.server.call_tool("leave_session", {}))
+
+    assert not wiring.binding_file.exists()
+    assert not window_a.exists()
+    assert not window_b.exists()
+    assert "ALL 3 conversations" in text and "agent_session_id" in text
+    assert _NOT_JOINED in str(await wiring.server.call_tool("query", {"question": "x?"}))
+
+
+async def test_leave_session_with_an_id_detaches_only_that_conversation(tmp_path):
+    """The 2026-08-06 review finding, fixed. Two windows, one machine, one
+    Shared Session: window A leaving must not unbind window B, which is still
+    open, still joined, and — before this — was told nothing at all while its
+    binding was deleted underneath it.
+
+    The member DELETE is skipped too: both windows carry the same Contributor,
+    and one window leaving is not that person leaving. Removing them would have
+    dropped a member the other window is still speaking as, which is what
+    `end_session`'s layer-3 gate reads to decide whether anybody else is
+    there."""
+    urls: list[str] = []
+    wiring = _wire(tmp_path, _service(urls=urls))
+    window_a, window_b = _two_windows(wiring)
+
+    text = str(await wiring.server.call_tool(
+        "leave_session", {"agent_session_id": "conv-1"}))
+
+    assert not window_a.exists()
+    assert window_b.exists()                      # the sibling is untouched
+    assert wiring.binding_file.exists()           # and so is the mirror it owns
+    assert "/tmp/cc-1.jsonl" in text and "/tmp/cc-2.jsonl" not in text
+    assert "still bound" in text                  # honest about the sibling
+    assert not any("DELETE" in url for url in urls)
+    # And the conversation that stayed is still joined, from the tools' side.
+    assert _NOT_JOINED not in str(await wiring.server.call_tool(
+        "query", {"question": "x?", "agent_session_id": "conv-2"}))
+
+
+async def test_a_leave_that_takes_the_mirror_with_it_leaves_the_sibling_resolvable(
+    tmp_path,
+):
+    """2026-08-06 review, reproduced: the orchestrator went BLIND after a
+    leave. `cli._resolve_binding` globbed `bindings/*.json` only, so when the
+    departing conversation happened to own the legacy mirror — it does
+    whenever it joined last — deleting it left a machine whose only remaining
+    binding was one level down, and every tool answered "not joined" to a
+    window that was still joined and whose worker was still feeding the
+    session.
+
+    Window B here has NO mirror of its own: only `bindings/claude-code/
+    conv-2.json`, which is the state the fix has to read."""
+    urls: list[str] = []
+    wiring = _wire(tmp_path, _service(urls=urls))
+    window_b = wiring.state_dir / "bindings" / "claude-code" / "conv-2.json"
+    write_binding(window_b,
+                  SessionBinding(agent_session_id="conv-2", shared_id="sh-1",
+                                 contributor="sid", agent="claude-code",
+                                 transcript_path="/tmp/cc-2.jsonl", pinned_at=TS))
+    # Window A joined later, so it owns the mirror.
+    later = datetime(2026, 8, 7, tzinfo=timezone.utc)
+    for path in (wiring.state_dir / "bindings" / "claude-code" / "conv-1.json",
+                 wiring.binding_file):
+        write_binding(path,
+                      SessionBinding(agent_session_id="conv-1", shared_id="sh-1",
+                                     contributor="sid", agent="claude-code",
+                                     transcript_path="/tmp/cc-1.jsonl", pinned_at=later))
+
+    await wiring.server.call_tool("leave_session", {"agent_session_id": "conv-1"})
+
+    assert not wiring.binding_file.exists()        # the mirror went with A
+    assert window_b.exists()
+    # ...and B is still joined, both when it names itself and when it does not.
+    assert _NOT_JOINED not in str(await wiring.server.call_tool(
+        "query", {"question": "x?", "agent_session_id": "conv-2"}))
+    assert _NOT_JOINED not in str(await wiring.server.call_tool(
+        "query", {"question": "x?"}))
+    assert "POST http://svc/v1/sessions/sh-1/query" in urls
+
+
+async def test_leave_session_still_removes_the_member_when_nobody_else_holds_it(
+    tmp_path,
+):
+    """The other half of the skip: a contributor no surviving binding carries
+    IS removed at the service. Without this, "detach only me" would quietly
+    stop meaning "leave" for the last window on the machine."""
+    urls: list[str] = []
+    wiring = _wire(tmp_path, _service(urls=urls))
+    window_a = wiring.state_dir / "bindings" / "claude-code" / "conv-1.json"
+    write_binding(window_a,
+                  SessionBinding(agent_session_id="conv-1", shared_id="sh-1",
+                                 contributor="sid", agent="claude-code",
+                                 transcript_path="/tmp/cc-1.jsonl", pinned_at=TS))
+
+    await wiring.server.call_tool("leave_session", {"agent_session_id": "conv-1"})
+
+    assert "DELETE http://svc/v1/sessions/sh-1/members/sid" in urls
+    assert not window_a.exists()
+
+
 async def test_an_ended_session_clears_every_product_bound_to_it(tmp_path):
     """The same one-file bug on the 409 path. `_SESSION_ENDED` states "The
     local binding has been cleared, so the next call will say you are not
@@ -657,6 +793,106 @@ async def test_a_404_from_the_service_reads_as_a_missing_session_not_an_outage(t
     assert "Left Shared Session sh-gone" in left
     assert "may still list you as a member" not in left   # there is no list
     assert not wiring.binding_file.exists()
+
+
+# ── two windows, one machine, one orchestrator (W2 pass 2) ──────────────────
+#
+# MCP has no per-call identity: one orchestrator serves every Claude Code
+# window on the machine over one HTTP transport, and nothing in the protocol
+# says which window a `query` came from. `agent_session_id` on the tool is what
+# says so, and `server._effective_binding` is what turns it into a binding.
+# Reproduced before this existed: window A bound to sh-1 and window B to sh-2,
+# `query(agent_session_id=A)` POSTed to sh-2 — the machine's most recently
+# joined binding — and stamped B's identity on the request.
+
+
+async def test_query_routes_to_the_asking_conversations_own_session(tmp_path):
+    urls: list[str] = []
+    bodies: dict = {}
+    wiring = _wire(tmp_path, _service(urls=urls, bodies=bodies))
+    _two_windows(wiring, shared_a="sh-a", shared_b="sh-b")
+
+    await wiring.server.call_tool("query", {"question": "timing?",
+                                            "agent_session_id": "conv-1"})
+
+    assert urls == ["POST http://svc/v1/sessions/sh-a/query"]
+    assert bodies["/v1/sessions/sh-a/query"] == {
+        "query": "timing?", "agent_session": "conv-1", "contributor": "sid"}
+
+
+async def test_query_without_an_id_still_uses_the_most_recent_binding(tmp_path):
+    """The fallback pin. Every pre-W2 caller — and every window on a machine
+    where only one is open — passes nothing, and must keep getting exactly the
+    answer it always got."""
+    urls: list[str] = []
+    bodies: dict = {}
+    wiring = _wire(tmp_path, _service(urls=urls, bodies=bodies))
+    _two_windows(wiring, shared_a="sh-a", shared_b="sh-b")
+
+    await wiring.server.call_tool("query", {"question": "timing?"})
+
+    assert urls == ["POST http://svc/v1/sessions/sh-b/query"]
+    assert bodies["/v1/sessions/sh-b/query"]["agent_session"] == "conv-2"
+
+
+async def test_an_unknown_session_id_borrows_the_machine_binding_with_its_own_identity(
+    tmp_path,
+):
+    """The `scripts/serve_local.py` path, which is the documented demo path.
+    That script writes ONE machine-scope binding before any conversation
+    exists, so no per-session file can exist for the window that then connects
+    — and the honest answer is the machine's Shared Session with the CALLER's
+    real id as the acting identity, not `_NOT_JOINED` and not the
+    `as-<contributor>` placeholder, which suppresses nothing and attributes
+    every window's work to the same phantom conversation."""
+    urls: list[str] = []
+    bodies: dict = {}
+    wiring = _wire(tmp_path, _service(urls=urls, bodies=bodies))
+    write_binding(wiring.binding_file,
+                  SessionBinding(agent_session_id="as-sid", shared_id="local-dev",
+                                 contributor="sid", agent="claude-code",
+                                 transcript_path="/tmp/scratch.jsonl", pinned_at=TS,
+                                 scope="machine"))
+
+    text = str(await wiring.server.call_tool(
+        "query", {"question": "timing?", "agent_session_id": "real-window-id"}))
+
+    assert _NOT_JOINED not in text
+    assert urls == ["POST http://svc/v1/sessions/local-dev/query"]
+    assert bodies["/v1/sessions/local-dev/query"] == {
+        "query": "timing?", "agent_session": "real-window-id", "contributor": "sid"}
+
+
+async def test_contribute_stamps_the_calling_conversation_on_the_attribution(tmp_path):
+    """Attribution is what makes two windows teammates rather than one
+    participant: window B reads A's finding as something learned elsewhere
+    only if the Attribution names A's conversation. The Distiller stamps it
+    from the binding it is handed, so the binding has to be the caller's — and
+    the finding has to reach A's Shared Session, not the machine's newest."""
+    from synapse_distiller import Distiller
+
+    pushed: list = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json as _json
+        if request.url.path.endswith("/findings"):
+            pushed.append((str(request.url), _json.loads(request.content)))
+        return httpx.Response(200, json={"accepted": 1, "members": ["sid"]})
+
+    fake = FakeProvider(scripts=[{"findings": [
+        {"type": "learning", "text": "window A learned about the retry backoff"}]}])
+    wiring = _wire(tmp_path, handler,
+                   distiller_factory=lambda binding: Distiller(fake, binding))
+    _two_windows(wiring, shared_a="sh-a", shared_b="sh-b")
+
+    await wiring.server.call_tool("contribute", {"text": "the retry backoff…",
+                                                 "agent_session_id": "conv-1"})
+
+    [(url, batch)] = pushed
+    [finding] = batch["findings"]
+    assert url == "http://svc/v1/sessions/sh-a/findings"
+    assert finding["attributions"][0]["agent_session"] == "conv-1"
+    assert finding["attributions"][0]["contributor"] == "sid"
 
 
 async def test_the_lifecycle_tools_exist_before_anything_is_joined(tmp_path):

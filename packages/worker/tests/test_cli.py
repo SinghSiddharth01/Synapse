@@ -195,7 +195,7 @@ async def test_run_reports_heuristic_selection(tmp_path, monkeypatch, capsys) ->
         # _build tries every registered agent (claude-code, then codex) in
         # search of a pinned binding before settling for a heuristic -- the
         # substitute must accept `agent` regardless of which is being probed.
-        lambda cwd, state_dir, *, agent=None: ResolvedTranscript(
+        lambda cwd, state_dir, *, agent=None, agent_session_id=None: ResolvedTranscript(
             path=transcript, agent_session_id="as-1", source="heuristic"
         ),
     )
@@ -218,7 +218,7 @@ async def test_run_reports_pinned_selection_and_uses_its_binding(tmp_path, monke
     )
     monkeypatch.setattr(
         cli, "resolve_transcript",
-        lambda cwd, state_dir, *, agent=None: ResolvedTranscript(
+        lambda cwd, state_dir, *, agent=None, agent_session_id=None: ResolvedTranscript(
             path=transcript, agent_session_id="as-joined", source="pinned", local_binding=joined
         ),
     )
@@ -485,7 +485,7 @@ async def test_run_swallows_keyboard_interrupt_and_still_shuts_down(
 
 
 async def test_run_with_no_transcript_anywhere_exits_cleanly(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(cli, "resolve_transcript", lambda cwd, state_dir, *, agent=None: None)
+    monkeypatch.setattr(cli, "resolve_transcript", lambda cwd, state_dir, *, agent=None, agent_session_id=None: None)
 
     with pytest.raises(SystemExit) as excinfo:
         await cli.cmd_run(_ns(transcript=None, interval=0.01, ticks=1, from_start=False))
@@ -645,7 +645,7 @@ async def test_status_reports_a_joined_session(tmp_path, monkeypatch, capsys) ->
         # cmd_status now tries every registered agent -- only claude-code
         # resolves to the pinned binding here, so codex must fall through to
         # None the same way it would for a real, un-joined product.
-        lambda cwd, state_dir, *, agent=None: (
+        lambda cwd, state_dir, *, agent=None, agent_session_id=None: (
             ResolvedTranscript(
                 path=transcript, agent_session_id="as-joined", source="pinned",
                 local_binding=joined,
@@ -678,7 +678,7 @@ async def test_status_reports_a_codex_only_joined_session(tmp_path, monkeypatch,
     )
     monkeypatch.setattr(
         cli, "resolve_transcript",
-        lambda cwd, state_dir, *, agent=None: (
+        lambda cwd, state_dir, *, agent=None, agent_session_id=None: (
             ResolvedTranscript(
                 path=transcript, agent_session_id="codex-joined", source="pinned",
                 local_binding=joined,

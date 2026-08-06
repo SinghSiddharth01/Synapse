@@ -58,6 +58,85 @@ RETRY_NUDGE = {
 
 _VALID_TYPES = {t.value for t in FindingType}
 
+# --- why a segment was dropped ---------------------------------------------------
+#
+# `dropped_malformed` counts three genuinely different failures identically, and
+# each has a different fix:
+#
+#   OVER_BUDGET   the response was cut off at the provider's max_tokens. The
+#                 model was fine; the budget was wrong. Fix: raise the reserve
+#                 or shrink the segment. This is the failure 7418a63's clamp and
+#                 c077a51's salvage both exist for.
+#   DEGENERATE    the model looped — the same phrase repeated until the cap or
+#                 until it stopped. A small model near its context ceiling does
+#                 this, and raising max_tokens makes it WORSE (more loop). Fix:
+#                 the prompt, the model, or less context.
+#   MALFORMED     the text was neither; it just did not parse. Prose around the
+#                 JSON, a stray fence, a refusal.
+#
+# Raising the cap in response to a DEGENERATE drop is the specific wrong move
+# this distinction is here to prevent, which is why the two are never collapsed.
+DROP_OVER_BUDGET = "over-budget"
+DROP_DEGENERATE = "degenerate-repetition"
+DROP_MALFORMED = "malformed"
+
+# Shingle width for the repetition measure. 6 words is long enough that ordinary
+# English (and ordinary JSON key sequences) do not repeat a shingle by accident,
+# and short enough that a loop is caught within a couple of cycles.
+_SHINGLE_WORDS = 6
+# Below this fraction of DISTINCT shingles, the text is a loop rather than
+# prose. Measured against the two shapes in the wild: a truncated findings
+# object runs ~0.97-1.0 distinct, and `"not json " * 200` runs ~0.01.
+_DEGENERATE_DISTINCT_RATIO = 0.5
+# Under this many shingles the ratio is noise, so short text is never called
+# degenerate — a 20-word reply that happens to repeat is not a loop.
+_MIN_SHINGLES_TO_JUDGE = 12
+
+
+def distinct_shingle_ratio(text: str, width: int = _SHINGLE_WORDS) -> float:
+    """Fraction of the text's word-shingles that are distinct.
+
+    1.0 means nothing repeated; near 0 means the model emitted the same window
+    over and over. Deliberately cheap — this runs on a failure path where the
+    expensive work (the model call) has already been spent, but it must not
+    itself become a cost on a long response, so it is one pass and a set.
+
+    Returns 1.0 for text too short to judge, so `is_degenerate` never fires on
+    a fragment (see `_MIN_SHINGLES_TO_JUDGE`).
+    """
+    words = text.split()
+    if len(words) < width + _MIN_SHINGLES_TO_JUDGE:
+        return 1.0
+    shingles = [
+        " ".join(words[i : i + width]) for i in range(len(words) - width + 1)
+    ]
+    return len(set(shingles)) / len(shingles)
+
+
+def is_degenerate(text: str) -> bool:
+    """Whether the response is a repetition loop rather than damaged JSON."""
+    return distinct_shingle_ratio(text) < _DEGENERATE_DISTINCT_RATIO
+
+
+def classify_drop(text: str, output_tokens: int, max_tokens: int | None) -> str:
+    """Which of the three failures produced this unparseable response.
+
+    Over-budget is checked FIRST and on the token count, not on the text: a
+    response cut at the cap is over-budget whatever its shape, and a loop that
+    ran until the cap is still, operationally, a response that needed a bigger
+    budget to have any chance — reporting it as a loop would send the reader
+    after the prompt when the cap is what truncated the evidence.
+
+    `max_tokens` is None for a provider that does not expose one (FakeProvider,
+    ClaudeCliProvider), in which case over-budget is simply not knowable from
+    here and the text-shaped distinction still applies.
+    """
+    if max_tokens is not None and output_tokens >= max_tokens > 0:
+        return DROP_OVER_BUDGET
+    if is_degenerate(text):
+        return DROP_DEGENERATE
+    return DROP_MALFORMED
+
 
 @dataclass
 class DistillStats:
@@ -81,6 +160,13 @@ class DistillStats:
     render_style: str = ""
     # True when the kind filter left nothing to distil and no call was made.
     skipped_empty: bool = False
+    # Why each unparseable attempt was unparseable, one entry per increment of
+    # `dropped_malformed`. See `classify_drop` — a counter alone cannot tell a
+    # segment that overran its output budget (raise the reserve, or shrink the
+    # segment) from one the model looped on (a prompt or model problem) from one
+    # it simply wrapped in prose (a parser problem). All three used to land here
+    # as the same number and the same sentence.
+    drop_reasons: list[str] = field(default_factory=list)
 
 
 class Distiller:
@@ -157,17 +243,27 @@ class Distiller:
                 break
 
             stats.dropped_malformed += 1
-            # The raw text is the whole diagnosis — truncated mid-object, prose
-            # wrapped around the JSON, or the repetition a small model falls
-            # into near its context ceiling all look identical without it, and
-            # it was already being captured into stats and then never shown.
+            raw = stats.raw_outputs[-1] if stats.raw_outputs else ""
+            # WHICH of the three failures this was. The counter cannot say, and
+            # the three have opposite fixes — raising max_tokens is the right
+            # move for over-budget and the wrong one for a repetition loop,
+            # which only gets longer with more room. See `classify_drop`.
+            reason = classify_drop(
+                raw, result.usage.output_tokens, getattr(self.provider, "max_tokens", None)
+            )
+            stats.drop_reasons.append(reason)
+            # The raw text is the rest of the diagnosis — truncated mid-object,
+            # prose wrapped around the JSON, or the repetition a small model
+            # falls into near its context ceiling all look identical without it,
+            # and it was already being captured into stats and then never shown.
             logger.warning(
                 "Distiller: unparseable output for segment %s on attempt %d/%d; "
-                "raw[:200]=%r",
+                "reason=%s raw[:200]=%r",
                 segment.id,
                 attempt,
                 MAX_ATTEMPTS,
-                (stats.raw_outputs[-1] if stats.raw_outputs else "")[:200],
+                reason,
+                raw[:200],
             )
 
         if parsed is None:

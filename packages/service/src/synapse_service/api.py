@@ -103,47 +103,46 @@ def _missing(body: dict, *required: str) -> JSONResponse | None:
 
 
 def _asking_contributor(source: Mapping[str, str]) -> str:
-    """Who is asking. `contributor` if it is there, `agent_session` if it is
-    not -- one reader for the query body and the watermark query string.
+    """WHO is asking, as a person. `contributor` if it is there,
+    `agent_session` if it is not -- one reader for the query body and the
+    watermark query string.
 
-    ADDITIVE ON PURPOSE (2026-08-06). Suppression and the watermark are now
-    keyed on the Contributor (retrieval.py, store.last_seen), but the field
-    name on the wire cannot simply change: `orchestrator/server.py:141` and
-    `briefing.py:80` are separate processes on other people's laptops, and a
-    hard rename would make every un-upgraded client anonymous -- which does
-    not error, it silently switches their suppression off and resets their
-    watermark. Reading both means an old client keeps exactly the behaviour it
-    has today while a new one gets the re-key, and the two can be deployed in
-    either order.
+    This is the WATERMARK's key (`store.last_seen`/`mark_seen`), and only
+    that, since the 2026-08-06 split (decisions/001): "how much have I not
+    seen" is a fact about a person, and ending one conversation to start
+    another must not reset it. Suppression reads `_asking_agent_session`
+    below instead.
 
-    The `or` chain treats an empty string as absent, which is what makes a
-    client that sends `contributor: ""` for an agent it could not identify
-    fall back to its Agent Session id rather than being lumped in with every
-    other anonymous asker.
+    The `agent_session` fallback is what keeps the wire additive for a client
+    that sends no `contributor` at all: `briefing.py` and an un-upgraded
+    `orchestrator/server.py` run as separate processes on other people's
+    laptops, and reading nothing would make them anonymous -- which does not
+    error, it silently resets their watermark. The `or` chain treats an empty
+    string as absent, so a client that sends `contributor: ""` for an agent it
+    could not identify falls back to its Agent Session id rather than being
+    lumped in with every other anonymous asker.
     """
     return source.get("contributor") or source.get("agent_session") or ""
 
 
-def _legacy_agent_session(source: Mapping[str, str]) -> str | None:
-    """The asker's Agent Session id, but ONLY when this is an un-upgraded
-    client: one that sent `agent_session` and no `contributor` at all.
+def _asking_agent_session(source: Mapping[str, str]) -> str | None:
+    """WHICH CONVERSATION is asking, or None if the request did not say.
 
-    `_asking_contributor` above makes the wire additive; this makes the
-    BEHAVIOUR additive, and without it the second half was silently missing.
-    An old client's `agent_session` value became its identity string and was
-    then compared against `Attribution.contributor`, a field it never matches,
-    so invariant 3 stopped firing for it entirely: its own findings came back
-    as team knowledge, credited to itself. Verified by execution 2026-08-06 --
-    an old-shaped request to a session holding one of its own findings and one
-    teammate's got BOTH back, where the pre-re-key service returned only the
-    teammate's.
+    SUPPRESSION's key since the 2026-08-06 split (decisions/001,
+    retrieval.visible_to): "is this finding already in the context window
+    asking?" is a fact about one conversation, and one machine can now hold
+    several. A request that names none falls back to the Contributor
+    comparison inside `visible_to` -- which is the pre-W2 behaviour for a
+    contributor-only client, and no suppression at all for a wholly anonymous
+    one, since an anonymous asker owns nothing.
 
-    None the moment a `contributor` is present, so an upgraded client is
-    unaffected and the re-key is what runs for it. Transitional by
-    construction: it disappears when the last un-upgraded orchestrator does.
+    Read unconditionally, unlike the `_legacy_agent_session` hatch this
+    REPLACES: that one returned None the moment a `contributor` was present,
+    because the contributor was the key. Now `agent_session` is the key, so an
+    upgraded client sending both gets the conversation comparison, which IS
+    the W2 behaviour -- two windows of one human see each other's findings and
+    still never their own.
     """
-    if source.get("contributor"):
-        return None
     return source.get("agent_session") or None
 
 
@@ -604,7 +603,7 @@ def build_app(provider: ModelProvider, *, debug: bool = True,
         if (gate := _unavailable(sid)) is not None:
             return gate
         contributor = _asking_contributor(request.query_params)
-        legacy = _legacy_agent_session(request.query_params)
+        asking_session = _asking_agent_session(request.query_params)
         ctx = store.get_context(sid)
 
         # Round-2 adjudication on watermark suppression, split deliberately
@@ -628,8 +627,15 @@ def build_app(provider: ModelProvider, *, debug: bool = True,
         # content-scoped). E4's briefing composer renders both, and is
         # expected to phrase them as separate signals, not force them to
         # agree.
-        visible = visible_to(store.retrievable(sid), contributor,
-                             asking_agent_session=legacy)
+        #
+        # ⟨SPLIT 2026-08-06, decisions/001⟩ The CONTENT fields suppress by the
+        # asking CONVERSATION and the CHANGE fields still count by the asking
+        # PERSON: `new_since` below reads `store.last_seen(sid, contributor)`,
+        # deliberately unchanged, so ending one conversation and starting
+        # another does not replay the whole memory at you.
+        visible = visible_to(store.retrievable(sid),
+                             asking_agent_session=asking_session,
+                             asking_contributor=contributor)
         by_type = Counter(f.type.value for f in visible)
 
         # A Conflict counts if at least one side is visible to this asker:
@@ -671,7 +677,7 @@ def build_app(provider: ModelProvider, *, debug: bool = True,
         if (err := _missing(body, "query")) is not None:
             return err
         contributor = _asking_contributor(body)
-        legacy = _legacy_agent_session(body)
+        asking_session = _asking_agent_session(body)
 
         # Invariant 3 at the lanes seam. `visible_to` stays the ONE definition
         # of the rule (retrieval.py); here it computes what must be EXCLUDED
@@ -683,7 +689,8 @@ def build_app(provider: ModelProvider, *, debug: bool = True,
         # with no model and no prompt cost. What must be bounded is the
         # PROMPT, not the loop.
         visible = store.retrievable(sid)
-        allowed = visible_to(visible, contributor, asking_agent_session=legacy)
+        allowed = visible_to(visible, asking_agent_session=asking_session,
+                             asking_contributor=contributor)
 
         suppressed = frozenset(f.id for f in visible) - {f.id for f in allowed}
         if len(allowed) <= TOP_K:
@@ -729,8 +736,8 @@ def build_app(provider: ModelProvider, *, debug: bool = True,
                 context=store.get_context(sid),
                 candidates=candidates,
                 query=body["query"],
+                asking_agent_session=asking_session,
                 asking_contributor=contributor,
-                asking_agent_session=legacy,
             )
         except RetrievalUnavailable as exc:
             # 503, not 502: this service is healthy and its DEPENDENCY is not.
@@ -758,6 +765,9 @@ def build_app(provider: ModelProvider, *, debug: bool = True,
                 {"error": "retrieval_unavailable", "provider": exc.provider_id,
                  "detail": str(exc)},
                 status_code=503)
+        # By CONTRIBUTOR, unchanged by the split: the watermark is a fact
+        # about a person, so a query from either of one human's windows moves
+        # the place they resume from.
         store.mark_seen(sid, contributor)
         if feed is not None:
             # Counts alone could not answer "what did the asker actually get

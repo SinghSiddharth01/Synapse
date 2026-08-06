@@ -109,11 +109,12 @@ class OpenAICompatibleProvider(ModelProvider):
         # model simply malformed, so without this the log says "unparseable"
         # for what is really a budget problem and nobody knows to raise the cap.
         # aic100.py makes the same distinction for the same reason.
-        if choice.get("finish_reason") == "length":
+        if (signal := self._truncation_signal(choice, payload)) is not None:
             logger.warning(
-                "Response hit max_tokens=%d (finish_reason=length); the JSON is "
-                "TRUNCATED, not malformed — raise max_tokens or shrink the segment",
+                "Response hit max_tokens=%d (%s); the JSON is TRUNCATED, not "
+                "malformed — raise max_tokens or shrink the segment",
                 self.max_tokens,
+                signal,
             )
 
         data: Any = text
@@ -133,6 +134,46 @@ class OpenAICompatibleProvider(ModelProvider):
             provider_id=self.provider_id,
             schema_valid=schema_valid,
         )
+
+    def _truncation_signal(
+        self, choice: dict[str, Any], payload: dict[str, Any]
+    ) -> str | None:
+        """Which signal says this response was cut off at the cap, or None.
+
+        `finish_reason == "length"` is the documented signal and is checked
+        first, but it CANNOT BE RELIED ON ALONE. Probed live 2026-08-06 against
+        aisuite-indonesia (see `aic100._was_truncated`, which this mirrors): a
+        call with max_tokens=3000 returned completion_tokens=3000 and
+        `finish_reason: "stop"` — cut off at exactly the cap, and the endpoint
+        said it stopped naturally.
+
+        That single wrong field is why synthesis failed silently for hours.
+        Worse, the unit test covering the warning there fabricated a
+        `finish_reason="length"` fixture the host never sends, so it passed
+        throughout while detecting nothing. This provider carried the same
+        `finish_reason`-only check with no test at all.
+
+        `completion_tokens >= max_tokens` is endpoint-independent: the model
+        cannot emit more than the cap, so reaching it exactly means either a
+        cut-off response or one that ended precisely on the boundary. Those are
+        indistinguishable from here, and treating the second as complete is the
+        unsafe direction — a segment is lost either way.
+
+        Returns the name of the signal rather than a bool so the log can say
+        WHICH one fired: on a host that reports `finish_reason` honestly the
+        two agree, and on one that does not, the difference is the evidence.
+        """
+        if choice.get("finish_reason") == "length":
+            return "finish_reason=length"
+        emitted = (payload.get("usage") or {}).get("completion_tokens")
+        if isinstance(emitted, int) and emitted >= self.max_tokens:
+            # Deliberately reported even though finish_reason said otherwise —
+            # naming both halves is what makes a lying endpoint visible.
+            return (
+                f"completion_tokens={emitted} reached the cap while "
+                f"finish_reason={choice.get('finish_reason')!r}"
+            )
+        return None
 
 
 def _salvage_partial(response: httpx.Response) -> dict[str, Any] | None:
