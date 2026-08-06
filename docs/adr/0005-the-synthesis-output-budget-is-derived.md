@@ -75,6 +75,25 @@ Tokens bind ~10× over. **~10 keys** are required to hold 60s under continuous p
 
 **Round-robin is currently dead code, at both layers.** `AIC100Provider._post_rotating` rotates on 429, but the service's pool holds one entry (`"local-stand-in"`) because it talks to the local proxy; and `scripts/local_model_server.py`, which holds the *real* key, has no rotation at all. Adding keys to `secrets.jsonc` today changes nothing. Multi-key requires either pointing the service straight at Cirrascale (losing the model seam) or teaching the proxy to rotate a pool. **Open.**
 
+> ⟨CORRECTED 2026-08-06, W3b — decisions/002⟩ "Dead code" is the wrong words for
+> it, and the wrong words led to the wrong instruction (delete it). Grepped:
+> `_post_rotating` is the **only** POST helper `AIC100Provider.complete` calls,
+> on both the `/chat/completions` and the `/completions` branch, and
+> `test_key_pool_rotates_on_429` covers it; `SYNTHESIS_KEYS` is read by
+> `_affordable` on every push, and `test_more_keys_buy_more_rounds` covers that.
+> Both layers are live reads with live tests. What is dead is the **pool**, which
+> holds one entry — a configuration fact, not code.
+>
+> The paragraph above is still right about the consequence and understates the
+> danger of it. `SYNAPSE_SYNTHESIS_KEYS=10` multiplies the governor's ceiling by
+> ten whether or not ten keys exist, and the excess spend does not defer — it
+> 429s inside the provider, where a one-key pool cannot rotate out of it. That is
+> live code claiming headroom it does not have, which is worse than dead code
+> claiming nothing. `build_app` now compares the two numbers at boot and says so
+> (`_warn_if_the_key_pool_cannot_pay_for_the_budget`,
+> `test_key_pool_headroom.py`). The wiring itself — a proxy that rotates a pool
+> — stays **open**.
+
 **`RecordingProvider` must be transparent to configuration, not only to results.** It forwarded `provider_id` and `capabilities` and dropped `max_tokens` — so `build_app(debug=True)`, the path that actually ships, budgeted every merge at the 800 default no matter what `INFERENCE_CLOUD_MAX_TOKENS` said. Observed with the env var at 1600: 270 words / 4 merges asked for, 500 / 10 paid for. A wrapper that is "transparent" for the two attributes someone happened to need is opaque for everything else.
 
 **`800` was never an endpoint limit.** Probed live: 3000 is accepted. It was a bound on the shared credit pool, chosen for cost and then treated as physics.

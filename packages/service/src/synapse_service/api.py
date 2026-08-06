@@ -105,6 +105,51 @@ ASSUMED_MERGE_TOKENS = 4_000
 ASSUMED_QUERY_TOKENS = 1_500
 
 
+def _warn_if_the_key_pool_cannot_pay_for_the_budget(provider: ModelProvider) -> None:
+    """Say so, at boot, when SYNAPSE_SYNTHESIS_KEYS claims capacity the
+    provider's actual key pool does not have.
+
+    ⟨2026-08-06, W3b, decisions/002⟩ ADR 0005 calls multi-key round-robin
+    "dead code at both layers". Re-checked by grep before deleting anything,
+    that is not what it is: `AIC100Provider._post_rotating` is the ONLY POST
+    helper `complete()` uses (both the chat and the schema branch), and it has
+    a passing test; `SYNTHESIS_KEYS` is read by `_affordable` on every push.
+    Both are live. What is true is narrower and worse than dead code — the
+    shipped POOL holds one entry, and `SYNAPSE_SYNTHESIS_KEYS` multiplies the
+    governor's ceiling with nothing checking that the keys exist. Set it to 10
+    against one key and the governor authorises 250,000 tokens/hour that will
+    429 on the 25,001st, which is precisely the "more headroom than there is"
+    reading the setting invites.
+
+    So the misleading part is made loud rather than removed. A pool this
+    function cannot read (FakeProvider, NPUProvider) is silence, not a guess:
+    the only claim worth making here is one that is checked.
+    """
+    pool = getattr(provider, "api_keys", None)
+    if not isinstance(pool, list) or not pool:
+        return
+    if SYNTHESIS_KEYS > len(pool):
+        logger.warning(
+            "SYNAPSE_SYNTHESIS_KEYS=%d but %s holds %d key(s). The governor is "
+            "budgeting %d tokens and %d requests per hour that this pool cannot "
+            "pay for -- the excess does not defer, it 429s inside the provider, "
+            "which reads as 'findings landed, memory unchanged'. Add the keys "
+            "(INFERENCE_CLOUD_API_KEYS, comma-separated) or lower "
+            "SYNAPSE_SYNTHESIS_KEYS to %d.",
+            SYNTHESIS_KEYS, type(provider).__name__, len(pool),
+            SYNTHESIS_TOKENS_PER_HOUR * SYNTHESIS_KEYS,
+            SYNTHESIS_REQUESTS_PER_HOUR * SYNTHESIS_KEYS, len(pool),
+        )
+    elif len(pool) > SYNTHESIS_KEYS:
+        # The harmless direction, and still worth one line: the operator has
+        # paid for capacity the governor is refusing to spend.
+        logger.info(
+            "%s holds %d key(s) but SYNAPSE_SYNTHESIS_KEYS=%d, so the governor "
+            "will defer merges the pool could afford. Raise it to %d.",
+            type(provider).__name__, len(pool), SYNTHESIS_KEYS, len(pool),
+        )
+
+
 def _missing(body: dict, *required: str) -> JSONResponse | None:
     """The plan's contract is `422 {error}` for a malformed payload
     (docs/plans/exec/2026-08-04-e3-service.md L719); push_findings was the
@@ -200,6 +245,7 @@ def build_app(provider: ModelProvider, *, debug: bool = True,
         RecordingProvider(provider, "retrieval", call_log) if debug else provider
     )
     synthesizer = Synthesizer(synthesis_provider)
+    _warn_if_the_key_pool_cannot_pay_for_the_budget(provider)
 
     # Debounce state, per session and per app instance -- see
     # MERGE_MIN_INTERVAL_S. `_pending` carries the findings of every deferred
