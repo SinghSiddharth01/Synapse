@@ -88,6 +88,41 @@ class PromptPack:
             return self.calibrated_overhead_tokens
         return self.estimated_overhead_tokens
 
+    @property
+    def example_finding_texts(self) -> tuple[str, ...]:
+        """Every finding text this pack's own few-shots teach the model to emit.
+
+        The corpus the parse-time echo guard measures against
+        (`distiller.is_example_echo`). Derived from the few-shots rather than
+        listed beside them on purpose: a new example added to the TOML is
+        covered the moment it is added, and a hand-kept list would have gone
+        stale at exactly the edit that most needs it. W7 F1 was six echoes of
+        two few-shots that a hand-kept list would have had to anticipate.
+
+        Tolerant of a few-shot whose output is not the findings shape at all —
+        `load_pack` rejects non-JSON, but a pack built in a test or a future
+        pack teaching a different schema must simply contribute nothing here
+        rather than break loading.
+        """
+        texts: list[str] = []
+        for shot in self.few_shots:
+            try:
+                payload = json.loads(shot.output)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            findings = payload.get("findings")
+            if not isinstance(findings, list):
+                continue
+            for item in findings:
+                if not isinstance(item, dict):
+                    continue
+                text = str(item.get("text", "")).strip()
+                if text:
+                    texts.append(text)
+        return tuple(texts)
+
     def is_contaminated_for(self, fixture_id: str) -> bool:
         """Whether scoring this fixture with this pack produces a void number.
 
