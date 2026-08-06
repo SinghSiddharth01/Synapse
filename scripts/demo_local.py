@@ -33,7 +33,6 @@ import argparse
 import json
 import os
 import shutil
-import signal
 import subprocess
 import sys
 import time
@@ -82,9 +81,20 @@ def http(method: str, url: str, body: dict | None = None, timeout: float = 60.0)
         return json.loads(response.read() or b"null")
 
 
-def wait_for(url: str, seconds: float = 25.0) -> bool:
+def wait_for(url: str, process: subprocess.Popen, name: str, seconds: float = 25.0) -> bool:
+    """Up, and up because OUR child is serving it.
+
+    Checking only that something answers is not enough: a child that dies
+    instantly on `EADDRINUSE` is indistinguishable from a healthy one, because
+    whatever already holds the port answers happily. That failure mode drives
+    the whole demo against a previous run's processes — and in `--live` it
+    would print "proxying to Cirrascale" while a leftover replay stand-in
+    answered every call from fixtures.
+    """
     deadline = time.time() + seconds
     while time.time() < deadline:
+        if process.poll() is not None:
+            raise SystemExit(died(name))
         try:
             urllib.request.urlopen(url, timeout=2.0).read()
             return True
@@ -93,6 +103,36 @@ def wait_for(url: str, seconds: float = 25.0) -> bool:
         except (urllib.error.URLError, TimeoutError, OSError):
             time.sleep(0.4)
     return False
+
+
+def claim_ports(ports: list[int]) -> None:
+    """Refuse to start if anything already holds a port we need.
+
+    Runs BEFORE `.demo/` is wiped. Without it, a second run deletes a live
+    run's transcripts, per-worker WAL and orchestrator binding, and the
+    surviving orchestrator then 503s every push (no binding to route to) while
+    this script waits out its timeouts and reports zero findings.
+    """
+    import socket
+
+    taken = []
+    for port in ports:
+        probe = socket.socket()
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            probe.bind(("127.0.0.1", port))
+        except OSError:
+            taken.append(port)
+        finally:
+            probe.close()
+    if taken:
+        raise SystemExit(
+            f"ports already in use: {', '.join(str(p) for p in taken)}\n"
+            "Another walkthrough is probably still running. Stop it first "
+            "(Ctrl-C in its terminal), or run:\n"
+            "  pkill -f demo_local.py; pkill -f local_model_server; "
+            "pkill -f synapse-service; pkill -f synapse-orchestrator; pkill -f synapse-worker"
+        )
 
 
 def spawn(name: str, argv: list[str], env: dict[str, str]) -> subprocess.Popen:
@@ -227,6 +267,18 @@ def _appended(stats: dict[str, Any]) -> int:
     })
 
 
+def triage_record(port: int) -> list[str]:
+    """What the worker's own dashboard says triage decided, and why."""
+    try:
+        stats = http("GET", f"http://127.0.0.1:{port}/debug/stats.json", timeout=5.0) or {}
+    except Exception:  # noqa: BLE001
+        return ["worker dashboard unreachable — triage record unavailable"]
+    events = [e for e in (stats.get("events") or []) if e.get("tag") == "triage"]
+    if not events:
+        return ["no triage decision recorded — nothing reached triage at all"]
+    return [f"triage: {e.get('summary')}" for e in events[-4:]]
+
+
 def wait_for_merge(shared_id: str, seconds: float) -> list[dict[str, Any]]:
     """Poll for a `Merged` entry in the log.
 
@@ -260,9 +312,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--interval", type=float, default=5.0, help="worker poll seconds")
     parser.add_argument("--idle-flush", type=float, default=10.0,
                         help="seconds of quiet before an open turn is flushed as a Segment")
+    parser.add_argument("--pace", type=float, default=0.0, metavar="TOK_PER_SEC",
+                        help="offline only: slow replies to this simulated decode "
+                             "rate so the dashboard's live timer ticks. Fabricated — "
+                             "it appears on the worker page as NPU latency, so leave "
+                             "it off unless you are demonstrating the UI itself.")
     parser.add_argument("--exit-when-done", action="store_true",
                         help="stop everything after the walkthrough instead of leaving it up")
     args = parser.parse_args(argv)
+
+    claim_ports([18181, 8899, 8787] + [plan["port"] for plan in FEED.values()])
 
     if DEMO.exists():
         shutil.rmtree(DEMO)
@@ -281,16 +340,25 @@ def main(argv: list[str] | None = None) -> int:
                f"synthesizing with {args.synthesizer_model}")
         detail("budget is roughly 20 requests/hour/key")
     else:
-        model_argv += ["--simulate-npu-tok-per-sec", "40"]
         detail("offline: answers replayed from this repo's fixture corpus")
-        detail("pacing is SIMULATED so the dashboard ticks; it measures nothing")
-    spawn("model", model_argv, {})
-    if not wait_for(f"{MODEL_URL}/models"):
+        if args.pace:
+            # Off by default, on purpose. The sleep lands inside the HTTP call,
+            # so it becomes ModelResult.latency_ms and renders on the worker
+            # dashboard under a hero node labelled "NPU now" — a fabricated
+            # number in the exact spot a reader would take for a measurement,
+            # in a repo whose rule is that no performance claim ships without
+            # one. An obviously-instant response cannot be misread that way.
+            model_argv += ["--simulate-npu-tok-per-sec", str(args.pace)]
+            detail(f"pacing responses at a SIMULATED {args.pace} tok/s so the "
+                   f"dashboard visibly ticks — this is not a measurement, and "
+                   f"the NPU's own measured rate is ~13 tok/s")
+    model = spawn("model", model_argv, {})
+    if not wait_for(f"{MODEL_URL}/models", model, "model"):
         raise SystemExit(died("model"))
     detail(f"up on {MODEL_URL}")
 
     say("2. the service — append-only log, synthesis, retrieval")
-    spawn("service", [str(BIN / "synapse-service")], {
+    service = spawn("service", [str(BIN / "synapse-service")], {
         "SYNAPSE_SYNTHESIZER": "aic100",
         "INFERENCE_CLOUD_BASE_URL": MODEL_URL,
         "INFERENCE_CLOUD_API_KEY": "local-stand-in",
@@ -298,7 +366,7 @@ def main(argv: list[str] | None = None) -> int:
         # this is what the service *asks* for, not what ultimately answers.
         "INFERENCE_CLOUD_MODEL": args.synthesizer_model if args.live else "local-stand-in",
     })
-    if not wait_for(f"{SERVICE_URL}/debug"):
+    if not wait_for(f"{SERVICE_URL}/debug", service, "service"):
         raise SystemExit(died("service"))
     detail(f"up on {SERVICE_URL} — dashboard at {SERVICE_URL}/debug")
 
@@ -322,11 +390,11 @@ def main(argv: list[str] | None = None) -> int:
         agent="claude-code", transcript_path=str(DEMO / "transcripts"),
         pinned_at=datetime.now(timezone.utc),
     ))
-    spawn("orchestrator", [
+    orchestrator = spawn("orchestrator", [
         str(BIN / "synapse-orchestrator"), "--port", "8787",
         "--service-url", SERVICE_URL, "--state-dir", str(orchestrator_state),
     ], {})
-    if not wait_for(f"{ORCHESTRATOR_URL}/producer/findings"):
+    if not wait_for(f"{ORCHESTRATOR_URL}/producer/findings", orchestrator, "orchestrator"):
         raise SystemExit(died("orchestrator"))
     detail(f"up on {ORCHESTRATOR_URL} — bound to {shared_id}")
 
@@ -337,7 +405,7 @@ def main(argv: list[str] | None = None) -> int:
         sessions[contributor] = agent_session
         path = DEMO / "transcripts" / f"{agent_session}.jsonl"
         seed_transcript(path, agent_session)
-        spawn(f"worker-{contributor}", [
+        worker = spawn(f"worker-{contributor}", [
             str(BIN / "synapse-worker"), "run",
             "--transcript", str(path),
             "--shared-id", shared_id,
@@ -351,7 +419,8 @@ def main(argv: list[str] | None = None) -> int:
             "SYNAPSE_STATE_DIR": str(DEMO / f"worker-{contributor}"),
             "SYNAPSE_IDLE_FLUSH": str(args.idle_flush),
         })
-        if not wait_for(f"http://127.0.0.1:{plan['port']}/debug"):
+        if not wait_for(f"http://127.0.0.1:{plan['port']}/debug", worker,
+                        f"worker-{contributor}"):
             raise SystemExit(died(f"worker-{contributor}"))
         detail(f"{contributor}: {path.name} — dashboard at "
                f"http://127.0.0.1:{plan['port']}/debug")
@@ -369,8 +438,13 @@ def main(argv: list[str] | None = None) -> int:
         detail(f"appended {segment_id} to {aditya.name}")
         time.sleep(args.interval + args.idle_flush + 4)
     landed = wait_for_findings(shared_id, 1, seconds=90)
-    detail(f"{landed} finding(s) in the service log — seg-004 should have been "
-           f"triaged out before the model ever saw it")
+    detail(f"{landed} finding(s) in the service log")
+    # Read the worker's own triage record rather than asserting the outcome.
+    # `seg-004`'s golden is empty, so a triage regression that KEPT it would
+    # produce an identical finding count — the claim has to be checked where
+    # the decision was actually made.
+    for line in triage_record(FEED["aditya"]["port"]):
+        detail(line)
 
     question = "why does the fec decode fail?"
 
@@ -385,6 +459,12 @@ def main(argv: list[str] | None = None) -> int:
     detail(f"the session that FOUND it sees {len(mine)}")
     detail("what Aditya already has in his own context window is not news to "
            "Aditya — invariant 3, suppression by attribution")
+    if not args.live:
+        # Say which half of retrieval this actually demonstrated. Suppression
+        # is real code and runs before the model; the ranking that follows it
+        # is the stand-in's identity function, so nothing here shows relevance.
+        detail("(offline: WHICH findings are offered is real suppression; the "
+               "ranking after it is the stand-in returning them in log order)")
 
     say("8. Sid hits the same wall, independently")
     sid = DEMO / "transcripts" / f"{sessions['sid']}.jsonl"
@@ -433,8 +513,13 @@ def main(argv: list[str] | None = None) -> int:
     detail(f"logs in {DEMO / 'logs'}")
     detail(f"append more work with: python scripts/demo_local.py --help")
     try:
-        signal.pause()
-    except (KeyboardInterrupt, AttributeError):
+        # Not signal.pause(): that is Unix-only, and on Windows its
+        # AttributeError fell straight through to the `finally` below, killing
+        # all five processes one line after telling the operator they were
+        # still running. Aditya's box is ARM64 Windows.
+        while True:
+            time.sleep(3600)
+    except KeyboardInterrupt:
         pass
     return 0
 

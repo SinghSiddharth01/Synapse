@@ -17,14 +17,23 @@ no NPU and no cloud key can still run every other line of the system unchanged.
 Two modes:
 
   --mode replay (default, offline, deterministic)
-      Answers from this repo's own corpus. The canary is answered by reading
-      the prompt. A distil request is matched against `fixtures/segments/*.json`
-      by verbatim event text and answered with that fixture's recorded goldens
+      Answers from this repo's own corpus, and never writes prose of its own.
+      The canary answer is EXTRACTED from the prompt. A distil request is
+      matched against `fixtures/segments/*.json` by verbatim event text and
+      answered with that fixture's recorded goldens
       (`fixtures/findings/*.findings.json`). A synthesis request merges the
-      corpus's known duplicate pair. Content that matches no fixture gets an
-      EMPTY answer, never an invented one — a stub that invents findings
-      reproduces exactly the failure `distiller/guards.py` exists to catch, and
-      would quietly teach the pipeline to trust noise.
+      corpus's known duplicate pair, and the merged text is the two sources'
+      own words joined — clumsy on purpose, because writing the clean version
+      is the synthesizer's job and a stub that seems to do it well is lying
+      about which component did the work. Content that matches no fixture gets
+      an EMPTY answer: a stub that invents findings reproduces exactly the
+      failure `distiller/guards.py` exists to catch, and would quietly teach
+      the pipeline to trust noise.
+
+      Retrieval ranking is an IDENTITY function — every candidate, in listing
+      order, with the query unread. Retrieval quality is not observable in
+      replay mode; suppression (which candidates are offered at all) is, since
+      that runs in real code before the model is consulted.
 
   --mode proxy
       Forwards both endpoints to a real OpenAI-compatible server, attaching an
@@ -74,9 +83,12 @@ REPO = Path(__file__).resolve().parent.parent
 SEGMENTS = REPO / "fixtures" / "segments"
 GOLDENS = REPO / "fixtures" / "findings"
 
-# guards.py's canary. Answered by reading the prompt, which is the whole point
-# of the check: a server that ignored its prompt could not produce this.
+# guards.py's canary. The answer is EXTRACTED from the prompt (below), never
+# emitted as a constant: a stub that recognised the question and replied with a
+# memorised `api.internal` would be gaming the guard, and the guard's whole
+# purpose is to prove the prompt was read.
 CANARY_MARKER = "which hostname's certificate expired"
+CANARY_HOST_PATTERN = re.compile(r"certificate for the host (\S+?)\s+expired", re.I)
 
 # The corpus's one known duplicate pair (seg-005a and seg-005b): the same ~40 ms
 # DMA timing window, found twice by two contributors 24 findings apart. Replay
@@ -88,7 +100,16 @@ CANARY_MARKER = "which hostname's certificate expired"
 # milliseconds"), which is the whole difficulty a real synthesizer is there to
 # handle. A lexical stub has to normalize the unit to see through it; that
 # normalization is this stub's crutch, not a property of the system.
-MERGE_SIGNATURE = "40 ms"
+#
+# ANCHORED, and paired with a subject word. A bare `"40 ms" in text` also
+# matches "140 ms" and "1440 ms", so a teammate contributing "the retry backoff
+# is 140 ms" into a still-running demo would have it silently merged into the
+# DMA finding — a wrong merge that tombstones a real finding, live.
+MERGE_SIGNATURE = re.compile(r"(?<!\d)40\s*ms\b")
+# Stems, not whole words: the pair says "DMA writes" and "decoding fails", and
+# "decoding" does not contain "decode". Matching on "decode" silently stopped
+# the flagship merge from firing at all.
+MERGE_SUBJECT = ("dma", "decod")
 
 
 def _normalize(text: str) -> str:
@@ -98,10 +119,18 @@ def _normalize(text: str) -> str:
 
 
 def _tokens(text: str) -> int:
-    """A ~4-chars-per-token estimate, reported as `usage`. Deliberately not
-    exact: it exists so `assert_prompt_conditioned` sees a truthful non-zero
-    prompt size, not so anyone measures throughput with it."""
-    return max(2, len(text) // 4)
+    """A ~4-chars-per-token estimate, reported as `usage`.
+
+    NO FLOOR, deliberately. An earlier version returned `max(2, ...)`, which is
+    exactly calibrated to clear `assert_prompt_conditioned`'s `input_tokens > 1`
+    — including for an EMPTY prompt. That would have made the one guard a
+    stand-in can honestly exercise structurally unable to fire: any regression
+    that emptied a prompt before it left the worker (a render bug, compaction
+    truncating a segment to nothing, a `distil_kinds` misconfiguration) would
+    report a comfortable non-zero size and read as "the model looked and found
+    nothing". An empty prompt must count as zero tokens and trip the guard.
+    """
+    return len(text) // 4
 
 
 class Corpus:
@@ -121,17 +150,19 @@ class Corpus:
             self.segments.append((segment["id"], texts, goldens))
 
     def match(self, prompt: str) -> tuple[str, list[dict[str, Any]]] | None:
-        """Which fixture segment is this prompt carrying? Verbatim substring
-        hits only — a partial or paraphrased match is not a match, and returns
-        None so the caller answers empty rather than guessing."""
-        best: tuple[int, str, list[dict[str, Any]]] | None = None
+        """Which fixture segment is this prompt carrying?
+
+        EVERY substantive line of the fixture must appear verbatim. A partial
+        match returns None, because returning a fixture's whole golden set for
+        a prompt that carried only part of it is the masking path this file
+        exists to close: compaction truncating a segment, a render regression
+        dropping tool_result content, or a segmenter split would all still
+        produce a full set of findings for content the model never saw.
+        """
         for seg_id, texts, goldens in self.segments:
-            hits = sum(1 for t in texts if t in prompt)
-            if hits and (best is None or hits > best[0]):
-                best = (hits, seg_id, goldens)
-        if best is None:
-            return None
-        return best[1], best[2]
+            if texts and all(t in prompt for t in texts):
+                return seg_id, goldens
+        return None
 
 
 def _parse_listing(prompt: str) -> list[tuple[str, str]]:
@@ -156,14 +187,20 @@ class Replay:
         low = prompt.lower()
 
         if CANARY_MARKER in low:
-            return "canary", "api.internal"
+            found = CANARY_HOST_PATTERN.search(prompt)
+            # No match means the canary prompt changed shape. Answering wrong
+            # is correct here: the worker then refuses to start, which is what
+            # should happen when the stand-in can no longer read the prompt.
+            return "canary", found.group(1) if found else "(no hostname in prompt)"
 
         # Retrieval ranks a positional listing; synthesis reconciles an
         # id-keyed one. Both are asked for as JSON, and the key each wants is
         # named in its own prompt.
         if '"ranked"' in prompt:
+            # Identity: every candidate, listing order, query unread. Named
+            # `rank/identity` in the log so a run never looks like it ranked.
             count = len(_parse_listing(prompt))
-            return "rank", json.dumps({"ranked": list(range(count))})
+            return "rank/identity", json.dumps({"ranked": list(range(count))})
 
         if "working memory" in low or '"merges"' in low:
             return "synthesis", self._synthesis(prompt)
@@ -181,27 +218,43 @@ class Replay:
         return f"distil/{seg_id}", json.dumps({"findings": findings})
 
     def _synthesis(self, prompt: str) -> str:
+        """The merge verdict — with the merged TEXT built out of the sources.
+
+        An earlier version returned a hand-written sentence here ("The decode
+        failure is a ~40 ms timing window between the two DMA writes..."). That
+        sentence appears in no fixture: it was prose invented by this file,
+        landing in a real SYNTHESIZED Finding, printed by the demo and shown on
+        the service dashboard as a reconciliation — fluent enough to read as
+        model output. It contradicted this module's own no-invention rule at
+        exactly the point the demo draws the eye to.
+
+        So the merged text is now the sources' own words, joined. It reads
+        clumsily on purpose: rewriting two findings into one clean sentence is
+        the synthesizer's job, and a stub that appears to do it well is lying
+        about which component did the work.
+        """
         listed = _parse_listing(prompt)
         duplicates = [
-            (fid, text) for fid, text in listed if MERGE_SIGNATURE in _normalize(text)
+            (fid, text) for fid, text in listed
+            if MERGE_SIGNATURE.search(_normalize(text))
+            and any(word in _normalize(text) for word in MERGE_SUBJECT)
         ]
         merges = []
-        if len(duplicates) >= 2:
+        # Exactly the pair this rule was written for. Three matches means
+        # something arrived that the rule was never designed to judge, and
+        # folding N sources into one text would drop whatever the extra ones
+        # added — the thing invariant 5 forbids.
+        if len(duplicates) == 2:
             merges.append({
                 "source_ids": [fid for fid, _ in duplicates],
-                "text": (
-                    "The decode failure is a ~40 ms timing window between the two "
-                    "DMA writes, and it only manifests under load."
-                ),
+                "text": " ".join(text for _, text in duplicates),
                 "type": "learning",
             })
-        working = (
-            "Two contributors independently hit the same ~40 ms DMA timing window."
-            if merges else
-            f"{len(listed)} findings in shared memory; nothing reconciles yet."
-        )
         return json.dumps({
-            "working_memory": working,
+            "working_memory": (
+                f"{len(listed)} findings under review; "
+                f"{len(merges)} merged by the replay stub's corpus rule."
+            ),
             "merges": merges,
             "trivial_ids": [],
             "conflicts": [],
@@ -240,6 +293,26 @@ class Proxy:
         )
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.loads(response.read())
+
+
+def _eaten_json(payload: dict[str, Any]) -> str | None:
+    """Did the upstream swallow the model's JSON into `tool_calls`?
+
+    The signature, observed live on `aisuite.cirrascale.com` 2026-08-05: empty
+    `content`, a non-trivial `completion_tokens`, and (usually) a `tool_calls`
+    field. The model emitted its JSON; the server's tool-call parser consumed
+    it. See this module's proxy-mode note and `aic100.py`'s docstring.
+    """
+    choice = (payload.get("choices") or [{}])[0]
+    message = choice.get("message") or {}
+    content = (message.get("content") if "message" in choice else choice.get("text")) or ""
+    produced = int((payload.get("usage") or {}).get("completion_tokens", 0) or 0)
+    if content.strip() or produced < 2:
+        return None
+    where = "tool_calls" if message.get("tool_calls") else "an empty response"
+    return (f"upstream returned {produced} completion tokens but empty content "
+            f"({where}) — this endpoint eats emitted JSON; use the instance "
+            f"whose /completions route the synthesizer already relies on")
 
 
 def _completion_envelope(model: str, text: str, prompt: str, chat: bool) -> dict[str, Any]:
@@ -309,6 +382,16 @@ def build_handler(args: argparse.Namespace, replay: Replay, proxy: Proxy | None)
                         body, args.timeout,
                     )
                     kind = "proxy"
+                    if (eaten := _eaten_json(payload)) is not None:
+                        # An upstream that swallowed the model's JSON into
+                        # tool_calls returns HTTP 200 with empty content, which
+                        # the distiller can only read as "the model said
+                        # nothing". Surfacing it as a 502 names the real cause
+                        # instead of letting the segment drop silently.
+                        self._send({"error": eaten}, status=502)
+                        print(f"  [{time.strftime('%H:%M:%S')}] proxy ATE THE JSON: {eaten}",
+                              file=sys.stderr, flush=True)
+                        return
                 except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
                     # Surface upstream failure as a 502 rather than a stub
                     # answer: a silent fallback to replay would look like the
