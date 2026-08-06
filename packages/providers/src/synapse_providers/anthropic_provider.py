@@ -31,7 +31,7 @@ see the `anthropic` dependency in pyproject.toml. The SDK gets retries, typed
 exceptions, and the exact wire shape (including the two headers in point 1)
 right for free; re-deriving that over httpx would just recreate the SDK.
 
-Five corrections applied here, each commented at its call site below:
+Six corrections applied here, each commented at its call site below:
 
   1. RESPONSE_SCHEMA (synapse_distiller.prompt) has no `additionalProperties:
      false` on its object nodes -- nothing needed it before, because every
@@ -58,6 +58,12 @@ Five corrections applied here, each commented at its call site below:
      `input_tokens + cache_creation_input_tokens + cache_read_input_tokens`,
      not the SDK's bare `usage.input_tokens`. See the loud comment at the
      call site -- this one is subtle and load-bearing.
+  6. `output_config.effort` is sent ONLY to models that accept it. It errors
+     on Haiku 4.5 and Sonnet 4.5, and claude-haiku-4-5 is exactly the arm the
+     4096 pin below exists for -- sent unconditionally it 400s that arm on its
+     first request. `output_config.format` is NOT gated with it: structured
+     output is supported on Haiku 4.5, so the gate is on the key rather than
+     on the container. See `supports_effort`.
 
 capabilities.native_structured_output=True is purely descriptive here: the
 ONLY runtime reader of ProviderCapabilities is
@@ -136,6 +142,43 @@ def default_max_tokens_for(model: str) -> int:
 # reasoning task; "low" keeps the (always-on, by default) thinking shallow
 # rather than paying for depth nothing here needs.
 DEFAULT_EFFORT = "low"
+
+# Correction #6. Which models accept `output_config.effort` AT ALL. Not a
+# tuning question -- a 400. `effort` is accepted on Opus 4.5 and later, Sonnet
+# 5, Fable 5 and Mythos 5, and ERRORS on Sonnet 4.5 and Haiku 4.5.
+#
+# That matters here more than anywhere else in this file: the distiller arm the
+# 4096 pin above was written for IS claude-haiku-4-5. Sent unconditionally, the
+# field meant that arm 400s on its first request and the pin governed an arm
+# that had never run -- see docs/overnight/w6-live-stress.md section 5, which
+# is where this was found.
+#
+# Substring match, same shape as _MODEL_MAX_TOKENS and for the same reason: the
+# model arrives as free text through SYNAPSE_ANTHROPIC_MODEL, and this repo
+# already carries two Haiku spellings.
+#
+# But it falls back the OTHER way, and the asymmetry is deliberate. The
+# max-tokens table falls back to the generous default, so an unlisted model
+# keeps working. This table falls back to OMITTING the field, because omitting
+# `effort` is never an error while sending it to a model that rejects it always
+# is. An unlisted model loses a tuning knob -- cheap, and visible in the request
+# body. The other direction loses the arm.
+_EFFORT_MODELS: tuple[str, ...] = (
+    "opus-4-5", "opus-4-6", "opus-4-7", "opus-4-8", "opus-5",
+    "sonnet-5", "fable", "mythos",
+)
+
+
+def supports_effort(model: str) -> bool:
+    """Whether `output_config.effort` can be sent to this model without a 400.
+
+    See _EFFORT_MODELS for why this fails closed while the max-tokens table
+    fails open. Note the fragments are version-specific on purpose: a bare
+    `"opus"` would match `claude-opus-4-1`, which predates the parameter, and a
+    bare `"sonnet"` would match `claude-sonnet-4-5`, which rejects it outright.
+    """
+    lowered = model.lower()
+    return any(fragment in lowered for fragment in _EFFORT_MODELS)
 
 
 def _tighten_schema(node: Any) -> Any:
@@ -291,16 +334,30 @@ class AnthropicProvider(ModelProvider):
             # Correction #3: no `temperature` key at all -- deliberately
             # absent, not set to a default. Sending it (even 0.0) is a 400
             # on Opus 5 / 4.8 / 4.7 / Fable 5. Do not add it back.
-            "output_config": {"effort": self._effort},
         }
         if system:
             kwargs["system"] = system
+
+        # Correction #6: `effort` only for models that accept it (see
+        # supports_effort) -- but `format` regardless, because structured
+        # output IS supported on Haiku 4.5. The two share a container, so the
+        # gate has to be on the KEY, not on `output_config` as a whole:
+        # dropping the container for Haiku would take schema enforcement with
+        # it and hand the distiller un-enforced JSON on the one arm this
+        # provider pins a cap for.
+        output_config: dict[str, Any] = {}
+        if supports_effort(self._model):
+            output_config["effort"] = self._effort
         if response_schema is not None:
-            kwargs["output_config"]["format"] = {
+            output_config["format"] = {
                 "type": "json_schema",
                 # Correction #1: tightened, or the request 400s.
                 "schema": _tighten_schema(response_schema),
             }
+        # Omitted entirely when empty rather than sent as `{}` -- an empty
+        # object is not what "no output configuration" looks like on the wire.
+        if output_config:
+            kwargs["output_config"] = output_config
 
         started = time.perf_counter()
         response = await self._client.messages.create(**kwargs)
