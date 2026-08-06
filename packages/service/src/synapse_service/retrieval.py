@@ -1,9 +1,18 @@
 """LLM-as-retriever over the curated Finding Log — never the prose (Plan C.5).
 
 Suppression happens HERE, before the model sees the candidates: a finding is
-excluded only when EVERY attribution is the asking agent's own Agent Session.
-One person's two agents still learn from each other; a Synthesized finding
-carrying any teammate contribution is always shown.
+excluded only when EVERY attribution is the asking CONTRIBUTOR's own. A
+Synthesized finding carrying any teammate contribution is always shown.
+
+⟨RE-KEYED 2026-08-06, session lifecycle spec⟩ The key was the Agent Session
+id, and the sentence here used to read "one person's two agents still learn
+from each other". That was the bug, not the feature: an Agent Session id is a
+transcript filename stem, so it is one Claude Code window. Keyed that way, the
+same human's second window was shown that human's own findings back as if a
+teammate had written them -- the awareness layer's whole job, inverted, and
+loudest for the person running two agents at once, which is the demo. Findings
+already in one of your conversations are still yours in the next one, so the
+Contributor is the identity the rule has to be written in.
 """
 
 from __future__ import annotations
@@ -29,21 +38,34 @@ RETRIEVER_SYSTEM = (
 )
 
 
-def visible_to(candidates: list[Finding], asking_agent_session: str) -> list[Finding]:
+def visible_to(candidates: list[Finding], asking_contributor: str) -> list[Finding]:
+    """Invariant 3, defined once. Everything that suppresses reads this.
+
+    ⟨2026-08-06⟩ The comparison moved from `a.agent_session` to
+    `a.contributor` (module docstring for why). The GUARD did not move and
+    must not: it is about how many attributions there are, not about which
+    field they are compared on, so it is unchanged by the re-key and
+    invariant 3 is unchanged with it.
+    """
     # A Finding is suppressed only when it HAS attributions and every one of
-    # them is the asking agent's own Agent Session. `all(...)` over an empty
+    # them is the asking Contributor's own. `all(...)` over an empty
     # attributions list is vacuously True, so without the explicit
     # `f.attributions and` guard a zero-attribution Finding would be
     # suppressed for every possible asker -- the opposite of invariant 3.
     return [f for f in candidates
             if not (f.attributions
-                    and all(a.agent_session == asking_agent_session for a in f.attributions))]
+                    and all(a.contributor == asking_contributor for a in f.attributions))]
 
 
 async def query_findings(provider: ModelProvider, *, context: SessionContext,
                          candidates: list[Finding], query: str,
-                         asking_agent_session: str) -> list[Finding]:
-    visible = visible_to(candidates, asking_agent_session)
+                         asking_contributor: str) -> list[Finding]:
+    """Rank what the asker is allowed to see. `asking_contributor` was
+    `asking_agent_session` until 2026-08-06; the parameter is renamed rather
+    than left alone because a caller passing an Agent Session id into a
+    Contributor comparison gets zero suppression and no error, and the name is
+    the only thing at this seam that would have told them."""
+    visible = visible_to(candidates, asking_contributor)
     if not visible:
         return []
 

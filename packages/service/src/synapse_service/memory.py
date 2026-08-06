@@ -44,6 +44,7 @@ from synapse_service.log import (
     Log,
     MarkedTrivial,
     Merged,
+    SessionEnded,
     TopicAssigned,
     TopicId,
     TopicSplit,
@@ -171,6 +172,18 @@ class SharedMemory:
         self.log.append(MarkedTrivial(finding_ids=finding_ids))
         self._view = None
 
+    def end(self, ended_by: str) -> None:
+        """Record that this Shared Session was closed. Appends; indexes nothing.
+
+        No guard against ending twice: the fold takes the FIRST `SessionEnded`
+        (fold.py), so a second entry is inert in exactly the way a re-sent
+        finding is. Refusing here instead would put the rule in two places and
+        make a retried `POST /end` -- the ordinary outcome of a dropped
+        response -- an error the caller has to interpret.
+        """
+        self.log.append(SessionEnded(ended_by=ended_by))
+        self._view = None
+
     def split_topic(self, topic_id: TopicId) -> tuple[TopicId, TopicId]:
         """2-means a collapsed topic. Appends the split; re-tags nothing."""
         into, assignments = self.indexes.topics.split(
@@ -280,6 +293,12 @@ class SharedMemory:
                 self.split_topic(entry.topic_id)
             elif isinstance(entry, MarkedTrivial):
                 self.mark_trivial(entry.finding_ids)
+            elif isinstance(entry, SessionEnded):
+                # A rebuild that dropped this would RE-OPEN a closed session --
+                # the loudest possible version of "something became a second
+                # source of truth", since `rebuild()` is the test that keeps the
+                # log-is-sufficient claim honest (adr/0004).
+                self.end(entry.ended_by)
             # TopicAssigned is re-emitted by append/merge and is not replayed
             # directly; replaying it would double-count centroid membership.
 

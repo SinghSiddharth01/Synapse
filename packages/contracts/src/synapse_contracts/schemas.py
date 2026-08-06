@@ -6,6 +6,7 @@ These types define the handoff points between components:
 - Attribution: where a Finding came from — Contributor / Agent Session / Agent
 - Finding: distilled unit of team intelligence (distiller → service boundary)
 - SynapseSession / LocalBinding: Shared Session identity and per-machine attribution
+- SessionStatus: whether a Shared Session is still open (ACTIVE) or closed (ENDED)
 - Conflict: two Findings the synthesizer judged to disagree
 - SessionContext: Working Memory + conflicts, returned by synthesis
 - ModelResult: what any ModelProvider.complete() returns; usage/latency baked in
@@ -90,6 +91,26 @@ class FindingStatus(StrEnum):
 
     KEPT = "kept"        # stands on its own (default until synthesis says otherwise)
     TRIVIAL = "trivial"  # restates an action without insight; filtered from retrieval
+
+
+class SessionStatus(StrEnum):
+    """Whether a Shared Session still accepts reads and writes.
+
+    Two members, deliberately. "Fully closed" is the decision the lifecycle
+    spec records (2026-08-06): once a session ends, reads AND writes are both
+    rejected and the log persists for audit/replay only. A third member
+    (`ARCHIVED`, read-only) was considered and rejected — the moment reads
+    stay open on a closed session, every caller has to learn which of two
+    closed states it is looking at, and the service has to keep suppression,
+    watermarks and briefings honest for a session nobody can contribute to.
+
+    Not a producer-writable field. The service derives it by folding the log
+    (`SessionEnded`) and projects it onto `SessionContext` on the way out, the
+    same Option A shape `adr/0004` closed for `Finding.merged_into`/`status`.
+    """
+
+    ACTIVE = "active"
+    ENDED = "ended"
 
 
 class Attribution(BaseModel):
@@ -205,6 +226,17 @@ class SessionContext(BaseModel):
     working_memory: str
     memory_version: int = 0
     conflicts: list[Conflict] = Field(default_factory=list)
+
+    # DERIVED, never sent by a producer (added 2026-08-06 with the session
+    # lifecycle spec). `ACTIVE` is the default so that every SessionContext
+    # constructed anywhere — including the ones the distiller and the
+    # orchestrator build for a prompt — is live unless the service says
+    # otherwise. The service folds `SessionEnded` out of the log and writes
+    # the answer here in exactly one place (`InMemoryStore.get_context`);
+    # storing a mutable flag instead was rejected for the reason `adr/0004`
+    # gives: a flag is a second source of truth, and it would come back
+    # ACTIVE after a restart + resync because it never travelled in the log.
+    status: SessionStatus = SessionStatus.ACTIVE
 
 
 class ModelUsage(BaseModel):

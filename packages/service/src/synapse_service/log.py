@@ -24,11 +24,12 @@ makes three separate problems disappear:
   3. Conflicts reference finding ids. Nothing dangles, because nothing is ever
      removed.
 
-Five entry kinds, and they are deliberately all the same shape of thing — a
-fact that happened, at a position. `Merged`, `MarkedTrivial`, `TopicAssigned`
-and `TopicSplit` are not mutations dressed up as events; supersession, trivia
-and topic membership are all *computed* from their presence during the fold
-(see fold.py).
+Six entry kinds ⟨was five; `SessionEnded` added 2026-08-06 with the session
+lifecycle spec⟩, and they are deliberately all the same shape of thing — a
+fact that happened, at a position. `Merged`, `MarkedTrivial`, `TopicAssigned`,
+`TopicSplit` and `SessionEnded` are not mutations dressed up as events;
+supersession, trivia, topic membership and termination are all *computed* from
+their presence during the fold (see fold.py).
 
 See docs/adr/0002-semantic-merge-and-tombstones.md and Plan C Task C.2.
 """
@@ -130,7 +131,41 @@ class TopicSplit:
     kind: Literal["topic_split"] = "topic_split"
 
 
-Entry = Union[FindingAppended, Merged, MarkedTrivial, TopicAssigned, TopicSplit]
+@dataclass(frozen=True)
+class SessionEnded:
+    """The creator closed this Shared Session. Nothing may be served from it
+    or added to it afterwards; the log stays for audit and replay.
+
+    The SIXTH kind (2026-08-06, session lifecycle spec). Termination is an
+    ENTRY and `SessionContext.status` is a fold over it, for the reason this
+    module's docstring gives for every other kind. Two alternatives were on
+    the table and both were rejected:
+
+      * `SynapseSession.ended: bool` — a mutable flag on the session record.
+        It is a second source of truth by construction, and it fails in the
+        exact case termination has to survive: `Store` is in-memory, the
+        documented recovery path is every orchestrator re-pushing its
+        retained log into `cmd_resync`'s create-or-return, and a flag that
+        never travelled in the log comes back ACTIVE. As an entry it will
+        travel the day service-side log persistence lands, and the fold does
+        not change then.
+      * a tombstone Finding carrying "this session ended" — reuses the
+        existing machinery, and pollutes retrieval with a record that is not
+        team knowledge and would rank against real findings.
+
+    `ended_by` is the Contributor who closed it — kept for audit and for the
+    "only <creator> can end this session" message. FIRST end wins in the
+    fold: a replayed terminate must not re-attribute a closure that already
+    happened, exactly as a replayed finding does not overwrite the first
+    write of its id.
+    """
+
+    ended_by: str
+    kind: Literal["session_ended"] = "session_ended"
+
+
+Entry = Union[FindingAppended, Merged, MarkedTrivial, TopicAssigned, TopicSplit,
+              SessionEnded]
 
 
 @dataclass

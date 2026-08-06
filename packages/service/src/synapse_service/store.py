@@ -20,7 +20,7 @@ import uuid
 from dataclasses import replace
 
 from synapse_contracts import (Conflict, Finding, FindingId, FindingStatus,
-                               SessionContext, SynapseSession)
+                               SessionContext, SessionStatus, SynapseSession)
 
 from synapse_service.fold import SupersessionCycleError, View
 from synapse_service.lanes import DEFAULT_TOP_K, DEFAULT_TOPIC_LANE, CandidateSet
@@ -84,6 +84,55 @@ class InMemoryStore:
         session = self._sessions[shared_id]
         if contributor not in session.members:
             session.members.append(contributor)
+
+    def remove_member(self, shared_id: str, contributor: str) -> None:
+        """Detach one member. Leaving is not ending (2026-08-06 spec): the
+        Shared Session stays open for everyone else and every finding this
+        Contributor already pushed stays in the log, attributed to them.
+
+        NOT a log entry, unlike `end_session` -- and that asymmetry is
+        deliberate. Membership has never been in the log (`add_member` writes
+        the list on `SynapseSession` and always has), so making only the
+        REMOVAL an entry would split one concept across two representations
+        and give the fold a half-picture it could not repair: it would see
+        members leaving it never saw arrive. If membership moves into the log
+        it should move as a pair, `MemberJoined`/`MemberLeft`, and that is a
+        bigger change than this pass.
+
+        Idempotent, because a DELETE that is retried after a dropped response
+        must not be an error.
+
+        `_last_seen` is deliberately LEFT ALONE. A member who leaves and
+        re-joins keeps their place in the memory -- that is the whole point of
+        keying the watermark on the Contributor rather than on a conversation
+        id (see `last_seen` below), and clearing it here would reinstate the
+        exact "everything is new again" briefing the re-key removes.
+        """
+        session = self._sessions[shared_id]
+        if contributor in session.members:
+            session.members.remove(contributor)
+
+    # ── lifecycle ───────────────────────────────────────────────────────────
+    def end_session(self, shared_id: str, ended_by: str) -> str:
+        """Close a Shared Session for everyone. Returns the Contributor the
+        closure is attributed to -- which is `ended_by` for the first call and
+        the ORIGINAL closer for any repeat, because the fold takes the first
+        `SessionEnded` entry.
+
+        An EVENT, per `adr/0004`: nothing is written onto the session record,
+        and `SessionContext.status` is a fold over the log (see `get_context`).
+        `SynapseSession.ended = True` was the obvious alternative and is
+        rejected there and in `log.SessionEnded` -- in one sentence, a flag
+        does not survive the restart + resync path that is this system's
+        entire recovery story, and an entry will.
+
+        Caller-side gating (creator-only, refuse while teammates are still
+        members) lives at the routes and in the orchestrator, not here: this is
+        the storage seam and it records what happened. The 403 needs
+        `SynapseSession.created_by`, which the route already has.
+        """
+        self._memories[shared_id].end(ended_by)
+        return self._memories[shared_id].view().ended_by or ended_by
 
     def session_ids(self) -> list[str]:
         """Every Shared Session this store knows about, creation order.
@@ -255,16 +304,54 @@ class InMemoryStore:
 
     # ── context / versioning ────────────────────────────────────────────────
     def get_context(self, shared_id: str) -> SessionContext:
-        return self._contexts[shared_id]
+        """The Working Memory half of Shared Memory, with `status` PROJECTED
+        from the fold on the way out (2026-08-06, session lifecycle spec).
+
+        Same Option A shape as `_project` above and for the same reason:
+        termination lives in the log, `SessionContext.status` is what every
+        consumer already reads, and this is the one accessor no caller can go
+        around. Writing the flag at `end_session` time instead would leave two
+        places that decide whether a session is closed, and the one that is
+        NOT the log is the one that loses its answer on restart.
+
+        This assigns onto the retained context rather than handing back a copy,
+        which is what `set_context` already does to the same object -- and
+        `test_storage_seam.py` allows a `.status` write in this module and
+        nowhere else, which is exactly the fence this projection wants.
+        """
+        ctx = self._contexts[shared_id]
+        ctx.status = (SessionStatus.ENDED
+                      if self._memories[shared_id].view().ended_by is not None
+                      else SessionStatus.ACTIVE)
+        return ctx
 
     def bump_version(self, shared_id: str) -> int:
         ctx = self._contexts[shared_id]
         ctx.memory_version += 1
         return ctx.memory_version
 
-    def last_seen(self, shared_id: str, agent_session: str) -> int:
-        return self._last_seen.get((shared_id, agent_session), 0)
+    def last_seen(self, shared_id: str, contributor: str) -> int:
+        """How far this CONTRIBUTOR had read when they last queried.
 
-    def mark_seen(self, shared_id: str, agent_session: str) -> None:
-        self._last_seen[(shared_id, agent_session)] = (
+        ⟨RE-KEYED 2026-08-06, from `agent_session` to `contributor`⟩ The old
+        key was the Agent Session id, which is the transcript filename stem
+        (`worker/discovery.py:112`) -- it changes every time you open a new
+        Claude Code window. So the ordinary act of closing a conversation and
+        starting another on the same machine produced an unknown key, a
+        `last_seen` of 0, and a briefing that reported the entire Shared
+        Memory as new to someone who had just read it. Nothing errored; the
+        watermark simply stopped meaning "how much have I not seen yet".
+
+        The Contributor is the identity that is actually stable across
+        conversations, and it is the one the spec picked for both this and
+        self-suppression so that the two cannot disagree about who you are.
+        """
+        return self._last_seen.get((shared_id, contributor), 0)
+
+    def mark_seen(self, shared_id: str, contributor: str) -> None:
+        # Reads `_contexts` directly rather than `get_context`, deliberately:
+        # this is a write path and it wants the stored version number, not the
+        # status projection get_context performs (which would fold the log on
+        # every query for a value nothing here reads).
+        self._last_seen[(shared_id, contributor)] = (
             self._contexts[shared_id].memory_version)

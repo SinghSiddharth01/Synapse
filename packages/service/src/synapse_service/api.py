@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from typing import Mapping
 
 from pydantic import ValidationError
 from starlette.applications import Starlette
@@ -11,7 +12,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from synapse_contracts import Finding
+from synapse_contracts import Finding, SessionStatus
 from synapse_providers import CallLog, ModelProvider, RecordingProvider
 
 from synapse_service.debug import Feed, debug_routes

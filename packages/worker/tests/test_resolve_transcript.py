@@ -2,11 +2,15 @@
 
 Binding is per Agent PRODUCT (claude-code.json, codex.json — Plan D.2: "one
 laptop holds several bindings — one per Agent Session; Claude Code and Codex
-can sit in different Shared Sessions"), not a single active.json. join_session
-binds whatever detection currently finds live; it does not let a caller pick a
-specific transcript file — Plan D.3 rules out an agent-facing attach(), and the
-corresponding choice here is that the developer-facing command doesn't hand-pick
-either.
+can sit in different Shared Sessions"), not a single active.json. These cover
+join_session's DETECTION path — what it does when nobody names a session, which
+is still the default and still binds whatever is live right now.
+
+The explicit path (`agent_session_id=...`), added 2026-08-06 by
+docs/superpowers/specs/2026-08-06-session-lifecycle-design.md, deliberately does
+let a caller pick a specific transcript; it lives in test_session_id_binding.py.
+This file's cases must keep passing unchanged, because that argument is opt-in
+and detection is what every existing caller still gets.
 """
 
 from __future__ import annotations

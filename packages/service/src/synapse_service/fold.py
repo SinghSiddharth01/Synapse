@@ -13,11 +13,12 @@ same view it did before.
 The result is a cache. Recompute it, keep it warm incrementally, or throw it
 away and fold again; it is never a second source of truth.
 
-Three things resolve here, all by the same mechanism:
+Four things resolve here, all by the same mechanism:
 
     supersession   a finding named as a source by a later Merged entry
     topic          the last TopicAssigned, then any TopicSplit reassignment
     trivia         synthesis marked the finding as restating an action
+    termination    a SessionEnded entry closed the Shared Session  ⟨2026-08-06⟩
 
 RETRIEVABLE  ==  not superseded and not marked trivial.  Defined once, here.
 No consumer outside this module is given the raw entry list, because a
@@ -37,6 +38,7 @@ from synapse_service.log import (
     Log,
     MarkedTrivial,
     Merged,
+    SessionEnded,
     TopicAssigned,
     TopicId,
     TopicSplit,
@@ -66,6 +68,13 @@ class View:
     topic_of: dict[FindingId, TopicId]
     members_of: dict[TopicId, tuple[FindingId, ...]] = field(default_factory=dict)
     trivial: frozenset[FindingId] = frozenset()
+
+    # The Contributor who closed this Shared Session, or None while it is open
+    # ⟨2026-08-06, session lifecycle spec⟩. Derived like everything else here:
+    # `SessionContext.status` is this field read through the store, never a
+    # written flag. Kept as the id rather than a bool because the 403 on
+    # `POST /end` and any later audit both want to name someone.
+    ended_by: str | None = None
 
     def visible(self) -> list[Finding]:
         """Retrievable findings, in log order. The only list consumers get."""
@@ -106,9 +115,18 @@ def fold(log: Log) -> View:
     topic_of: dict[FindingId, TopicId] = {}
     trivial: set[FindingId] = set()
     order: list[FindingId] = []
+    ended_by: str | None = None
 
     for entry in log:
-        _apply(entry, findings, superseded_by, topic_of, trivial, order)
+        # Termination comes back as a RETURN VALUE rather than through a
+        # mutable accumulator like the four above it, because it is a scalar:
+        # threading it through a one-element list purely to keep `_apply`'s
+        # signature uniform would hide "first end wins" inside `_apply`, where
+        # the reader looking for it would not think to check. `is None` here
+        # is that rule, stated once, in the open.
+        closed_by = _apply(entry, findings, superseded_by, topic_of, trivial, order)
+        if ended_by is None:
+            ended_by = closed_by
 
     # RETRIEVABLE, defined once, here:
     visible_ids = tuple(
@@ -132,6 +150,7 @@ def fold(log: Log) -> View:
         topic_of=topic_of,
         members_of={t: tuple(ids) for t, ids in members.items()},
         trivial=frozenset(trivial),
+        ended_by=ended_by,
     )
 
 
@@ -142,8 +161,12 @@ def _apply(
     topic_of: dict[FindingId, TopicId],
     trivial: set[FindingId],
     order: list[FindingId],
-) -> None:
-    """Fold one entry into the accumulating state."""
+) -> str | None:
+    """Fold one entry into the accumulating state.
+
+    Returns the Contributor named by a `SessionEnded` entry and None for every
+    other kind — see `fold()` for why termination is not accumulated in place.
+    """
     if isinstance(entry, FindingAppended):
         _record(entry.finding, findings, order)
 
@@ -163,6 +186,11 @@ def _apply(
     elif isinstance(entry, TopicSplit):
         for finding_id, new_topic in entry.assignments:
             topic_of[finding_id] = new_topic
+
+    elif isinstance(entry, SessionEnded):
+        return entry.ended_by
+
+    return None
 
 
 def _record(

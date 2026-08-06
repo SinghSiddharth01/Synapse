@@ -21,6 +21,7 @@ from synapse_contracts.schemas import (
     Provenance,
     Segment,
     SessionContext,
+    SessionStatus,
     SynapseSession,
 )
 
@@ -39,6 +40,7 @@ __all__ = [
     "Segment",
     "SessionBinding",
     "SessionContext",
+    "SessionStatus",
     "SynapseSession",
     "clear_binding",
     "read_binding",
