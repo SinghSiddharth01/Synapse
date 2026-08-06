@@ -40,6 +40,18 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Windows writes piped stdout in the locale codepage (cp1252), not UTF-8. This
+# script is documented as a DIRECT invocation (README.md "Run it"), so the
+# installers' PYTHONUTF8=1 cannot be relied on to be present — someone who
+# already has a checkout runs this by hand. Two things here need it: the banner
+# below, and everything runtime-supplied that flows into it — contributor names
+# and the service's own session purposes, neither of which this file controls.
+# Same guard as scripts/run_npu_eval.py:36-40.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 REPO = Path(__file__).resolve().parent.parent
 STATE = REPO / ".synapse"
 BIN = Path(sys.executable).parent
@@ -479,7 +491,10 @@ def main(argv: list[str] | None = None) -> int:
     if not wait_for(f"{ORCHESTRATOR_URL}/mcp", orchestrator, "orchestrator"):
         raise SystemExit("the orchestrator did not come up")
 
-    print(f"orchestr.  {ORCHESTRATOR_URL}/mcp  ← point Claude Code here", flush=True)
+    # ASCII arrow on purpose. The guard at the top of this file covers the
+    # general case, but this one line is the single most-read thing the script
+    # prints, and it should survive a console that predates any of it.
+    print(f"orchestr.  {ORCHESTRATOR_URL}/mcp  <- point Claude Code here", flush=True)
     print(f"session    {shared_id}  (contributor: {args.contributor})", flush=True)
     print(flush=True)
     print("  In the project you want shared memory in:", flush=True)
@@ -497,14 +512,34 @@ def main(argv: list[str] | None = None) -> int:
         # orchestrator would have their findings stamped with MY binding — my
         # contributor, my agent session — so their own work would be suppressed
         # from them and credited to me.
+        # Printed as ONE unwrapped line per OS, deliberately. The previous
+        # version used backslash continuations, which are not pasteable into a
+        # chat window and presumed the teammate already had a checkout and a
+        # synced venv — the two things they are least likely to have. These
+        # lines install uv, clone, sync, and join, from nothing. `sh -s --` is
+        # load-bearing: it is what lets arguments through the pipe.
+        lan = _lan_address()
+        raw = "https://raw.githubusercontent.com/SinghSiddharth01/Synapse/main"
         print(flush=True)
-        print("  Give a teammate THIS, so they run their own orchestrator "
-              "against your service:", flush=True)
-        print(f"    uv run python scripts/serve_local.py \\", flush=True)
-        print(f"      --service-url http://{_lan_address()}:8899 \\", flush=True)
-        print(f"      --shared-id {shared_id} \\", flush=True)
-        print(f"      --contributor <their-name>        # add --npu if they have one",
-              flush=True)
+        print("  Give a teammate ONE of these — it installs and joins in a "
+              "single paste:", flush=True)
+        print(flush=True)
+        print("  macOS / Linux:", flush=True)
+        print(f"    curl -LsSf {raw}/install.sh | sh -s -- --service-url "
+              f"http://{lan}:8899 --shared-id {shared_id} "
+              f"--contributor <their-name>", flush=True)
+        print(flush=True)
+        print("  Windows (PowerShell):", flush=True)
+        print(f"    & ([scriptblock]::Create((irm {raw}/install.ps1))) "
+              f"-ServiceUrl http://{lan}:8899 -SharedId {shared_id} "
+              f"-Contributor <their-name>", flush=True)
+        print(flush=True)
+        print("  Already cloned and synced? Then just:", flush=True)
+        print(f"    uv run python scripts/serve_local.py --service-url "
+              f"http://{lan}:8899 --shared-id {shared_id} "
+              f"--contributor <their-name>", flush=True)
+        print(flush=True)
+        print("  Add --npu (or -Npu) if they have one.", flush=True)
         print("  They must NOT point Claude Code at your :8787 — one orchestrator "
               "per laptop, or their findings get stamped as yours.", flush=True)
 

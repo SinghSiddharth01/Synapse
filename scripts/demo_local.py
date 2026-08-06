@@ -43,6 +43,16 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+# Windows writes piped stdout in the locale codepage (cp1252), not UTF-8, and
+# this walkthrough draws its section rules with U+2500 and marks steps with
+# U+21B3 / U+2192. A bare console happens to work; `| tee` or a redirect into a
+# file — which is how anyone captures a demo run — dies with UnicodeEncodeError
+# before the first section prints. Same guard as scripts/run_npu_eval.py:36-40.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 REPO = Path(__file__).resolve().parent.parent
 DEMO = REPO / ".demo"
 BIN = Path(sys.executable).parent
