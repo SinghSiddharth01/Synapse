@@ -188,7 +188,18 @@ def _main_body(serve_local):
 def test_main_builds_the_service_environment_through_the_helper(serve_local) -> None:
     """The call site, with `--npu` threaded into it. A re-inlined dict fails
     here; so does a call that hard-codes an arm and drops `args.npu`, which is
-    the shape the flag going dead would actually take."""
+    the shape the flag going dead would actually take.
+
+    ⟨AMENDED at the W1 merge, 2026-08-06⟩ `--npu --live` — the split topology,
+    GenieX distilling while the real 70B synthesizes — is a THIRD arm, and it
+    is chosen by credentials rather than by a boolean, so the call site now
+    also threads `dual_key`/`dual_base_url`. Those are asserted by name here
+    for the same reason `npu` is: passing literals, or dropping them, is
+    exactly how that arm would go quietly dead while every direct test of the
+    helper above stayed green. The assertion stays exact — an unexpected
+    keyword is still a failure — because its job is to notice the call site
+    changing shape at all.
+    """
     import ast
 
     calls = [
@@ -200,7 +211,9 @@ def test_main_builds_the_service_environment_through_the_helper(serve_local) -> 
 
     assert len(calls) == 1, "main must build the service env in exactly one place"
     passed = {kw.arg: ast.unparse(kw.value) for kw in calls[0].keywords}
-    assert passed == {"npu": "args.npu", "model_url": "model_url"}, passed
+    assert passed == {"npu": "args.npu", "model_url": "model_url",
+                      "dual_key": "dual_key",
+                      "dual_base_url": "dual_base_url"}, passed
 
 
 def test_main_never_hand_rolls_the_synthesizer_environment(serve_local) -> None:
