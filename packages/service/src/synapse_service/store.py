@@ -50,6 +50,19 @@ class InMemoryStore:
         self._contexts: dict[str, SessionContext] = {}
         self._memories: dict[str, SharedMemory] = {}
         self._last_seen: dict[tuple[str, str], int] = {}
+        # How many findings had EVER entered a session's memory when this
+        # contributor last read it (W5). A second watermark alongside
+        # `_last_seen`, and deliberately not a replacement for it: they answer
+        # different questions and only one of them can answer each.
+        # `_last_seen` holds a `memory_version`, which counts VERDICT ROUNDS
+        # and is what "the memory has moved N versions" means; it cannot say
+        # WHICH findings moved, because a finding carries no version stamp and
+        # is queryable the instant it is pushed, whole synthesis rounds before
+        # any version bump covers it. This counts arrivals, so "what landed
+        # since you last looked" is a slice rather than an inference. Keyed by
+        # CONTRIBUTOR for the same reason `_last_seen` is (decisions/001): a
+        # new conversation is the same person and must not replay the memory.
+        self._seen_count: dict[tuple[str, str], int] = {}
 
     # ── sessions ────────────────────────────────────────────────────────────
     def create_session(self, purpose: str, created_by: str | None, *,
@@ -381,6 +394,37 @@ class InMemoryStore:
         """
         return self._last_seen.get((shared_id, contributor), 0)
 
+    def has_looked(self, shared_id: str, contributor: str) -> bool:
+        """Has this CONTRIBUTOR ever read this session's memory?
+
+        Distinct from `last_seen(...) == 0`, which is also what a person who
+        read an untouched session gets. The arrival summary needs the
+        difference: "everything here is new to you" is true for a first-ever
+        joiner and false — and misleading — for someone returning to a session
+        that simply has not moved.
+        """
+        return (shared_id, contributor) in self._last_seen
+
+    def seen_count(self, shared_id: str, contributor: str) -> int:
+        """How many findings had entered this memory when they last read it."""
+        return self._seen_count.get((shared_id, contributor), 0)
+
+    def arrived_after(self, shared_id: str, count: int) -> list[Finding]:
+        """The RETRIEVABLE findings recorded after the first `count` were.
+
+        `count` is a `seen_count`. The fold records every finding once, in
+        arrival order, and never reorders — `View.findings` is keyed in that
+        same first-write order (`fold._record`) — so a position in it is a
+        stable "when did this arrive" and slicing past `count` is exactly
+        "everything since". Filtered back through `visible_ids` so a finding
+        that arrived and was then merged away or marked trivial is not
+        announced to a joiner as news, and projected like every other read.
+        """
+        view = self._memories[shared_id].view()
+        arrived = set(list(view.findings)[count:])
+        return [self._project(view, view.findings[fid])
+                for fid in view.visible_ids if fid in arrived]
+
     def mark_seen(self, shared_id: str, contributor: str) -> None:
         # Reads `_contexts` directly rather than `get_context`, deliberately:
         # this is a write path and it wants the stored version number, not the
@@ -388,3 +432,9 @@ class InMemoryStore:
         # every query for a value nothing here reads).
         self._last_seen[(shared_id, contributor)] = (
             self._contexts[shared_id].memory_version)
+        # The fold IS taken here, unlike the line above — there is no cheaper
+        # way to count findings than the structure that holds them, and this
+        # runs on `/query`, which has already folded (`store.retrievable`) and
+        # left the result cached on `SharedMemory._view`.
+        self._seen_count[(shared_id, contributor)] = len(
+            self._memories[shared_id].view().findings)

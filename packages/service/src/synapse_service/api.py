@@ -24,6 +24,7 @@ from starlette.routing import Route
 from synapse_contracts import Finding, SessionStatus
 from synapse_providers import CallLog, ModelProvider, RecordingProvider
 
+from synapse_service.arrival import SummaryCache
 from synapse_service.debug import Feed, debug_routes
 from synapse_service.lanes import DEFAULT_TOP_K
 from synapse_service.log import MarkedTrivial, Merged
@@ -201,6 +202,13 @@ def build_app(provider: ModelProvider, *, debug: bool = True,
     # scope rather than per session: the ceiling belongs to the KEY, and two
     # busy sessions share one.
     _spend: list[tuple[float, int]] = []
+
+    # The arrival summary's memo (W5, decisions/004). Closure scope like the
+    # debounce state above and for the same reason: two apps in one test
+    # process must not serve each other's cached summaries. Invalidation is
+    # structural -- the key holds the session's content fingerprint -- so no
+    # route has to remember to clear it; see `SummaryCache`.
+    _summaries = SummaryCache()
 
     def _record_spend() -> None:
         """Charge the round that just ran, at its real cost when the provider
@@ -668,6 +676,39 @@ def build_app(provider: ModelProvider, *, debug: bool = True,
             "members": list(store.get_session(sid).members),
         })
 
+    async def arrival(request: Request) -> JSONResponse:
+        """What a JOINER is told (W5). Two parts: what has accumulated, and
+        what is new since this person last read the memory.
+
+        Sits alongside `/watermark` rather than inside it. The watermark is a
+        HEADLINE — counts and a version delta, composed into the MCP server's
+        `instructions` on every connection and refreshed on a timer, so it has
+        to stay small and cheap. This is a body, fetched once, at join, and
+        rendered into a tool result the joining agent reads out loud. Merging
+        them would make every ten-second briefing refresh pay for a summary
+        nobody asked for, and would push finding prose into `instructions`,
+        which `briefing.py` caps at 1200 characters precisely to keep it out.
+
+        DOES NOT `mark_seen`. Reading the summary is not reading the memory:
+        this route is idempotent, an orchestrator may call it on a join that
+        then fails to bind, and moving somebody's watermark here would mean the
+        first call silently erased the "new since" the second one is for. The
+        watermark still moves where it always did -- on `/query`.
+
+        Identity is read exactly as `/watermark` reads it: `contributor` for
+        the watermark half, `agent_session` for suppression (decisions/001),
+        with the same `_asking_*` fallbacks, so an un-upgraded client that
+        sends only one of them is not anonymous here either.
+        """
+        sid = request.path_params["sid"]
+        if (gate := _unavailable(sid)) is not None:
+            return gate
+        summary = _summaries.get(
+            store, sid,
+            contributor=_asking_contributor(request.query_params),
+            agent_session=_asking_agent_session(request.query_params))
+        return JSONResponse(summary.to_json())
+
     async def query(request: Request) -> JSONResponse:
         sid = request.path_params["sid"]
         if (gate := _unavailable(sid)) is not None:
@@ -778,6 +819,7 @@ def build_app(provider: ModelProvider, *, debug: bool = True,
         Route("/v1/sessions/{sid}/findings", push_findings, methods=["POST"]),
         Route("/v1/sessions/{sid}/synthesize", synthesize, methods=["POST"]),
         Route("/v1/sessions/{sid}/watermark", watermark, methods=["GET"]),
+        Route("/v1/sessions/{sid}/arrival", arrival, methods=["GET"]),
         Route("/v1/sessions/{sid}/query", query, methods=["POST"]),
     ]
     if debug:
