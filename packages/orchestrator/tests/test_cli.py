@@ -147,14 +147,28 @@ def test_serve_uses_the_joined_session_when_a_binding_exists(monkeypatch, tmp_pa
     )
     monkeypatch.setattr(cli.uvicorn, "run", lambda app, **kw: None)
 
+    # TWO hops per boot since finding #1: the watermark composes the headline,
+    # and `/arrival` composes the body that goes into `instructions` after it —
+    # on the docs/JOIN.md path `instructions` is the only surface the joining
+    # agent gets, because serve_local.py writes the binding itself and
+    # `join_session` is never called. Both are asserted to be for THIS session:
+    # a hop that reached a different shared id would be a briefing about
+    # somebody else's memory.
+    paths: list[str] = []
+
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/v1/sessions/sh-joined/watermark"
+        paths.append(request.url.path)
+        assert request.url.path.startswith("/v1/sessions/sh-joined/")
+        if request.url.path.endswith("/arrival"):
+            return httpx.Response(200, json={"text": "ACCUMULATED — two findings."})
         return httpx.Response(200, json={"version": 1, "new_since": 0,
                                          "by_type": {}, "conflicts": 0})
 
     cli.main(["--state-dir", str(tmp_path)], transport=httpx.MockTransport(handler))
 
     assert "session: sh-joined" in capsys.readouterr().out
+    assert "/v1/sessions/sh-joined/watermark" in paths
+    assert "/v1/sessions/sh-joined/arrival" in paths
 
 
 def test_serve_wires_register_tools_unconditionally_with_a_live_resolver(
@@ -925,7 +939,18 @@ def test_build_npu_distiller_matches_the_workers_config_pack_and_model(monkeypat
         # the raw one -- identical values would let a regression pass.
         effective_max_tokens = 90
 
-    fake_pack = object()
+    class FakePack:
+        """A sentinel, not a PromptPack — this test is about identity and wiring.
+
+        It carries `example_finding_texts` because Distiller reads the corpus for
+        its example-echo guard off whichever pack it is handed (W7 F1), and a
+        bare object() would make this test fail for a reason that has nothing to
+        do with what it checks.
+        """
+
+        example_finding_texts: tuple[str, ...] = ()
+
+    fake_pack = FakePack()
     captured_pack_name = []
     captured_provider_kwargs = {}
 
