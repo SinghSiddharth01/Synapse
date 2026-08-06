@@ -518,3 +518,40 @@ async def test_refresh_briefing_rereads_the_binding_so_a_post_boot_join_lands():
     await refresh_briefing(server, lambda: joined[-1] if joined else None,
                            "http://svc", transport=httpx.MockTransport(handler))
     assert "sh-late" in server._mcp_server.instructions
+
+
+async def test_query_tells_the_agent_what_to_do_with_a_hit_and_claims_no_ranking(tmp_path):
+    """The invocation half of the contract was written and the disposition
+    half was not.
+
+    Observed live 2026-08-05: a session asked why Cirrascale was rejecting its
+    key, retrieved the finding naming the exact cause, and then spent three
+    minutes rediscovering it from the filesystem before saying anything. A
+    tool result of unannounced authority, arriving mid-investigation, gets
+    treated as a lead to check rather than an answer to deliver.
+
+    Also pins the removal of "best first": ordering comes from the service's
+    retriever, and when that is a stand-in returning everything in log order
+    the header asserted a ranking that was not there — with the one relevant
+    finding sitting last under a promise that it would be first.
+    """
+    def handler(request: httpx.Request) -> httpx.Response:
+        f = Finding(id="f-1", type="decision", text="only the Indonesian host authenticates it",
+                    attributions=[Attribution(contributor="aditya", agent_session="as-2",
+                                              agent="claude-code")], ts=TS)
+        return httpx.Response(200, json={"findings": [f.model_dump(mode="json")]})
+
+    server = create_mcp()
+    relay = Relay(tmp_path, "http://svc", "sh-1", transport=httpx.MockTransport(handler))
+    register_tools(server, resolve_binding=_resolver(BINDING), service_url="http://svc",
+                   relay=relay, distiller_factory=lambda b: None,
+                   transport=httpx.MockTransport(handler))
+    out = str(await server.call_tool("query", {"question": "why is my key rejected?"}))
+
+    assert "best first" not in out, "the tool must not claim an ordering it cannot know"
+    assert "aditya" in out, "the contributor has to reach the agent for credit to be possible"
+    lowered = out.lower()
+    assert "tell the user now" in lowered and "credit" in lowered, (
+        "a hit has to arrive with what to do about it, or it reads as one more "
+        "piece of mid-investigation evidence"
+    )

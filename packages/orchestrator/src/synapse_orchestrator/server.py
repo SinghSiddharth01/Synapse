@@ -119,7 +119,17 @@ def register_tools(server: FastMCP, *, resolve_binding, service_url: str, relay,
     @server.tool(description=(
         "Search the team's shared memory. Call BEFORE exploring an unfamiliar "
         "subsystem, when debugging something a teammate may also be working on, "
-        "or before concluding something is a dead end."))
+        "or before concluding something is a dead end. "
+        # Trigger-voice told the agent WHEN to call this and nothing about what
+        # a result means, so a hit was treated as a lead to check rather than
+        # an answer to deliver: observed 2026-08-05, a session that retrieved
+        # the exact cause of a 401 and then spent three minutes rediscovering
+        # it from the filesystem before saying anything. A returned Finding is
+        # a teammate's own verified experience, and saying so is the point of
+        # the system -- credit is what makes the collaboration visible.
+        "A result is a teammate's verified experience, not a hypothesis: if one "
+        "explains what you are looking at, say so to the user immediately and "
+        "name who found it, before investigating further."))
     async def query(question: str) -> str:
         binding = resolve_binding()
         if binding is None:
@@ -161,7 +171,27 @@ def register_tools(server: FastMCP, *, resolve_binding, service_url: str, relay,
                     "or ask a teammate directly for now.")
         if not lines:
             return "Team memory has nothing relevant to that. (Checked — not skipped.)"
-        return "Relevant team findings, best first:\n" + "\n".join(lines)
+        # "best first" was a claim this process cannot make. Ordering comes
+        # from the service's retriever; when that is a stand-in returning
+        # everything in log order, the header asserted a ranking that was not
+        # there -- observed 2026-08-05 with the one relevant finding sitting
+        # LAST under a header promising it would be first.
+        #
+        # The closing line is disposition: what to DO with a hit. Without it
+        # the agent has a tool result of unknown authority in the middle of an
+        # investigation, and its default is to keep investigating until certain
+        # rather than to speak. Answer first, then verify what genuinely needs
+        # verifying -- and say which part you are checking, so the user knows
+        # what is known versus what is being confirmed.
+        return (
+            "What the team already knows about this — each line is one "
+            "teammate's finding, and who found it:\n"
+            + "\n".join(lines)
+            + "\n\nIf one of these explains the problem in front of you, tell the "
+            "user now and credit whoever found it, rather than re-deriving it. "
+            "Then verify only what your particular situation could change, and "
+            "say what you are checking and why."
+        )
 
     @server.tool(description=(
         "Push an insight to the team's shared memory. Call when you have learned "
