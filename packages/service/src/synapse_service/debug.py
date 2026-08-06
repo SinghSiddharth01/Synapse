@@ -541,6 +541,23 @@ _PAGE = """<!doctype html>
         html += '<span class="tag">' + esc(m.tag) + '</span>';
         html += '<span class="summary">' + esc(e.summary) + '</span>';
         html += '</div>';
+        // A query's counts cannot answer "what did the asker get back?".
+        // Expand one and the answer is right there, attribution included --
+        // which is also how you see suppression bite rather than infer it.
+        var d = e.detail || {};
+        if (m.tag === "query" && d.returned) {
+          var body = "asked by: " + esc(d.asked_by) + "\\n" +
+            "suppressed for this asker: " + esc(d.suppressed) + "\\n\\nreturned:";
+          if (d.returned.length === 0) {
+            body += "\\n  (nothing)";
+          }
+          for (var r = 0; r < d.returned.length; r++) {
+            var f = d.returned[r];
+            body += "\\n  (" + esc(f.type) + ", from " + esc((f.from || []).join(", ")) +
+              ")\\n  " + esc(f.text);
+          }
+          html += '<div class="detail">' + body + '</div>';
+        }
       }
     }
     el.innerHTML = html;
@@ -574,7 +591,8 @@ _PAGE = """<!doctype html>
     var topicsEl = document.getElementById("topics");
     topicsEl.innerHTML = session.topics.length
       ? session.topics.map(function (t) {
-          return '<span class="topic-chip"><b>' + esc(t.size) + '</b> ' + esc(t.label) + '</span>';
+          return '<span class="topic-chip" title="' + esc(t.size) + ' finding(s) in this topic">'
+            + '<b>x' + esc(t.size) + '</b> ' + esc(t.label) + '</span>';
         }).join("")
       : '<span class="topic-chip">no topics yet</span>';
 

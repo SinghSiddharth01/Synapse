@@ -243,9 +243,9 @@ _PAGE = """<!doctype html>
   <div class="rail" aria-label="pipeline: transcript to push, in order">
     <div class="node"><div class="label">Transcript</div><div class="value" id="stat-ticks">0</div><div class="sub">ticks</div></div>
     <span class="link"></span>
-    <div class="node"><div class="label">Held</div><div class="value" id="stat-held">0</div><div class="sub" id="stat-held-age">turn closed</div></div>
+    <div class="node"><div class="label">Held</div><div class="value" id="stat-held">0</div><div class="sub" id="stat-held-age">events · turn closed</div></div>
     <span class="link"></span>
-    <div class="node"><div class="label">Triage</div><div class="value" id="stat-triage">0 · 0</div><div class="sub">keep · skip</div></div>
+    <div class="node"><div class="label">Triage</div><div class="value" id="stat-triage">0 · 0</div><div class="sub">segments kept · skipped</div></div>
     <span class="link"></span>
     <div class="node npu" id="npu-now">
       <div class="label">NPU now</div>
@@ -437,7 +437,7 @@ _PAGE = """<!doctype html>
           "open " + fmtElapsed(Date.now() - heldSince);
       } else {
         heldSince = null;
-        document.getElementById("stat-held-age").textContent = "turn closed";
+        document.getElementById("stat-held-age").textContent = "events · turn closed";
       }
     }
 

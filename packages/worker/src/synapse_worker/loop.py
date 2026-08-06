@@ -308,12 +308,17 @@ class WorkerLoop:
                 result.sent, result.pending_send = await self.producer.flush()
                 result.held = self.producer.pending_count()[1]
                 if self.stats:
-                    self.stats.event(
-                        "push",
-                        f"{result.sent} sent, {result.pending_send} queued",
-                        sent=result.sent,
-                        queued=result.pending_send,
-                    )
+                    # Only when a push actually had something to say. An idle
+                    # worker retries its (empty) queue every tick, and emitting
+                    # "0 sent, 0 queued" each time buried the handful of rows
+                    # that matter under hundreds that never will.
+                    if result.sent or result.pending_send:
+                        self.stats.event(
+                            "push",
+                            f"{result.sent} sent, {result.pending_send} queued",
+                            sent=result.sent,
+                            queued=result.pending_send,
+                        )
                     self.stats.tick(asdict(result))
                     self.stats.event("tick", result.summary())
                 return result
@@ -413,7 +418,7 @@ class WorkerLoop:
         result.sent, result.pending_send = await self.producer.flush()
         result.held = self.producer.pending_count()[1]
         result.pending_events = self.segmenter.pending_events
-        if self.stats:
+        if self.stats and (result.sent or result.pending_send):
             self.stats.event(
                 "push",
                 f"{result.sent} sent, {result.pending_send} queued",

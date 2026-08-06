@@ -300,13 +300,27 @@ def build_app(provider: ModelProvider, *, debug: bool = True) -> Starlette:
         )
         store.mark_seen(sid, agent_session)
         if feed is not None:
+            # Counts alone could not answer "what did the asker actually get
+            # back?", which is the only thing an operator watching a query
+            # wants to know — and with suppression in play the interesting
+            # case is precisely WHICH findings were withheld from whom.
+            withheld = len(visible) - len(allowed)
             feed.event(
                 "query",
                 f"{sid}: '{body['query'][:60]}' -> {len(candidates)} candidates, "
-                f"{len(ranked)} ranked",
+                f"{len(ranked)} ranked"
+                + (f", {withheld} suppressed for {agent_session or 'anonymous'}"
+                   if withheld else ""),
                 session=sid,
+                asked_by=agent_session or "anonymous",
                 candidates=len(candidates),
                 ranked=len(ranked),
+                suppressed=withheld,
+                returned=[
+                    {"id": f.id, "type": f.type.value, "text": f.text[:160],
+                     "from": [a.contributor for a in f.attributions]}
+                    for f in ranked
+                ],
             )
         return JSONResponse({"findings": [f.model_dump(mode="json") for f in ranked]})
 
