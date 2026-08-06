@@ -9,6 +9,7 @@ parameter is not evidence that it was honoured.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from typing import Any
 
@@ -16,6 +17,8 @@ import httpx
 from synapse_contracts import ModelResult, ModelUsage
 
 from synapse_providers.base import ModelProvider, ProviderCapabilities
+
+logger = logging.getLogger(__name__)
 
 
 class OpenAICompatibleProvider(ModelProvider):
@@ -85,12 +88,33 @@ class OpenAICompatibleProvider(ModelProvider):
                 headers=self._headers(),
                 json=body,
             )
-            response.raise_for_status()
-            payload = response.json()
+            # An overflowing prompt comes back as 4xx *with a partial completion
+            # in the body*: measured 2026-08-06 against GenieX, a 400 carried
+            # error.code "context_length_exceeded" alongside several complete,
+            # well-formed findings before the cut. raise_for_status() discarded
+            # all of them, and — worse — put the text out of reach of
+            # _parse_json_tolerantly, so the repair pass below could never run
+            # on the one case it was written for. Salvage first, raise second.
+            payload = _salvage_partial(response) if response.is_error else None
+            if payload is None:
+                response.raise_for_status()
+                payload = response.json()
         latency_ms = int((time.perf_counter() - started) * 1000)
 
-        text = payload["choices"][0]["message"]["content"] or ""
+        choice = payload["choices"][0]
+        text = choice["message"]["content"] or ""
         usage = payload.get("usage") or {}
+
+        # A response cut off at max_tokens takes the IDENTICAL path to one the
+        # model simply malformed, so without this the log says "unparseable"
+        # for what is really a budget problem and nobody knows to raise the cap.
+        # aic100.py makes the same distinction for the same reason.
+        if choice.get("finish_reason") == "length":
+            logger.warning(
+                "Response hit max_tokens=%d (finish_reason=length); the JSON is "
+                "TRUNCATED, not malformed — raise max_tokens or shrink the segment",
+                self.max_tokens,
+            )
 
         data: Any = text
         schema_valid = True
@@ -109,6 +133,33 @@ class OpenAICompatibleProvider(ModelProvider):
             provider_id=self.provider_id,
             schema_valid=schema_valid,
         )
+
+
+def _salvage_partial(response: httpx.Response) -> dict[str, Any] | None:
+    """The payload of an error response, when it still carries model output.
+
+    Returns None — meaning "nothing to salvage, let the caller raise" — for the
+    ordinary error, where the body is a bare error object with no completion in
+    it. Only a body that actually contains generated text is handed back, and
+    it is returned UNCHANGED: the truncation is left visible to the parser
+    rather than papered over here, so `schema_valid` still tells the truth when
+    the fragment cannot be repaired.
+    """
+    try:
+        payload = response.json()
+        content = payload["choices"][0]["message"]["content"]
+    except (ValueError, KeyError, IndexError, TypeError):
+        return None
+    if not content:
+        return None
+    logger.warning(
+        "HTTP %d from the model, but the body carries %d chars of completion "
+        "(%s); attempting to recover findings from it rather than discarding",
+        response.status_code,
+        len(content),
+        (payload.get("error") or {}).get("code", "no error code"),
+    )
+    return payload
 
 
 def _parse_json_tolerantly(text: str) -> Any | None:
