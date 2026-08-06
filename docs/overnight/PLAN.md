@@ -522,6 +522,41 @@ written last, and rewritten if anything material changes after.
 
 ---
 
+## Invariants — these are not goals, they are conditions
+
+1. **The suite stays green.** Nothing merges red. Full run before every merge.
+2. **End-to-end passes, not just unit.** Every backend now runs on this host, so
+   there is no excuse for in-process-only evidence. Each wave ends with: full
+   suite · `rehearse_demo.py` ALL BEATS PASS **on shifted ports** · a live stack
+   smoke through the Haiku arm — create → contribute → query → leave → rejoin →
+   end. Never against the live stack on 8899/8787; that is how fixtures reached
+   the real session tonight.
+3. **Every risky change is recoverable.** Branch per workstream. A tag before
+   anything structural. If an experiment fails it gets reverted or abandoned on
+   its branch — never left half-applied on `main`. The revert command goes in the
+   decision file, not in my head.
+4. **Nothing breaks.** If a change cannot be made without breaking something, it
+   gets parked with state, not forced.
+
+## Decision Agent Protocol
+
+Replaces asking you. **Any time I would otherwise raise a question or flag a
+choice, I spawn a decision agent instead**, and it:
+
+1. Reads `docs/demo-transcripts.txt` and the demo goals **first** — the point is
+   to find the direction you would have gone, not the direction I prefer.
+2. Enumerates the real options with honest pros and cons, including the one I
+   dislike.
+3. Recommends, explicitly matched against the transcript: *"the transcript
+   commits us to X, so B."*
+4. Names the reversal.
+
+Output is `decisions/NNN-<name>.md`: question · options · pros/cons · transcript
+alignment · decision · **how to undo it**. Then I act. I do not wait.
+
+Borrowed from wayfinder's decision-ticket shape — one decision lives in exactly
+one file, the TLDR indexes and links, never restates.
+
 ## Things I already know I will have to decide without you
 
 Listed now so nothing is a surprise. Each gets a `decisions/` file.
