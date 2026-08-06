@@ -36,6 +36,35 @@ jobs:
       - run: uv sync
       - run: uv run pytest -q
 
+  install-path:
+    # The first code a joining teammate runs, and until now the only code in
+    # the repo with no CI at all: `install.sh` and `scripts/doctor.py` were
+    # reachable from README, from serve_local.py's printed banner and from
+    # every Windows instruction, and nothing checked that they even parsed.
+    # Static and offline: nothing here binds a port or starts the stack.
+    name: install path (shell lint + doctor)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      # POSIX sh, not bash: this runs under dash on Debian-family boxes, and
+      # ubuntu-latest's /bin/sh IS dash, so this is the real parse.
+      - run: sh -n install.sh
+      - run: shellcheck -s sh install.sh
+      - run: test -x install.sh
+      - run: uv sync
+      # Asserts the result model, not the verdict. Whether a GitHub runner has
+      # `claude` or a free 8787 is not this repo's business, and coupling the
+      # badge to it would make the badge lie about the code.
+      - name: doctor emits a parseable result document
+        run: |
+          uv run python scripts/doctor.py --json > /tmp/doctor.json
+          uv run python -c "import json,sys; d=json.load(open('/tmp/doctor.json')); assert len(d['results'])==8, d; assert d['repo']['branch']"
+
   rehearsal:
     name: demo rehearsal (fake mode, end to end)
     runs-on: ubuntu-latest

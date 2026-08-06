@@ -45,6 +45,20 @@ import time
 import urllib.error
 import urllib.request
 
+# Windows writes piped stdout in the locale codepage, not UTF-8. Every beat
+# line below carries U+2014 (`beat()`), the summary carries U+2026, and
+# `argparse(description=__doc__)` puts U+00A7 from line 1 into `--help`. On the
+# mainstream cp1252 box those three happen to be encodable; on cp437/cp850 --
+# the codepage a fresh `cmd.exe` on a non-Western install still lands in -- they
+# are not, and `rehearse_demo.py > rehearsal.log` dies inside the rehearsal
+# instead of reporting on it. Every sibling on this path already has this
+# guard: serve_local.py:50-53, demo_local.py:51-54, doctor.py:58-61,
+# trace_one.py:27-30, run_npu_eval.py:37-40, verify_orchestrator.py:41-44.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 FIX = ROOT / "fixtures" / "findings"
 OUT = ROOT / ".measurements"
@@ -195,6 +209,54 @@ def wait_up(url: str, seconds: float = 15.0) -> bool:
 
 # ── corpus (the demo script's builder, repo-rooted) ──────────────────────────
 
+def _inference_cloud_key() -> str | None:
+    """The Cirrascale key for --live, or None. Never printed, never logged.
+
+    Parses. The previous version ran `"api_key"\\s*:\\s*"([^"]+)"` over the raw
+    text of secrets.jsonc and took the first hit, which is wrong three ways and
+    all three are silent:
+
+      * `anthropic.api_key` matches that pattern too. A file with an empty
+        `inference_cloud.api_key` and a real Anthropic key handed the Anthropic
+        key to `INFERENCE_CLOUD_API_KEY`, and the rehearsal then reported an
+        upstream auth failure that named the wrong credential.
+      * A commented-out `// "api_key": "..."` is not a credential. Every other
+        reader in the tree strips `^\\s*//.*$` before parsing for exactly this
+        reason (scripts/local_model_server.py:462, scripts/doctor.py:260,
+        scripts/serve_local.py:100); a regex over raw text resurrects a block
+        the team deliberately disabled.
+      * It ignored the `inference_cloud` block entirely, so
+        secrets.example.jsonc:3's claim that this file reads that block was
+        false.
+
+    The precedence below is `local_model_server._credentials`' (see
+    scripts/local_model_server.py:447-470), so the two agree about which key
+    the --live path uses.
+    """
+    api1 = ROOT / "api-1.json"
+    if api1.is_file():
+        m = re.search(r'"INFERENCE_CLOUD_API_KEY"\s*:\s*"([^"]+)"',
+                      api1.read_text(encoding="utf-8"))
+        if m and m.group(1):
+            return m.group(1)
+
+    secrets = ROOT / "secrets.jsonc"
+    if secrets.is_file():
+        stripped = re.sub(r"^\s*//.*$", "", secrets.read_text(encoding="utf-8"),
+                          flags=re.MULTILINE)
+        try:
+            data = json.loads(stripped)
+        except json.JSONDecodeError:
+            data = {}
+        if isinstance(data, dict):
+            block = data.get("inference_cloud") or {}
+            key = (block.get("api_key") if isinstance(block, dict) else None) \
+                or data.get("api_key")
+            if key:
+                return str(key)
+    return None
+
+
 def load(stem: str) -> list[dict]:
     return json.loads((FIX / f"{stem}.findings.json").read_text())
 
@@ -265,15 +327,10 @@ def boot_service(live: bool, port: int = DEFAULT_SERVICE_PORT,
     if live:
         env["SYNAPSE_SYNTHESIZER"] = "aic100"
         if "INFERENCE_CLOUD_API_KEY" not in env:
-            for path, pattern in ((ROOT / "api-1.json", r'"INFERENCE_CLOUD_API_KEY"\s*:\s*"([^"]+)"'),
-                                  (ROOT / "secrets.jsonc", r'"api_key"\s*:\s*"([^"]+)"')):
-                if path.is_file():
-                    m = re.search(pattern, path.read_text())
-                    if m and m.group(1):
-                        env["INFERENCE_CLOUD_API_KEY"] = m.group(1)
-                        break
-            if "INFERENCE_CLOUD_API_KEY" not in env:
+            key = _inference_cloud_key()
+            if not key:
                 raise SystemExit("--live: no API key found in env, api-1.json, or secrets.jsonc")
+            env["INFERENCE_CLOUD_API_KEY"] = key
         cmd = ["uv", "run", "synapse-service", "--port", str(port)]
     else:
         cmd = ["uv", "run", "python", "scripts/_rehearsal_service.py",
