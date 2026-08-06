@@ -12,6 +12,17 @@ Full prior detail: **[`2026-08-04-implementation-report.md`](./2026-08-04-implem
 
 ---
 
+## Joining the team's instance
+
+A teammate starting from nothing: **[`docs/JOIN.md`](./JOIN.md)** — ten
+minutes, five steps, ending with their agent able to read the team's memory
+and write to it. One person hosts the service on the LAN
+(`scripts/serve_local.py`, which binds `0.0.0.0` by default and prints the
+join command); everyone else runs their own orchestrator on localhost. That
+split is load-bearing rather than stylistic: the orchestrator stamps identity,
+so pointing an agent at somebody else's credits your findings to them and
+suppresses them from you.
+
 ## See it run, on any laptop
 
 ```
