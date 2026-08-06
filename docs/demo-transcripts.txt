@@ -1,0 +1,268 @@
+SYNAPSE — KEY INSIGHTS FOR DEMO SLIDES
+Extracted from recording-1.txt, recording-2.txt, and the Snapdragon Multiverse Hackathon rules PDF.
+=======================================================================================
+
+1. THE PROBLEM (slide 1 material)
+-----------------------------------
+Core framing from the team's own words: every engineer now works with their own coding agent,
+but agents are blind to the team. Two named failure modes — use these as the two problem bullets:
+
+  (a) DUPLICATION OF WORK — multiple agents independently redo the same exploration/debugging
+      because there's no shared memory between sessions.
+  (b) ASYMMETRY — of knowledge, of decisions, and of resources. A decision made by one teammate
+      (or their agent) doesn't propagate to teammates' agents automatically; someone has to
+      manually message/copy-paste it over. Same for a finding/bug/rule-out — if one agent found
+      it, nothing tells the other agents so they don't redo it.
+
+  Concrete anecdote used in the meeting (good for a "real-world scenario" slide):
+  a systems engineer writes MATLAB, a software engineer ports it to C++; bugs found on one side
+  require manual back-and-forth messaging before each one's agent "knows" about it. Synapse
+  removes that manual relay step.
+
+  Framing line worth quoting directly: "It's like you join any Google Doc together" — i.e. the
+  value proposition is Google-Docs-style real-time shared context, but for coding agents.
+
+  Also raised but explicitly OUT of demo scope (park these as "future/vision", not messaging):
+  agent-to-agent collaboration without humans, one orchestrator agent controlling others,
+  driver-team "always-on" shared sessions people join/leave freely. Team decided: "we can't
+  sell all this [now]... but we can list it as potential use cases," while keeping top-line
+  messaging at the human-collaboration level.
+
+
+2. THE VALUE PROP / MESSAGING PILLARS (slide 2 material)
+-----------------------------------
+Two things to say, verbatim from the discussion:
+  1. SAVE TIME — a human doesn't need to re-research something a teammate's agent already found.
+  2. SAVE TOKENS / COST — you're not re-running the same exploration twice, and local inference
+     means no extra cloud-cost overhead for the plumbing itself.
+
+  Deduplication and "asymmetry-closing" should be pitched as a form of OPTIMIZATION, not just a
+  UX nicety — this directly maps to the hackathon's "Technical Implementation" scoring criterion
+  (see section 5). Say it both ways: technical framing ("we don't reprocess raw work, we triage
+  and distill first — deterministic pre-filtering, not everything blindly sent to the LLM") and
+  product framing ("your team doesn't repeat itself, so you save real time and tokens").
+
+
+3. THE SNAPDRAGON MESSAGING STRATEGY (important — was heavily debated)
+-----------------------------------
+This was the most contentious topic in recording-2. Final agreed position:
+
+  - DO NOT say "this requires Snapdragon" or "this only works on Snapdragon" — avoid sounding
+    like you're downgrading/limiting the product to sell the sponsor.
+  - DO NOT oversell as frontier/best-in-class either. Analogy used: "We're in Maruti's company
+    [Qualcomm/edge], not Ferrari's [frontier cloud models] — you can still do real things within
+    the constraints, cost-effectively."
+  - Correct framing: "Our product is versatile — it can run anywhere — and IF you have Qualcomm
+    hardware, it gets measurably better/cheaper." Snapdragon is presented as an assist/accelerant,
+    not a hard requirement. Quote: "We start with Snapdragon, then Snapdragon Flow, then sell at
+    the end — assists with Snapdragon but if not available you can still use it."
+  - Reasoning given: judges will also weigh whether the product could be supported in open source
+    generally (not Snapdragon-locked) — so avoid boxing the story into "needs Snapdragon."
+  - HOWEVER — be honest about current implementation status for THIS submission: "the current
+    implementation requires a Snapdragon device" (GenieX architecture only, no cloud-only path
+    built yet) — but frame it as "current MVP," with the product's future evolution not requiring
+    it. Don't call it "the demo," call it "the current product, our working MVP."
+  - Concrete Snapdragon technical selling points team wants on a slide:
+      • NPU efficiency / utilization — "our NPU is very efficient vs. other NPUs"
+      • Running 8B / 4B parameter models LOCALLY via the Hexagon NPU + GenieX
+      • Cloud AI 100 running large models (70B) for the synthesis/cloud side — "AI100 is able to
+        run 70 billion parameters" — this pairs local-edge-8B with cloud-side-70B as one story
+      • GenieX described explicitly as "already optimized for the NPU" — cite it as leveraged
+        infra, not something they built from scratch
+  - Also wanted: acknowledge multi-backend versatility like GenieX itself does (CPU/GPU/NPU/
+    other vendors) — "this product is very versatile; if there's a Qualcomm device available we
+    take advantage of it and save your cost further." Praise the product without downgrading it,
+    and without putting Snapdragon in the back seat either — it should not read as an afterthought.
+
+
+4. HOW THIS MAPS TO ACTUAL ARCHITECTURE (grounds the messaging — from README/CONTEXT.md)
+-----------------------------------
+Use this to make the Snapdragon story concrete and technically credible on a slide:
+  - EDGE (Snapdragon X Elite, Hexagon NPU): a lightweight "Edge Worker" observes the local coding
+    agent's transcript, triages (deterministic, non-LLM decision on what's worth processing —
+    call this out as "optimization before the LLM, not everything sent raw"), then a small local
+    model (via GenieX) distills raw transcript into structured Findings (learnings, decisions,
+    dead ends, open questions) tagged with contributor/time. Raw transcript never leaves the
+    device — only distilled findings go to the cloud. This is the privacy + efficiency argument.
+  - CLOUD (Qualcomm Cloud AI 100): a larger model does cross-team synthesis — merging findings,
+    deduplicating, flagging conflicts, maintaining one "Working Memory" per shared session.
+  - RETRIEVAL (MCP): agents pull shared memory on demand via natural-language MCP queries —
+    nothing pushed unprompted. This is the "your agent becomes aware" mechanic in the demo.
+  - Division of labor line worth using verbatim: "Edge distillation on Snapdragon plus cloud
+    synthesis on Cloud AI 100 is the division of labor this hardware was designed for."
+
+
+5. MAPPING MESSAGING TO THE HACKATHON'S ACTUAL SCORING RUBRIC (from the PDF)
+-----------------------------------
+The rubric (100 pts total) should directly structure the slide deck's sections:
+
+  Technical Implementation — 40 pts (resource utilization, optimization, latency/performance,
+  energy efficiency)
+    → Slide should show: NPU utilization + AI100 cost/scale story; triage-before-LLM as
+      optimization; parallel/overlapped compute-and-communication (not doing things serially);
+      local/cloud split as cost optimization; a concrete profiling slide (round-trip time local
+      vs cloud, tokens/sec locally). Team explicitly wants a "how it works" architecture slide
+      showing parallelization, not serial waiting.
+
+  Application Use-Case & Innovation — 25 pts (problem solving, creativity/uniqueness, UX)
+    → Slide should show: 5-6 icon boxes of concrete use cases (debugging, feature work, design/
+      brainstorming, status sharing, lab-vs-dev collaboration, asymmetric-teammate collaboration
+      e.g. MATLAB-to-C++ port scenario). Team's own research note: "nothing like this exists that
+      runs on local NPUs specifically — there are shared-memory systems generally, but nothing
+      combining that with local NPU-based agent collaboration." Use this as the differentiation
+      claim (do a quick competitor check before final claim).
+
+  Deployment & Accessibility — 20 pts (ease of install/use)
+    → Slide/demo should show: one-command install/run from GitHub, shown live to the "joining"
+      teammate as their first-time experience.
+
+  Presentation & Documentation — 15 pts (clarity of explanation, code quality, documentation)
+    → CI/CD running (linters/PEP8 etc.), clean README with dynamic GitHub badges (build passing,
+      release-ready), docs hosted/rendered (not raw markdown) — e.g. GitHub Wiki or a docs site.
+      Explicit team instruction: "don't put AI slop in the docs" — keep README/docs clean, human-
+      reviewed, no obvious LLM filler.
+
+
+6. DEMO STORYBOARD (the actual scripted flow the team designed)
+-----------------------------------
+This is the concrete flow to visualize/screenshot for slides and the video walkthrough:
+
+  Step 1 — Create session: one worker runs Claude Code, types a slash command (e.g. `/create`)
+    with a stated purpose. This mints a session and produces a URL/session ID.
+  Step 2 — A companion "presentation view" web page opens at that URL: a friendly, natural-
+    language welcome ("Hi, welcome — here's what this session's purpose is") rather than a raw
+    dump — described as "like an overview dialog / fake landing pop-up" whose job is purely to
+    orient a viewer/judge on what just happened.
+  Step 3 — First worker does some scripted work (2-3 pre-scripted prompts/actions) so the shared
+    memory has real content in it before teammate #2 joins — "so memory builds up."
+  Step 4 — Second worker starts Claude Code and joins the same session via the session ID/URL.
+    On join, briefing is pulled BY DEFAULT (team decided: always pull automatically) and handed
+    to Claude (not shown raw to the user) — Claude itself synthesizes it into a short natural-
+    language summary and tells the user "I have this context, ready to go" — the AWARENESS
+    moment. Team wants to visibly show that the session purpose + a Claude-authored summary gets
+    printed to chat the moment you join.
+  Step 5 — The key "aha" beat: teammate #2 starts a NEW task; before starting, their agent
+    automatically queries the shared memory in the background (a "hook before checking"), and
+    if something relevant was already found/ruled out by teammate #1, the agent proactively
+    surfaces it ("Hey, Sid already ruled this out, so it might not apply here") instead of
+    redoing the work. This should look like: I ask my agent to do X → it checks the shared
+    session → it tells me "this was already handled" before I've done any work.
+  Design note the team debated and resolved: don't make the "already discovered" reveal happen
+    literally the instant of joining (feels too convenient/unrealistic) — insert a short beat of
+    teammate #2 doing a little bit of their own work first, THEN have the relevant cross-over
+    happen naturally when their task actually depends on/relates to teammate #1's work. This
+    avoids it reading as a scripted gimmick.
+  Also demonstrate: a high-confidence decision from a stakeholder (e.g., "this feature stays,
+    regardless of what others think") propagating automatically to another agent's context as an
+    example of decision-asymmetry being solved.
+
+  Two views to record/show side by side:
+    - "Front" / UX view: the presentation website / GUI a normal user sees.
+    - "Behind the scenes" / dev / global view: shows services, active sessions, active workers,
+      what's happening on the backend — so the audience can correlate "when this person did X,
+      this happened on the backend." Team wants this correlatable 1:1 with the front view.
+
+  Session-list vision (stated explicitly as NOT fully built, mention only as roadmap): today one
+    worker/session is shown; the eventual product supports a list of concurrent sessions a user
+    can browse/re-open. Show a session HISTORY list in the presentation GUI (mostly closed/past
+    sessions, one or two open) to gesture at this without over-claiming current capability.
+
+  Explicit anti-pattern to avoid: NEVER claim "one worker can join multiple sessions" — the
+  constraint is one agent joins one session at a time; use multiple agents in the demo instead
+  of implying otherwise.
+
+
+7. LATENCY / PACING HANDLING FOR THE RECORDING
+-----------------------------------
+Because Claude Code turns can take 2-3+ minutes, the plan is to pre-record and speed up/"time-
+lapse" the waiting parts rather than air dead time, and to caption over it ("Claude is now doing
+X") so it doesn't read as wasted time. Explicit reasoning: "human latency is actually a benefit"
+— the system's own response is meant to complete/catch up within the natural pause a human takes
+between turns, so it doesn't need to be the bottleneck. This is a legitimate talking point:
+frame the system's round-trip as hidden behind normal human think-time, not as added latency.
+Also worth noting for a live demo (if selected for the second round): keep any live portion to
+the most basic/robust interactions only — save complex scripted flows for the recorded video.
+
+
+8. FORMAT / TIME BUDGET (from both the meeting AND the hackathon PDF — cross-checked, consistent)
+-----------------------------------
+Hackathon PDF confirms: Friday 1:00–4:15pm team demos/judging, demo order randomized and emailed
+Thursday morning; only 6 teams total get selected to present in the auditorium (3 from each of
+two earlier judging batches — "NPR room" and "AG courtyard" from the meeting's mention). Getting
+selected requires performing well in the earlier round.
+
+Team's own time budget for the presentation format (7 minutes total):
+  - 1 minute: live human intro
+  - 5 minutes: recorded video and/or slides content (a live demo is optional; a video is
+    explicitly allowed by the rules per the team's understanding)
+  - 1 minute: live human outro
+Plan: build a single website with two tabs — one for the slide deck (HTML-based, built by having
+Claude generate animated HTML slides rather than a lower-fidelity PPT, since HTML gives full
+CSS/animation control) and one for the "Global View" / behind-the-scenes dev view, with the demo
+video embedded. Video should be placed at the END after slides give context, not before — because
+the audience needs the concept explained before watching the mechanism.
+Note: presenting to get selected to the final six also happens in walkthrough/open-house-style
+earlier rounds (families/managers/judges roaming), so the same asset (video + one-command install
++ live global view) needs to work informally there too, not just in the formal 7-minute slot.
+
+
+9. SPECIFIC SLIDE IDEAS CALLED OUT BY NAME IN THE MEETING
+-----------------------------------
+- A single slide/graphic (table or visual, "make it a graphic, not just a table") listing every
+  axis of efficiency/optimization gained and how (resource utilization / optimization / latency /
+  energy efficiency), so judges can visually scan and revisit it later. Explicit instruction:
+  "we feed them the imagination, we don't leave it to their creativity" — spell out the use cases
+  rather than being abstract.
+- A concrete "sample use cases" slide: 5-6 icon boxes (debugging, feature work, dev work,
+  designing/brainstorming, status sharing, asymmetric-teammate collaboration) — mention PM
+  visibility and defense/enterprise contexts as broader potential markets, but keep these as
+  "opt-in visibility" call-outs rather than the core pitch.
+- An architecture slide that visually communicates PARALLELIZATION — i.e., communication and
+  compute overlap rather than sitting serially idle — as the concrete answer to the "latency"
+  rubric line.
+- A "how it works" technical slide walking through the triage → distill (edge/NPU) → synthesize
+  (cloud/AI100) → retrieve (MCP) pipeline, explicitly calling out that NOT everything goes to an
+  LLM — some steps are deterministic/algorithmic (triage, embeddings) — this is itself pitched as
+  an optimization/differentiator versus "dumb, send-everything-to-the-LLM" systems.
+- A competitive-differentiation slide: quick research into existing shared-memory/collaboration
+  tools, explicitly positioned against "nothing else runs this on local NPUs specifically."
+
+
+10. CURRENT REAL-WORLD STATUS TO KEEP THE SLIDES HONEST (from docs/STATE.md, checked after the
+    recordings — use this to avoid over-claiming on demo day)
+-----------------------------------
+- The "brain" (shared-memory store, multi-lane retrieval, synthesis, topic labels) is merged to
+  main; 526 tests passing as of 2026-08-05.
+- A live rehearsal against the full Llama-3.3-70B cloud model succeeded, including an UNSCRIPTED
+  cross-contributor merge of two findings 24 entries apart — this is strong, genuine evidence for
+  the "asymmetry-closing" claim and worth a slide callout if it reproduces on demo day.
+  Fallback: the 8B cloud endpoint config still works if the 70B capacity is unavailable.
+  A pinned fallback commit/branch (`demo-fallback`) exists in case of trouble — plan A/B is real,
+  not hypothetical, so it's fine to communicate "we have a rehearsed fallback" as a maturity signal
+  if asked about robustness.
+- Known NOT to claim: energy-efficiency numbers (no live NPU power measurement taken yet); the
+  "topic" clustering lane specifically measured at zero yield and ships OFF — don't claim topic-
+  based retrieval as a differentiator, only topic LABELS in the arrival briefing text.
+- The demo corpus/script (`docs/demo-script.md`) is already built around exactly the "teammate
+  joins late, finding merges across a gap" story the meeting designed — Beat 5's flagship moment
+  (two findings from different contributors, 24 apart, merging into one lineage) is the literal
+  implementation of the "awareness" beat storyboarded in section 6 above. Good news: the
+  storyboard and the built demo already match.
+
+
+11. LOOSE THREADS / OPEN QUESTIONS RAISED IN THE MEETING (flag on a "risks/next steps" slide if
+    useful, or just for internal planning — not necessarily audience-facing)
+-----------------------------------
+- Whether to make the "pull briefing on join" prompt-optional or always-on was debated at length;
+  final call: always pull automatically, hand it to Claude to synthesize, present a short summary
+  to the user rather than a raw dump.
+- Retrieval quality ("meaningful querying") had only been informally spot-checked at meeting time,
+  not rigorously evaluated — team acknowledged this and treated it as an acceptable demo-time risk
+  ("it's a canned demo, so it's fine" if answers are good enough on the day).
+- MCP wiring, latency fine-tuning, and general integration testing were called out as the main
+  remaining work items right after this meeting, alongside preparing the slide deck itself.
+- Submission logistics reminder baked in from the PDF: GitHub repo must be a PERSONAL repo (not
+  org), needs README with description, team names+emails, from-scratch setup instructions, run
+  instructions, and an open-source license; must be submitted via the Microsoft Form by 12pm/1pm
+  PST Aug 7; every team member must also submit the feedback survey by Friday noon (this is a
+  submission requirement, not optional).
