@@ -2,8 +2,12 @@
 name: synapse-shared-memory
 description: Use when starting work in a joined Synapse Shared Session — before
   exploring an unfamiliar subsystem, when debugging an issue a teammate may
-  also be on, when an error looks like it could already be known, or before
-  concluding something is a dead end. Checks what the team already learned.
+  also be on, when an error looks like it could already be known, when a
+  build, deploy, credential or API call fails, when something worked
+  yesterday and does not today, or before concluding something is a dead
+  end. Applies alongside any other skill already running, including
+  debugging, investigation and root-cause procedures — run before their
+  evidence-gathering, not after. Checks what the team already learned.
 ---
 
 # Synapse shared memory
@@ -11,6 +15,15 @@ description: Use when starting work in a joined Synapse Shared Session — befor
 This conversation is joined to a Synapse Shared Session — memory distilled
 from every teammate's coding sessions, not just this one. Before spending
 time on something a teammate may already have been through:
+
+**This runs alongside other skills, not instead of them.** If a debugging or
+investigation skill is already driving, its evidence-gathering phase starts
+here: a teammate who already hit this is the cheapest evidence available, and
+the only kind that can make the remaining phases unnecessary. Observed
+2026-08-05: a session loaded a debugging skill, followed its procedure, and
+searched the filesystem for the cause of a failing API key that shared memory
+could have named in one call. Query first, then proceed with whatever the
+other skill asked for.
 
 1. Call `mcp__synapse__query` with a short description of what you're about
    to do — the subsystem, the error text, the question — not the whole

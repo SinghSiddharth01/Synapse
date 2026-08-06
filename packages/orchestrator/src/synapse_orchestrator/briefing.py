@@ -132,6 +132,16 @@ async def build_briefing(binding: LocalBinding | None, service_url: str, *,
             "teammate may also be working on, or before concluding something is a "
             "dead end. Call `contribute` when you learn something non-obvious a "
             "teammate would benefit from. "
+            # Observed 2026-08-05: a session loaded a debugging skill, followed
+            # its evidence-gathering phase, and searched the filesystem for the
+            # answer to a question shared memory already held. A loaded skill's
+            # procedure is directive and in-context; this briefing is neither
+            # unless it says so. Checking what the team knows is not a step
+            # inside somebody else's procedure — it comes before all of them,
+            # because it is the only step that can make the rest unnecessary.
+            "Do this even when another skill or procedure is already driving the "
+            "work: checking what the team already knows comes BEFORE gathering "
+            "your own evidence, because it may make that unnecessary. "
             f"Team memory holds {total} findings ({types}), "
             f"{conflicts} conflict(s), at version v{version}, which has moved "
             # `new_since` is a VERSION delta (api.py: memory_version minus this
