@@ -29,6 +29,13 @@ async def test_briefing_reflects_the_watermark_and_fails_open():
         # entirely left the whole suite green (a path-only assertion, same
         # class of gap the sibling `/query` hop already guards against).
         assert request.url.params["agent_session"] == "as-1"
+        # ⟨RE-KEYED 2026-08-06, session lifecycle spec⟩ `new_since` is measured
+        # against `store.last_seen`, which is now keyed on the CONTRIBUTOR. The
+        # briefing and `query` must read the same watermark for the same
+        # person, so this hop sends both fields too — `agent_session` above is
+        # kept, not replaced, because the service falls back to it for a client
+        # that has not been upgraded (`api._asking_contributor`).
+        assert request.url.params["contributor"] == "aditya"
         return httpx.Response(200, json={"version": 3, "new_since": 2,
                                          "by_type": {"learning": 4, "dead_end": 1},
                                          "conflicts": 1})
@@ -129,6 +136,36 @@ async def test_briefing_strips_control_characters_from_service_supplied_values()
     assert SENTINEL in text
 
 
+async def test_briefing_says_the_session_ended_rather_than_failing_open_to_unbound():
+    """Spec's actor table: the briefing "reports the session as ended rather
+    than showing stale counts".
+
+    The fail-open default is actively WRONG here, which is why this is not left
+    to it: `_DEFAULT_INSTRUCTIONS` says "No session is bound yet — run
+    `synapse-worker join`", and a binding does exist; the session it names is
+    closed. An arriving agent told to join would join the session it is
+    already in."""
+    def ended(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(409, json={"error": "session_ended"})
+    text = await build_briefing(BINDING, "http://svc",
+                                transport=httpx.MockTransport(ended))
+    assert text != _DEFAULT_INSTRUCTIONS
+    assert SENTINEL in text                    # still a briefing this server composed
+    assert "sh-1" in text and "ENDED" in text
+    assert "create_session" in text            # and what to do about it
+
+
+async def test_briefing_fails_open_on_an_unrelated_409():
+    """The mirror of the test above: a 409 that is not the service's liveness
+    gate must not be announced as a closed session. Body AND status, one
+    reader (`synapse_orchestrator.ended.is_session_ended`)."""
+    def conflict(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(409, json={"error": "lock held"})
+    text = await build_briefing(BINDING, "http://svc",
+                                transport=httpx.MockTransport(conflict))
+    assert text == _DEFAULT_INSTRUCTIONS
+
+
 async def test_briefing_renders_topic_labels():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={
@@ -224,10 +261,20 @@ async def test_query_tool_calls_the_service_and_formats_findings(tmp_path):
     result = await server.call_tool("query", {"question": "timing?"})
     text = str(result)
     assert "40ms window" in text and "akhil" in text
-    # Invariant 3 (CONTEXT.md): suppression is scoped to the Agent Session, not
-    # the Contributor. The service can only enforce that if this field actually
-    # arrives — a body-shape assertion, not just a path assertion.
-    assert captured_body == {"query": "timing?", "agent_session": "as-1"}
+    # Invariant 3 (CONTEXT.md): suppression is scoped to the asker's identity.
+    # The service can only enforce that if the field actually arrives — a
+    # body-shape assertion, not just a path assertion.
+    #
+    # ⟨RE-KEYED 2026-08-06, session lifecycle spec⟩ Suppression and the
+    # watermark are now keyed on the CONTRIBUTOR (`retrieval.visible_to`,
+    # `store.last_seen`), so `contributor` has to arrive too — and this stays
+    # an exact-equality assertion rather than a subset check precisely so that
+    # dropping either field fails here. `agent_session` is NOT removed: the
+    # service reads `contributor` first and falls back to it
+    # (`api._asking_contributor`), which is what lets an un-upgraded service
+    # and this orchestrator be deployed in either order.
+    assert captured_body == {"query": "timing?", "agent_session": "as-1",
+                             "contributor": "aditya"}
     # Which Shared Session gets queried is the routing decision that matters
     # most here — pin the exact URL, not just that SOME request happened
     # (round 2 review: a hardcoded WRONG-SESSION url survived every test).

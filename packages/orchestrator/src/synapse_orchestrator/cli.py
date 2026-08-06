@@ -17,9 +17,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import getpass
 import logging
 import os
 import sys
+from functools import partial
 from pathlib import Path
 
 import httpx
@@ -33,6 +35,7 @@ from synapse_orchestrator.briefing import (
     attach_briefing_refresher,
     build_briefing,
 )
+from synapse_orchestrator.ended import ended_session_ids, record_ended
 from synapse_orchestrator.relay import Relay
 from synapse_orchestrator.server import create_mcp, register_tools
 
@@ -143,12 +146,53 @@ def build_npu_distiller(binding: LocalBinding):
     )
 
 
+def _default_contributor() -> str | None:
+    """The OS login name, or None on a host that has no answer.
+
+    Resolved HERE rather than as an argparse default (see `--contributor`
+    below) so a host where `getpass.getuser()` raises still runs every
+    subcommand. None is a usable outcome: `create_session`/`join_session`
+    already return prose telling the user to pass `--contributor` when the
+    identity is unset, which is a far better failure than a traceback out of
+    argument parsing on a command that never needed an identity.
+    """
+    try:
+        return getpass.getuser()
+    except (OSError, KeyError):
+        # KeyError is what the pwd lookup raises on some platforms; OSError is
+        # what CPython documents. Neither is worth crashing over.
+        return None
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="synapse-orchestrator", description=__doc__)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8787)
     parser.add_argument("--state-dir", default=".synapse")
     parser.add_argument("--service-url", default="http://127.0.0.1:8899")
+    # Who the lifecycle MCP tools act AS when nothing is bound yet — i.e. for
+    # `create_session` and `join_session`, the two calls made from exactly that
+    # state. Once a binding exists, `binding.contributor` wins (server.py's
+    # `_identity`), so this never overrides an identity the service has already
+    # seen. Default: SYNAPSE_CONTRIBUTOR, else the OS login name. Rejected
+    # alternative: mirroring `synapse-worker join`'s hardcoded demo default
+    # ("aditya") — a create_session that silently attributes a new Shared
+    # Session to a teammate makes `end_session`'s creator-only check refuse the
+    # person who actually created it, with no clue why.
+    #
+    # The default is the ENV VAR ALONE and the OS login name is resolved
+    # lazily in `main` (see `_default_contributor`). `build_parser()` runs for
+    # every invocation including ones that never read this value, and
+    # `getpass.getuser()` RAISES on a host with no passwd entry for the uid and
+    # no USER/LOGNAME/LNAME/USERNAME set -- a plain `docker run -u 1001 ...`.
+    # Evaluated here, that killed `synapse-orchestrator resync` (which never
+    # touches `args.contributor`) with an unhandled OSError before parsing even
+    # finished.
+    parser.add_argument("--contributor",
+                        default=os.environ.get("SYNAPSE_CONTRIBUTOR"),
+                        help="Contributor identity for create_session/join_session "
+                             "when no binding exists yet (default: "
+                             "$SYNAPSE_CONTRIBUTOR, else the OS login name)")
     parser.add_argument("--briefing-refresh", type=float,
                         default=DEFAULT_REFRESH_SECONDS, metavar="SECONDS",
                         help="how often to recompose the arrival briefing so "
@@ -188,9 +232,21 @@ async def cmd_resync(args: argparse.Namespace, *,
     state_dir = Path(args.state_dir)
     binding = _resolve_binding(state_dir)
     shared_id = binding.shared_id if binding is not None else None
-    relay = Relay(state_dir / "relay", args.service_url, shared_id, transport=transport)
+    # STOPGAP (lifecycle spec, "Durability caveat"): the service's store is
+    # in-memory, so a restart un-ends an ended session — and Step 1 below is
+    # create-or-return, which would cheerfully bring it back and refill it with
+    # the entire retained log. Until service-side log persistence lands
+    # (STATE.md's first post-demo entry), the locally retained set is the only
+    # thing that remembers the team closed it. Seeded into the Relay too, so
+    # the push loop skips those groups as well as the recreate loop here.
+    ended = ended_session_ids(state_dir)
+    relay = Relay(state_dir / "relay", args.service_url, shared_id, transport=transport,
+                  ended_sessions=ended,
+                  on_session_ended=partial(record_ended, state_dir))
     total = relay.retained_count()
-    known_sessions = sorted(relay.recorded_session_ids())
+    recorded = relay.recorded_session_ids()
+    known_sessions = sorted(recorded - ended)
+    skipped = sorted(recorded & ended)
     base = args.service_url.rstrip("/")
 
     # 1. RECREATE, before the push. After a real restart the sh-... does not
@@ -209,6 +265,31 @@ async def cmd_resync(args: argparse.Namespace, *,
 
     pushed_by_session = await relay.resync_sessions()
     pushed = sum(pushed_by_session.values())
+
+    # RECOMPUTE THE DENOMINATOR, after the push and before comparing against
+    # it. `total` above was taken while `relay._ended` held only what
+    # `ended.json` already knew, so a session this machine had NOT yet observed
+    # to be closed -- ended by a teammate, ended by the service directly, or
+    # ended while this orchestrator was down -- was still counted in it. The
+    # push then learns the truth from a live `409 {"error": "session_ended"}`,
+    # correctly drops those findings and correctly does NOT count them as
+    # pushed, and the comparison below fired "FAILED — 0 of 3 re-pushed … is
+    # the service reachable, and is a Shared Session joined?" with exit code 1
+    # for a resync that behaved exactly right, sending an operator to debug
+    # connectivity and bindings that were both fine. Running the identical
+    # command a second time then succeeded, because by then `ended.json` named
+    # it -- an asymmetry with no defensible meaning, and one that would fail
+    # any CI step gating on resync's status.
+    #
+    # `retained_count()` reads the relay's OWN `_ended`, which
+    # `resync_sessions` has just grown, so re-reading it here is the whole fix;
+    # `skipped` and `known_sessions` are recomputed off the same post-run set
+    # so the reported counts and the "skipped N ended session(s)" note describe
+    # the same run rather than two different instants.
+    ended = ended | set(relay.ended_session_ids())
+    total = relay.retained_count()
+    skipped = sorted(recorded & ended)
+    known_sessions = sorted(recorded - ended)
 
     label = shared_id or "unbound"
     # The loud-failure branch stays exactly where main has it and fires BEFORE
@@ -246,8 +327,9 @@ async def cmd_resync(args: argparse.Namespace, *,
                 logger.warning("Resync pushed to %s but re-synthesis failed (%s)",
                                sid, exc.__class__.__name__)
 
+    ended_note = f"; skipped {len(skipped)} ended session(s): {skipped}" if skipped else ""
     print(f"resync: re-pushed {pushed} finding(s) across {len(known_sessions)} session(s) "
-          f"(current session: {label!r}; synthesized: {synthesized})")
+          f"(current session: {label!r}; synthesized: {synthesized}){ended_note}")
     return 0
 
 
@@ -286,7 +368,14 @@ def main(argv: list[str] | None = None, *,
     # endpoint additionally re-resolves per Finding via
     # `resolve_binding_for_agent` below, so a `join` run after this process
     # started is picked up without a restart on that path.
-    relay = Relay(state_dir / "relay", args.service_url, shared_id, transport=transport)
+    relay = Relay(state_dir / "relay", args.service_url, shared_id, transport=transport,
+                  # Seeded from disk and written back through the callback: a
+                  # session that ended while this process was down must not be
+                  # re-POSTed on every tick, and one that ends while it is up
+                  # must survive into the next `resync`. See relay.py's
+                  # termination note and `synapse_orchestrator.ended`.
+                  ended_sessions=ended_session_ids(state_dir),
+                  on_session_ended=partial(record_ended, state_dir))
 
     briefing = asyncio.run(build_briefing(binding, args.service_url, transport=transport))
     server = create_mcp(briefing)
@@ -298,8 +387,18 @@ def main(argv: list[str] | None = None, *,
     # what the producer endpoint already did. `build_npu_distiller` already
     # takes a `LocalBinding` positionally, so it IS the per-call factory
     # `register_tools` expects — no wrapping lambda needed.
+    #
+    # The lifecycle tools (2026-08-06) need three more things, all of them
+    # process-level facts rather than per-call arguments: `state_dir` so a bind
+    # lands in the SAME `bindings/` directory `synapse-worker join` writes to
+    # and `_resolve_binding` above reads from; `cwd` as the scope for transcript
+    # detection when a caller does not name its own session id; and
+    # `contributor` as the identity to create/join AS while no binding exists
+    # to read one from.
     register_tools(server, resolve_binding=resolve_binding, service_url=args.service_url,
-                   relay=relay, distiller_factory=build_npu_distiller, transport=transport)
+                   relay=relay, distiller_factory=build_npu_distiller, transport=transport,
+                   state_dir=state_dir, cwd=Path.cwd(),
+                   contributor=args.contributor or _default_contributor())
     app = build_app(relay, server, resolve_binding_for_agent=resolve_binding_for_agent)
     # The briefing above is a snapshot of this instant. Keep it true for
     # agents that arrive later, and for a `join` that happens after this

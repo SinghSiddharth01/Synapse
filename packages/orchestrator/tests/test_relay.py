@@ -237,6 +237,130 @@ async def test_a_422_is_terminal_and_never_re_attempted(tmp_path, caplog):
     assert any("422" in r.getMessage() for r in caplog.records)
 
 
+async def test_a_finding_for_an_ended_session_is_dropped_and_never_retargeted(tmp_path,
+                                                                              caplog):
+    """Spec Testing item 8, and the round 3 partition discipline applied to
+    termination (relay.py's termination note).
+
+    A Finding is recorded under sh-CLOSED, whose team has since ended it. The
+    push comes back 409 {"error": "session_ended"}. Two things must hold, and
+    the second is the one worth a test: it is DROPPED with a log line naming
+    the session, and when the same relay is later bound to a live sh-NEXT the
+    dropped Finding is not swept into it. "The target session closed, so put
+    these somewhere they can land" is the exact cross-session leak the round 2
+    partition fix removed, and a closed session is when a human is MOST likely
+    to have decided the work is over."""
+    remembered: list[str] = []
+    urls_hit: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        urls_hit.append(str(request.url))
+        if "sh-CLOSED" in str(request.url):
+            return httpx.Response(409, json={"error": "session_ended"})
+        return httpx.Response(200, json={"accepted": 1, "memory_version": 1})
+
+    relay = Relay(tmp_path, "http://svc", "sh-CLOSED",
+                  transport=httpx.MockTransport(handler),
+                  on_session_ended=remembered.append)
+    relay.record([_finding("f-closed")])
+
+    with caplog.at_level(logging.WARNING):
+        first = await relay.flush()
+
+    assert first == (0, 0)                       # neither sent nor still pending
+    assert relay.ended_session_ids() == frozenset({"sh-CLOSED"})
+    # Persisted outward exactly once, so `resync` cannot resurrect the session
+    # after a service restart (the spec's durability stopgap).
+    assert remembered == ["sh-CLOSED"]
+    assert any("ended" in r.getMessage() and "sh-CLOSED" in r.getMessage()
+               for r in caplog.records)
+
+    relay.rebind("sh-NEXT")                      # the team moves to a new session
+    relay.record([_finding("f-next")])
+    assert await relay.flush() == (1, 0)
+
+    # f-closed is on NOBODY's wire after the 409: not re-attempted against
+    # sh-CLOSED, and above all not smuggled into sh-NEXT.
+    assert urls_hit == ["http://svc/v1/sessions/sh-CLOSED/findings",
+                        "http://svc/v1/sessions/sh-NEXT/findings",
+                        "http://svc/v1/sessions/sh-NEXT/members"]
+    assert (tmp_path / "dropped.jsonl").read_text().split() == ["f-closed"]
+
+
+async def test_a_session_already_known_ended_is_never_even_attempted(tmp_path, caplog):
+    """The seeded half of the same rule. A session can end while this process
+    is down — nobody here ever sees the 409 — and the retained `ended.json`
+    (cli.main passes it in) is what stops the backlog being re-POSTed at a
+    corpse on every tick forever."""
+    urls_hit: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        urls_hit.append(str(request.url))
+        return httpx.Response(200, json={"accepted": 1, "memory_version": 1})
+
+    relay = Relay(tmp_path, "http://svc", "sh-CLOSED",
+                  transport=httpx.MockTransport(handler),
+                  ended_sessions={"sh-CLOSED"})
+    relay.record([_finding("f-closed")])
+
+    with caplog.at_level(logging.WARNING):
+        assert await relay.flush() == (0, 0)
+
+    assert urls_hit == []                        # no request at all, not even one
+    assert (tmp_path / "dropped.jsonl").read_text().split() == ["f-closed"]
+    # And an operator resync must not re-create it either: `retained_count`
+    # excludes it, so cmd_resync's "pushed N of M" cannot read as a failure.
+    assert relay.retained_count() == 0
+    assert await relay.resync_sessions() == {}
+    assert urls_hit == []
+
+
+async def test_an_unrelated_409_is_terminal_but_does_not_mark_the_session_ended(tmp_path):
+    """`is_session_ended` reads the BODY as well as the status, and this is
+    why: 409 is a generic conflict, the local reaction to the session_ended
+    one is destructive (drop the backlog, refuse every future push, block
+    resync), and anything between this process and the service — a proxy, a
+    route added later — can emit a 409 of its own. It stays an ordinary
+    terminal 4xx: dropped, but the session is still alive."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(409, json={"error": "someone else is writing"})
+
+    relay = Relay(tmp_path, "http://svc", "sh-1", transport=httpx.MockTransport(handler))
+    relay.record([_finding("f-1")])
+
+    assert await relay.flush() == (0, 0)
+    assert relay.ended_session_ids() == frozenset()
+    assert relay.retained_count() == 1           # still deliverable in principle
+
+
+async def test_a_409_whose_body_is_not_json_at_all_does_not_escape_as_an_exception(tmp_path):
+    """The other half of `is_session_ended`'s guard, and the half nothing
+    covered: every unrelated-409 test sends a JSON body.
+
+    VERIFIED BY MUTATION 2026-08-06 — removing the `try/except ValueError`
+    around `response.json()` in ended.py left all 103 orchestrator tests
+    passing, despite that module's docstring calling this case out by name ("A
+    409 whose body is not JSON at all is something other than the service's
+    liveness gate"). An intermediary answering `409` with an HTML error page is
+    the realistic shape, and `response.json()` then raises ValueError from
+    INSIDE `Relay._post`'s `except httpx.HTTPStatusError` handler, which
+    propagates out of `flush()` — and `app.py`'s `await relay.flush()` on the
+    producer endpoint is unwrapped, so the worker's egress gets a 500 instead
+    of the documented fail-open queue.
+
+    Same outcome as the JSON-bodied unrelated 409 above: ordinary terminal 4xx,
+    dropped, session still alive, nothing raised."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(409, text="<html><body>409 Conflict</body></html>")
+
+    relay = Relay(tmp_path, "http://svc", "sh-1", transport=httpx.MockTransport(handler))
+    relay.record([_finding("f-1")])
+
+    assert await relay.flush() == (0, 0)
+    assert relay.ended_session_ids() == frozenset()
+    assert relay.retained_count() == 1
+
+
 async def test_a_5xx_is_still_retried(tmp_path):
     calls = []
     def handler(request: httpx.Request) -> httpx.Response:

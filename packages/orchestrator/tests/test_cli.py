@@ -13,6 +13,7 @@ everything else (argument parsing, Relay/binding wiring, exit code) is real.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 
 import time
 
@@ -224,6 +225,108 @@ def test_serve_wires_register_tools_unconditionally_with_a_live_resolver(
     assert register_tools_calls[1]["resolve_binding"]().shared_id == "sh-even-later"
 
 
+def test_serve_wires_the_lifecycle_tools_state_dir_cwd_and_contributor(
+    monkeypatch, tmp_path
+) -> None:
+    """The three kwargs the lifecycle tools cannot work without, asserted where
+    they are actually composed.
+
+    The test above already captures the whole kwargs dict and asserted only on
+    `resolve_binding`, so the rest was free to rot: VERIFIED BY MUTATION
+    2026-08-06 — changing cli.main's call to `state_dir=None, cwd=None,
+    contributor=None` left all 103 orchestrator tests passing. In the real
+    process that makes every lifecycle tool answer `_NO_STATE_DIR` ("This
+    orchestrator was started without a state directory") or "No contributor
+    identity is configured" on every call: the entire feature is gone and
+    nothing goes red. test_lifecycle_tools.py cannot see it — `_wire` there
+    calls `register_tools` directly and never goes through `cli.main`.
+    """
+    monkeypatch.setattr(cli.uvicorn, "run", lambda app, **kw: None)
+    calls: list[dict] = []
+    monkeypatch.setattr(cli, "register_tools", lambda server, **kw: calls.append(kw))
+
+    cli.main(["--state-dir", str(tmp_path), "--contributor", "sid"])
+
+    assert calls[0]["state_dir"] == tmp_path
+    # The process's cwd, which is what transcript detection is scoped to when a
+    # caller does not name its own agent_session_id.
+    assert calls[0]["cwd"] == Path.cwd()
+    assert calls[0]["contributor"] == "sid"
+
+
+def test_the_contributor_default_is_the_env_var_then_the_os_login_name(
+    monkeypatch, tmp_path
+) -> None:
+    """`--contributor` unset falls back to SYNAPSE_CONTRIBUTOR, then to the OS
+    login name — and NEITHER is resolved while argparse is building the parser.
+
+    `getpass.getuser()` raises on a host with no passwd entry for the uid and
+    no USER/LOGNAME/LNAME/USERNAME set (a plain `docker run -u 1001 ...`).
+    Evaluated as an argparse default it ran for EVERY invocation, including
+    `synapse-orchestrator resync`, which never reads this value — so that
+    command died with an unhandled OSError before parsing finished, where
+    before it ran and flushed the backlog. Third case below.
+    """
+    monkeypatch.setattr(cli.uvicorn, "run", lambda app, **kw: None)
+    calls: list[dict] = []
+    monkeypatch.setattr(cli, "register_tools", lambda server, **kw: calls.append(kw))
+
+    monkeypatch.setenv("SYNAPSE_CONTRIBUTOR", "from-env")
+    cli.main(["--state-dir", str(tmp_path)])
+    assert calls[-1]["contributor"] == "from-env"
+
+    monkeypatch.delenv("SYNAPSE_CONTRIBUTOR")
+    monkeypatch.setattr(cli.getpass, "getuser", lambda: "from-login")
+    cli.main(["--state-dir", str(tmp_path)])
+    assert calls[-1]["contributor"] == "from-login"
+
+    # A host with no answer at all: None, not a traceback. create_session and
+    # join_session already return usable prose for an unset identity.
+    def no_such_user():
+        raise OSError("no login name")
+    monkeypatch.setattr(cli.getpass, "getuser", no_such_user)
+    cli.main(["--state-dir", str(tmp_path)])
+    assert calls[-1]["contributor"] is None
+    # ...and a subcommand that never wants an identity still runs there.
+    assert cli.main(["--state-dir", str(tmp_path), "resync"]) == 0
+
+
+def test_serve_seeds_the_relay_with_the_retained_ended_set_and_writes_back(
+    monkeypatch, tmp_path
+) -> None:
+    """The serve path's half of the resync stopgap, which nothing covered.
+
+    `test_resync_does_not_resurrect_a_session_the_team_ended` exercises
+    `cmd_resync` only. VERIFIED BY MUTATION 2026-08-06: deleting both kwargs
+    from `cli.main`'s `Relay(...)` construction left all 103 orchestrator tests
+    passing. What that costs: a session ended while the orchestrator was down
+    comes back with an EMPTY `_ended` set, so the retained backlog is re-POSTed
+    at a closed session on every flush tick forever — precisely what relay.py's
+    termination note ("Leaving them queued would re-POST a dead session on
+    every tick forever") says must not happen. And the `on_session_ended` half
+    stops persisting, so a closure this long-running process observes itself
+    never survives into the next `resync`.
+    """
+    monkeypatch.setattr(cli.uvicorn, "run", lambda app, **kw: None)
+    (tmp_path / "ended.json").write_text('["sh-ended"]')
+
+    kwargs: list[dict] = []
+    real_relay = cli.Relay
+
+    def capture(*args, **kw):
+        kwargs.append(kw)
+        return real_relay(*args, **kw)
+
+    monkeypatch.setattr(cli, "Relay", capture)
+    cli.main(["--state-dir", str(tmp_path)])
+
+    assert kwargs[0]["ended_sessions"] == {"sh-ended"}
+    # Not merely "a callable was passed": it must WRITE THROUGH to the same
+    # ended.json the next resync reads, which is the whole point of the hook.
+    kwargs[0]["on_session_ended"]("sh-closed-while-up")
+    assert cli.ended_session_ids(tmp_path) == {"sh-ended", "sh-closed-while-up"}
+
+
 def test_serve_falls_back_to_unbound_when_the_bindings_dir_has_no_readable_binding(
     monkeypatch, tmp_path, capsys
 ) -> None:
@@ -420,6 +523,125 @@ def test_resync_pushes_a_previously_recorded_session_even_when_now_unbound(
     out = capsys.readouterr().out
     assert "re-pushed 1 finding(s)" in out
     assert "current session: 'unbound'" in out
+
+
+def test_resync_does_not_resurrect_a_session_the_team_ended(tmp_path, capsys) -> None:
+    """The lifecycle spec's "Durability caveat", pinned.
+
+    `synapse_service.store` is in-memory: a service restart un-ends an ended
+    session, and Step 1 of resync is create-or-return, so without this the
+    recovery path would re-create sh-ended and push its whole retained log
+    back into a session the team deliberately closed — the single most
+    destructive thing in the recovery path, and completely silent.
+
+    The stopgap is the locally retained `ended.json` (synapse_orchestrator.
+    ended), and it stands in for service-side log persistence (STATE.md's
+    first post-demo entry). A live session in the SAME backlog still resyncs
+    normally — the skip is per session, not a global bail-out."""
+    import json as _json
+
+    from synapse_contracts import Attribution, Finding
+    relay_dir = tmp_path / "relay"
+    relay_dir.mkdir(parents=True)
+
+    def _envelope(shared_id, fid):
+        finding = Finding(id=fid, type="learning", text="insight",
+                          attributions=[Attribution(contributor="aditya", agent_session="as-1",
+                                                    agent="claude-code")],
+                          ts=datetime(2026, 8, 4, tzinfo=timezone.utc))
+        return _json.dumps({"shared_id": shared_id,
+                            "finding": _json.loads(finding.model_dump_json())})
+
+    (relay_dir / "findings.jsonl").write_text(
+        _envelope("sh-ended", "f-dead") + "\n" + _envelope("sh-live", "f-alive") + "\n")
+    (tmp_path / "ended.json").write_text('["sh-ended"]')
+
+    hit = []
+    def up(request: httpx.Request) -> httpx.Response:
+        hit.append(str(request.url))
+        if request.url.path.endswith("/synthesize"):
+            return httpx.Response(200, json={"memory_version": 1, "synthesized": True})
+        return httpx.Response(200, json={"accepted": 1, "memory_version": 1})
+
+    exit_code = cli.main(["--state-dir", str(tmp_path), "resync"],
+                         transport=httpx.MockTransport(up))
+
+    assert exit_code == 0
+    # Not one request mentions the ended session -- not the create-or-return
+    # that would bring it back, not the push, not the synthesize.
+    assert not any("sh-ended" in url for url in hit)
+    assert hit == ["http://127.0.0.1:8899/v1/sessions",           # recreate: sh-live only
+                   "http://127.0.0.1:8899/v1/sessions/sh-live/findings",
+                   "http://127.0.0.1:8899/v1/sessions/sh-live/members",
+                   "http://127.0.0.1:8899/v1/sessions/sh-live/synthesize"]
+    out = capsys.readouterr().out
+    # Exit 0, not the "FAILED — 1 of 2 re-pushed" loud branch: refusing to
+    # resurrect an ended session is the correct outcome, not a shortfall, which
+    # is why `retained_count()` excludes it too.
+    assert "FAILED" not in out
+    assert "re-pushed 1 finding(s)" in out
+    assert "skipped 1 ended session(s): ['sh-ended']" in out
+
+
+def test_resync_learning_a_session_ended_mid_run_is_not_a_failure(tmp_path, capsys) -> None:
+    """The FIRST resync that observes a closure, which is the case the sibling
+    test above cannot reach: it pre-seeds `ended.json`, so it only ever
+    exercises the already-known half.
+
+    Here `ended.json` does not exist — the session was ended by a teammate, or
+    by the service directly, or while this orchestrator was down. `cmd_resync`
+    computed `total = relay.retained_count()` BEFORE any request, so sh-ended's
+    findings were still counted; `resync_sessions()` then POSTed, got
+    `409 {"error": "session_ended"}`, correctly dropped them and correctly did
+    not count them as pushed — and the comparison fired
+
+        resync: FAILED — 1 of 2 finding(s) re-pushed … is the service
+        reachable, and is a Shared Session joined?
+
+    with exit code 1, for a resync that did exactly the right thing, pointing
+    the operator at two diagnoses that are both false. Running the identical
+    command a second time then succeeded, because by then `ended.json` named
+    it. Verified by execution. `retained_count`'s own docstring says this
+    message is precisely what excluding ended sessions is meant to avoid, and
+    an exit 1 here fails any script or CI step gating on resync's status.
+    """
+    import json as _json
+
+    from synapse_contracts import Attribution, Finding
+    relay_dir = tmp_path / "relay"
+    relay_dir.mkdir(parents=True)
+
+    def _envelope(shared_id, fid):
+        finding = Finding(id=fid, type="learning", text="insight",
+                          attributions=[Attribution(contributor="aditya", agent_session="as-1",
+                                                    agent="claude-code")],
+                          ts=datetime(2026, 8, 4, tzinfo=timezone.utc))
+        return _json.dumps({"shared_id": shared_id,
+                            "finding": _json.loads(finding.model_dump_json())})
+
+    (relay_dir / "findings.jsonl").write_text(
+        _envelope("sh-ended", "f-dead") + "\n" + _envelope("sh-live", "f-alive") + "\n")
+    assert not (tmp_path / "ended.json").exists()      # nothing knows yet
+
+    def service(request: httpx.Request) -> httpx.Response:
+        if "sh-ended" in str(request.url) and request.url.path.endswith("/findings"):
+            return httpx.Response(409, json={"error": "session_ended"})
+        if request.url.path.endswith("/synthesize"):
+            return httpx.Response(200, json={"memory_version": 1, "synthesized": True})
+        return httpx.Response(200, json={"accepted": 1, "memory_version": 1})
+
+    exit_code = cli.main(["--state-dir", str(tmp_path), "resync"],
+                         transport=httpx.MockTransport(service))
+
+    out = capsys.readouterr().out
+    assert exit_code == 0, out
+    assert "FAILED" not in out
+    assert "re-pushed 1 finding(s)" in out
+    # Reported through the same "skipped" clause the already-known case uses,
+    # so the two runs read identically instead of one of them screaming.
+    assert "skipped 1 ended session(s): ['sh-ended']" in out
+    # And it is remembered, so the SECOND resync never even attempts it.
+    assert cli.ended_session_ids(tmp_path) == {"sh-ended"}
 
 
 def test_resync_recreates_and_synthesizes_each_session_the_log_names(tmp_path, capsys) -> None:

@@ -137,6 +137,22 @@ def build_payloads() -> tuple[int, int, int]:
 QUERIES = ["what do we know about timing", "why does the decode fail",
            "what should I avoid touching"]
 
+# The seat that does the asking in beats 3-7. TWO ids, because since 2026-08-06
+# the wire carries both: `contributor` is the identity the service keys
+# suppression (retrieval.visible_to) and the watermark (store.last_seen) on, and
+# `agent_session` is the conversation it arrived from, now only ever a fallback
+# for an un-upgraded client. The real orchestrator sends both on every query and
+# every watermark (server.py), so this is the shape the demo actually puts on
+# the wire.
+#
+# ⟨CORRECTED 2026-08-06⟩ Every request below used to send `agent_session` alone.
+# The re-key is additive, so they all still passed -- and that was the problem:
+# they were exercising api._asking_contributor's FALLBACK arm on every beat,
+# leaving the primary path with no coverage at all. A service that had dropped
+# `contributor` handling outright would have rehearsed green.
+OBSERVER = "observer"
+OBSERVER_SESSION = "as-observer"
+
 
 def boot_service(live: bool, phase: str = "main") -> subprocess.Popen:
     env = dict(os.environ)
@@ -198,20 +214,35 @@ def main() -> int:
                           json.loads((OUT / "demo-push1.json").read_text()))
         run_beat("beat 2: push 1", code == 200 and body.get("accepted") == 10, str(body))
 
+        # THE ONE DELIBERATE LEGACY-SHAPED REQUEST in this file: `agent_session`
+        # and no `contributor`, which is exactly what an un-upgraded orchestrator
+        # on a teammate's laptop still sends. The 2026-08-06 re-key is additive on
+        # the wire so that the service and the orchestrator can be deployed in
+        # either order -- and "additive" is a claim about a request nobody in this
+        # repo sends any more, so one has to be sent here on purpose or nothing
+        # exercises it. Every other beat sends `contributor`, the primary path.
+        #
+        # Pinned on the WATERMARK rather than on a query deliberately: the
+        # watermark is a pure read, while /query calls store.mark_seen, so pinning
+        # it there would leave a second watermark filed under a second identity for
+        # the same asker -- an artefact of the pin, not of the system.
         code, wm = http("GET", f"{SVC}/v1/sessions/{sid}/watermark?agent_session=as-observer")
-        run_beat("beat 3: arrival watermark", code == 200 and "by_type" in wm, str(wm)[:120])
+        run_beat("beat 3: arrival watermark (legacy agent_session-only shape, on purpose)",
+                 code == 200 and "by_type" in wm, str(wm)[:120])
 
         code, body = http("POST", f"{SVC}/v1/sessions/{sid}/findings",
                           json.loads((OUT / "demo-push2.json").read_text()))
         run_beat("beat 4a: push 2", code == 200 and body.get("accepted") == 14, str(body))
-        code, wm = http("GET", f"{SVC}/v1/sessions/{sid}/watermark?agent_session=as-observer")
+        code, wm = http("GET", f"{SVC}/v1/sessions/{sid}/watermark"
+                               f"?contributor={OBSERVER}&agent_session={OBSERVER_SESSION}")
         topics = wm.get("topics", [])
         run_beat("beat 4b: topics in watermark", bool(topics),
                  ", ".join(t.get("label", "?") for t in topics[:4]) or "none")
         pre_answers = []
         for q in QUERIES:
             code, body = http("POST", f"{SVC}/v1/sessions/{sid}/query",
-                              {"query": q, "agent_session": "as-observer"})
+                              {"query": q, "contributor": OBSERVER,
+                               "agent_session": OBSERVER_SESSION})
             pre_answers.append((q, body.get("findings", [])))
             run_beat(f"beat 4c: query '{q[:28]}…'", code == 200 and "findings" in body,
                      f"{len(body.get('findings', []))} findings")
@@ -241,7 +272,8 @@ def main() -> int:
 
         for q in QUERIES:
             code, body = http("POST", f"{SVC}/v1/sessions/{sid}/query",
-                              {"query": q, "agent_session": "as-observer"})
+                              {"query": q, "contributor": OBSERVER,
+                               "agent_session": OBSERVER_SESSION})
             run_beat(f"beat 6: re-query '{q[:28]}…'", code == 200 and "findings" in body,
                      f"{len(body.get('findings', []))} findings")
 
@@ -289,11 +321,159 @@ def main() -> int:
                  (resync.stdout or resync.stderr).strip()[:140])
         code, body = http("POST", f"{SVC}/v1/sessions/{sid}/query",
                           {"query": "what must run before the retry loop?",
-                           "agent_session": "as-observer"})
+                           "contributor": OBSERVER, "agent_session": OBSERVER_SESSION})
         recovered = any(f.get("id") == "f-demo-recovery-01" for f in body.get("findings", []))
         run_beat("beat 7d: recovery finding retrievable after restart",
                  code == 200 and (recovered or args.live),
                  "recovered" if recovered else "not ranked (live ranking is the 8B's call)" if args.live else str(body)[:140])
+
+        # ── beat 8 — the lifecycle arc: join, leave, re-join, end ────────────
+        # Added 2026-08-06 with the lifecycle routes themselves. Everything
+        # below runs against the SAME service + orchestrator subprocesses and the
+        # same real localhost sockets as beats 0-7 -- packages/service/tests
+        # already covers these routes through an in-process ASGI transport, and
+        # that is a different claim from "the routes answer over a socket, in the
+        # order a human drives them, on the session this rehearsal has been
+        # filling for the last seven beats".
+        #
+        # It runs on the POST-RESTART service on purpose rather than earlier:
+        # ending a session is terminal, so any beat placed after it would be
+        # asserting against a closed session, and the recovery arc is the one
+        # part of the demo that must still work when the memory has just been
+        # rebuilt from a retained log.
+        LEAVER, TEAMMATE = "aditya", "akhil"
+        LEAVER_SESSION, LEAVER_SESSION_2 = "as-demo-aditya", "as-demo-aditya-window-2"
+
+        code, body = http("POST", f"{SVC}/v1/sessions/{sid}/members",
+                          {"contributor": LEAVER, "agent_session": LEAVER_SESSION})
+        joined_one = code == 200 and LEAVER in body.get("members", [])
+        code, body = http("POST", f"{SVC}/v1/sessions/{sid}/members",
+                          {"contributor": TEAMMATE, "agent_session": "as-demo-akhil"})
+        run_beat("beat 8a: two contributors join",
+                 joined_one and code == 200 and TEAMMATE in body.get("members", []),
+                 str(body.get("members")))
+
+        # aditya READS, which is the only thing that moves a watermark:
+        # store.mark_seen is on the /query path and nowhere else. Without this
+        # the re-join beat below could not tell "kept my place" apart from
+        # "never had one", because both read new_since == version.
+        http("POST", f"{SVC}/v1/sessions/{sid}/query",
+             {"query": "what must run before the retry loop?",
+              "contributor": LEAVER, "agent_session": LEAVER_SESSION})
+        code, wm = http("GET", f"{SVC}/v1/sessions/{sid}/watermark"
+                               f"?contributor={LEAVER}&agent_session={LEAVER_SESSION}")
+        caught_up, version = wm.get("new_since"), wm.get("version")
+        run_beat("beat 8b: reading marks the watermark",
+                 code == 200 and caught_up == 0 and (version or 0) > 0,
+                 f"new_since {caught_up} at version {version}")
+
+        code, body = http("DELETE", f"{SVC}/v1/sessions/{sid}/members/{LEAVER}")
+        members = body.get("members", [])
+        run_beat("beat 8c: leave detaches one member and only that member",
+                 code == 200 and LEAVER not in members and TEAMMATE in members,
+                 str(members))
+
+        # THE beat this whole arc exists for, and the reason the identity re-key
+        # was worth doing. Re-join as the SAME Contributor from a DIFFERENT Agent
+        # Session id -- which is not an exotic case, it is closing one Claude Code
+        # window and opening another, because an Agent Session id IS the
+        # transcript filename stem (worker/discovery.py:112).
+        #
+        # Keyed on the Agent Session, as it was before 2026-08-06, the new stem is
+        # an unknown key: last_seen falls back to 0 and new_since jumps to the
+        # whole memory version. Nothing raises, no status code changes, and the
+        # only symptom is a briefing telling someone who read everything five
+        # minutes ago that all of it is new to them. A regression here is
+        # SILENT, which is exactly why it gets an assertion of its own rather
+        # than riding along inside the join beat.
+        code, body = http("POST", f"{SVC}/v1/sessions/{sid}/members",
+                          {"contributor": LEAVER, "agent_session": LEAVER_SESSION_2})
+        rejoined = code == 200 and LEAVER in body.get("members", [])
+        code, wm = http("GET", f"{SVC}/v1/sessions/{sid}/watermark"
+                               f"?contributor={LEAVER}&agent_session={LEAVER_SESSION_2}")
+        after, version_after = wm.get("new_since"), wm.get("version")
+        run_beat("beat 8d: re-joining from a NEW agent session keeps your place",
+                 rejoined and code == 200 and after == caught_up
+                 and after != version_after and (version_after or 0) > 0,
+                 f"new_since {caught_up} -> {after} at version {version_after} "
+                 f"(a reset to the Agent Session key would read {version_after})")
+
+        # WHO the creator is here is not who created it in beat 1. cmd_resync's
+        # recreate pass (cli.py step 1) POSTs the retained shared_id with
+        # created_by="resync", and against the fresh store of the restarted
+        # service that is a CREATE, not a create-or-return -- so the session this
+        # arc is about to end is owned by "resync", not by "siddsing".
+        #
+        # Read it back rather than hardcoding either name: a wrong guess would
+        # make the 403 below pass for the WRONG REASON (every non-creator is
+        # rejected, including the one the demo thinks is the creator), which is a
+        # green beat over a broken check. The read is `POST /v1/sessions` with a
+        # known id, i.e. create-or-return, so it also pins that recreating an
+        # existing session hands back the original created_by unchanged.
+        code, session = http("POST", f"{SVC}/v1/sessions",
+                             {"purpose": "(rehearsal: who owns this session?)",
+                              "created_by": "not-the-creator", "shared_id": sid})
+        creator = session.get("created_by", "")
+        run_beat("beat 8e: create-or-return names the original creator",
+                 code == 200 and bool(creator) and creator != "not-the-creator", creator)
+
+        # BEFORE the successful end, deliberately: once the session is closed the
+        # creator-only check would still fire, but it would be indistinguishable
+        # from a session that simply refuses everything, and the layer being
+        # asserted here is the service-side gate (spec's layer 2 of three) -- the
+        # one an agent cannot talk its way past.
+        code, body = http("POST", f"{SVC}/v1/sessions/{sid}/end", {"ended_by": TEAMMATE})
+        run_beat("beat 8f: a non-creator cannot end the session",
+                 code == 403 and creator in body.get("error", ""), f"{code} {body}")
+
+        code, body = http("POST", f"{SVC}/v1/sessions/{sid}/end", {"ended_by": creator})
+        run_beat("beat 8g: the creator ends the session",
+                 code == 200 and body.get("status") == "ended"
+                 and body.get("ended_by") == creator, str(body))
+
+        # ALL FOUR routes that serve the memory or extend it, in one beat,
+        # because the gate is one helper (api._unavailable) and the failure mode
+        # it exists to prevent is a route that quietly does not go through it --
+        # which only shows up if every route is asked. A write accepted into a
+        # session the team has closed returns 200 and disappears into a log
+        # nothing will ever read again.
+        closed = {}
+        code, body = http("POST", f"{SVC}/v1/sessions/{sid}/query",
+                          {"query": "is anyone still there", "contributor": OBSERVER,
+                           "agent_session": OBSERVER_SESSION})
+        closed["query"] = (code, body)
+        code, body = http("POST", f"{SVC}/v1/sessions/{sid}/findings",
+                          json.loads((OUT / "demo-push3.json").read_text()))
+        closed["push_findings"] = (code, body)
+        code, body = http("POST", f"{SVC}/v1/sessions/{sid}/synthesize", {})
+        closed["synthesize"] = (code, body)
+        code, body = http("GET", f"{SVC}/v1/sessions/{sid}/watermark"
+                                 f"?contributor={OBSERVER}&agent_session={OBSERVER_SESSION}")
+        closed["watermark"] = (code, body)
+        run_beat("beat 8h: query/push/synthesize/watermark all 409 session_ended",
+                 all(c == 409 and b.get("error") == "session_ended"
+                     for c, b in closed.values()),
+                 "; ".join(f"{route} {c} {b.get('error')}"
+                           for route, (c, b) in closed.items()))
+
+        # The durability caveat, asserted rather than trusted. `cmd_resync`'s
+        # step 1 is create-or-return against every session id in the retained
+        # log, and that call is made unconditionally -- so "resync does not
+        # bring back a session the team closed" is a property of
+        # store.create_session returning an existing session UNCHANGED (leaving
+        # the SessionEnded entry in the log, from which get_context folds the
+        # status) and of the orchestrator's locally retained ended.json. Both are
+        # exercised here; what is asserted is the observable they exist for.
+        resurrect = subprocess.run(
+            ["uv", "run", "synapse-orchestrator", "resync",
+             "--service-url", SVC, "--state-dir", ".synapse-rehearsal"],
+            cwd=ROOT, capture_output=True, text=True, timeout=180)
+        code, body = http("GET", f"{SVC}/v1/sessions/{sid}/watermark"
+                                 f"?contributor={OBSERVER}&agent_session={OBSERVER_SESSION}")
+        run_beat("beat 8i: resync does not resurrect an ended session",
+                 code == 409 and body.get("error") == "session_ended",
+                 f"resync exit {resurrect.returncode}: "
+                 f"{(resurrect.stdout or resurrect.stderr).strip()[:110]}")
 
     finally:
         for p in procs:

@@ -704,6 +704,7 @@ dependencies = [
     { name = "synapse-contracts" },
     { name = "synapse-distiller" },
     { name = "synapse-providers" },
+    { name = "synapse-worker" },
 ]
 
 [package.metadata]
@@ -713,6 +714,7 @@ requires-dist = [
     { name = "synapse-contracts", editable = "packages/contracts" },
     { name = "synapse-distiller", editable = "packages/distiller" },
     { name = "synapse-providers", editable = "packages/providers" },
+    { name = "synapse-worker", editable = "packages/worker" },
 ]
 
 [[package]]

@@ -13,6 +13,13 @@ dependencies = [
     "synapse-contracts",
     "synapse-distiller",
     "synapse-providers",
+    # 2026-08-06, session lifecycle: the MCP lifecycle tools bind through
+    # `synapse_worker.discovery` (join_session/binding_path_for_agent/the
+    # transcript finders) rather than growing a second writer for the binding
+    # format — see server.py's import comment. The edge is one-way: the worker
+    # must never import the orchestrator, since it may not open its own
+    # connection to the service.
+    "synapse-worker",
     "httpx>=0.27",
 ]
 
@@ -20,6 +27,7 @@ dependencies = [
 synapse-contracts = { workspace = true }
 synapse-distiller = { workspace = true }
 synapse-providers = { workspace = true }
+synapse-worker = { workspace = true }
 
 [project.scripts]
 synapse-orchestrator = "synapse_orchestrator.cli:main"

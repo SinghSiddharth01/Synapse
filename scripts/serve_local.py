@@ -357,6 +357,23 @@ def main(argv: list[str] | None = None) -> int:
     orchestrator = spawn("orchestrator", [
         str(BIN / "synapse-orchestrator"), "--port", "8787",
         "--service-url", service_url, "--state-dir", str(STATE),
+        # The SAME identity this script just wrote into the binding above, and
+        # the same one it registered with the service. Omitted (2026-08-06),
+        # the orchestrator fell back to `getpass.getuser()`, which agrees with
+        # `--contributor` only by luck: docs/JOIN.md tells a teammate to run
+        # `--contributor akhil` on a box whose $USER is `akhilm`. While a
+        # binding exists nothing is wrong -- `server._identity()` reads
+        # `binding.contributor`. The moment there is no binding (after
+        # `leave_session`, or a first `create_session` from an unbound state)
+        # the orchestrator creates and re-binds under the OS name instead, and
+        # from then on `query` sends a contributor the service has never seen:
+        # `last_seen` is 0 so the briefing reports the whole Shared Memory as
+        # new (the exact regression spec Testing item 4 exists for),
+        # self-suppression stops recognising this person's own findings (item
+        # 5), and `end_session` on a session created under the other name draws
+        # a 403 naming a stranger. None of that errors -- silence is the
+        # failure mode the identity re-key was built to remove.
+        "--contributor", args.contributor,
     ], orchestrator_env)
     if not wait_for(f"{ORCHESTRATOR_URL}/mcp", orchestrator, "orchestrator"):
         raise SystemExit("the orchestrator did not come up")

@@ -75,6 +75,15 @@ scripts/                demo_local · local_model_server · rehearse_demo · run
 
 ## What remains
 
+- **⟨2026-08-06⟩ Session lifecycle landed — create · join · leave · end, on MCP.** Spec: [`docs/superpowers/specs/2026-08-06-session-lifecycle-design.md`](./superpowers/specs/2026-08-06-session-lifecycle-design.md). Four orchestrator tools, not worker CLI commands — the worker may not open its own connection to the service (`join_session`'s own docstring), so lifecycle belongs on the single egress that already hosts MCP. **This supersedes Plan D.3's tool list deliberately.** The record is worth keeping straight: the earlier `/mcp__synapse__start` prompt *worked and was verified live*, and was deleted for plan-conformance, not on merits — trap #6 is a lesson about checking the plan first, not evidence that MCP lifecycle is unsound.
+
+  Three things fell out of it that are bigger than the four verbs:
+  - **Suppression and the watermark re-keyed from Agent Session to Contributor.** `agent_session_id` is the transcript filename, so a new conversation was a new identity: your own findings came back to you as team memory and `last_seen` reset to `0`, silently, with no error. `CONTEXT.md` is updated; the old rule's justification and what the new one costs are recorded there.
+  - **Binding is now exact, not guessed.** `CLAUDE_CODE_SESSION_ID` *is* the transcript stem (verified 2026-08-06), so `create_session`/`join_session` take an explicit `agent_session_id` and resolve by match across **all** project slugs. This matters more than it sounds: a session whose cwd is the home directory writes to `-Users-siddharthsingh`, where cwd-based detection from the repo finds nothing. Where the id is omitted, detection now **refuses on ambiguity** (two transcripts within 5s) instead of picking the most recent.
+  - **Terminate is a log event, not a flag** — `log.SessionEnded`, folded by `fold.View.ended_by` (first end wins), replayed by `rebuild()`, projected onto `SessionContext.status` in the store only, per `adr/0004` Option A.
+
+  **Its durability depends on the persistence item below, and does not work without it.** `resync` would resurrect an ended session, so `orchestrator/ended.py` retains ended ids locally as an explicitly-labelled STOPGAP. Delete it when service-side log persistence lands — that entry is the next bullet but one, and this is the second thing now waiting on it.
+
 - **NPU bring-up is a runbook now:** [`docs/NPU-RUNBOOK.md`](./NPU-RUNBOOK.md) — Aditya opens Claude Code on the X Elite and says: *execute `docs/plans/exec/2026-08-05-e8-npu-testing.md`* — the checkbox plan with gates, record-keeping, and the report template; the runbook carries the how-to detail. Gate 1 is the 717-test suite (post-Aug-4 code has never run on Windows); then the new 8-fixture corpus on the NPU, the full on-device live loop with both dashboards, and the two numbers only that box can produce: a measured `prefill_toks_per_sec` and **power**.
 
 

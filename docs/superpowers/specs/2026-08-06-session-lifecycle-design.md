@@ -149,6 +149,15 @@ destroy the team's memory:
 
 1. **Harness permission prompt** — MCP tool calls prompt unless allowlisted. A
    human approves. Free, and not something a model can satisfy by retrying.
+
+   ⟨AMENDED 2026-08-06, post-implementation audit⟩ **This layer is operational,
+   not enforced, and nothing in the repo represents it.** It holds only because
+   `end_session` is not allowlisted, which is true by default and by nobody's
+   decision. Anyone who adds a broad `mcp__synapse__*` entry to their
+   `.claude/settings.json` silently removes it, and no test would fail. Layers 2
+   and 3 are the ones that actually hold in code. Treat this as a documented
+   assumption about how the tool is deployed, not as a control — and if it ever
+   needs to be a real control, it has to move server-side.
 2. **Creator-only** — enforced in the service, not the client.
 3. **Refuse when others are still members** — `end_session` declines and names
    them; closing a session with live teammates needs a deliberate override.

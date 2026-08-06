@@ -10,7 +10,7 @@ route; see its docstring.
 from __future__ import annotations
 
 from collections import Counter
-from typing import Mapping
+from collections.abc import Mapping
 
 from pydantic import ValidationError
 from starlette.applications import Starlette
@@ -69,6 +69,29 @@ def _asking_contributor(source: Mapping[str, str]) -> str:
     other anonymous asker.
     """
     return source.get("contributor") or source.get("agent_session") or ""
+
+
+def _legacy_agent_session(source: Mapping[str, str]) -> str | None:
+    """The asker's Agent Session id, but ONLY when this is an un-upgraded
+    client: one that sent `agent_session` and no `contributor` at all.
+
+    `_asking_contributor` above makes the wire additive; this makes the
+    BEHAVIOUR additive, and without it the second half was silently missing.
+    An old client's `agent_session` value became its identity string and was
+    then compared against `Attribution.contributor`, a field it never matches,
+    so invariant 3 stopped firing for it entirely: its own findings came back
+    as team knowledge, credited to itself. Verified by execution 2026-08-06 --
+    an old-shaped request to a session holding one of its own findings and one
+    teammate's got BOTH back, where the pre-re-key service returned only the
+    teammate's.
+
+    None the moment a `contributor` is present, so an upgraded client is
+    unaffected and the re-key is what runs for it. Transitional by
+    construction: it disappears when the last un-upgraded orchestrator does.
+    """
+    if source.get("contributor"):
+        return None
+    return source.get("agent_session") or None
 
 
 def build_app(provider: ModelProvider, *, debug: bool = True) -> Starlette:
@@ -314,6 +337,7 @@ def build_app(provider: ModelProvider, *, debug: bool = True) -> Starlette:
         if (gate := _unavailable(sid)) is not None:
             return gate
         contributor = _asking_contributor(request.query_params)
+        legacy = _legacy_agent_session(request.query_params)
         ctx = store.get_context(sid)
 
         # Round-2 adjudication on watermark suppression, split deliberately
@@ -337,7 +361,8 @@ def build_app(provider: ModelProvider, *, debug: bool = True) -> Starlette:
         # content-scoped). E4's briefing composer renders both, and is
         # expected to phrase them as separate signals, not force them to
         # agree.
-        visible = visible_to(store.retrievable(sid), contributor)
+        visible = visible_to(store.retrievable(sid), contributor,
+                             asking_agent_session=legacy)
         by_type = Counter(f.type.value for f in visible)
 
         # A Conflict counts if at least one side is visible to this asker:
@@ -379,6 +404,7 @@ def build_app(provider: ModelProvider, *, debug: bool = True) -> Starlette:
         if (err := _missing(body, "query")) is not None:
             return err
         contributor = _asking_contributor(body)
+        legacy = _legacy_agent_session(body)
 
         # Invariant 3 at the lanes seam. `visible_to` stays the ONE definition
         # of the rule (retrieval.py); here it computes what must be EXCLUDED
@@ -390,7 +416,7 @@ def build_app(provider: ModelProvider, *, debug: bool = True) -> Starlette:
         # with no model and no prompt cost. What must be bounded is the
         # PROMPT, not the loop.
         visible = store.retrievable(sid)
-        allowed = visible_to(visible, contributor)
+        allowed = visible_to(visible, contributor, asking_agent_session=legacy)
 
         suppressed = frozenset(f.id for f in visible) - {f.id for f in allowed}
         if len(allowed) <= TOP_K:
@@ -436,6 +462,7 @@ def build_app(provider: ModelProvider, *, debug: bool = True) -> Starlette:
             candidates=candidates,
             query=body["query"],
             asking_contributor=contributor,
+            asking_agent_session=legacy,
         )
         store.mark_seen(sid, contributor)
         if feed is not None:

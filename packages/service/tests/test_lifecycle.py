@@ -1,0 +1,437 @@
+"""Session lifecycle at the service: end, leave, and the identity re-key.
+
+Executes the Testing section of
+docs/superpowers/specs/2026-08-06-session-lifecycle-design.md, items 1, 2, 4
+and 5 -- the four that are the service's to answer. Items 3, 6, 7 and 8 are
+binding/transcript/relay behaviour and belong to the orchestrator and worker
+suites.
+
+Same discipline as test_api.py: in-process ASGI, an injected httpx transport,
+a scripted FakeProvider, zero real sockets.
+"""
+import httpx
+from synapse_providers import FakeProvider
+
+from synapse_service.api import build_app
+
+MERGE_NOOP = {"working_memory": "wm-1", "merges": [], "trivial_ids": [], "conflicts": []}
+
+
+def _finding_json(fid: str, contributor: str = "aditya", agent_session: str = "as-1",
+                  text: str | None = None) -> dict:
+    return {"id": fid, "type": "learning", "text": text or f"insight {fid}",
+            "attributions": [{"contributor": contributor, "agent_session": agent_session,
+                              "agent": "claude-code"}],
+            "ts": "2026-08-04T12:00:00Z", "refs": [],
+            "provenance": "distilled", "status": "kept",
+            "merged_from": [], "merged_into": None}
+
+
+def _client(provider) -> httpx.AsyncClient:
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=build_app(provider)),
+                             base_url="http://svc")
+
+
+async def _session(client, *, created_by: str = "siddsing") -> str:
+    r = await client.post("/v1/sessions", json={"purpose": "fec decode",
+                                                "created_by": created_by})
+    return r.json()["shared_id"]
+
+
+# ── item 1: creator-only termination ────────────────────────────────────────
+
+async def test_end_by_a_non_creator_is_rejected_and_the_session_stays_live():
+    """Spec Testing item 1, negative half. Layer 2 of the three gates around
+    end_session, and the only one an agent cannot satisfy by retrying: the
+    harness prompt is human-side and the "others are still members" refusal is
+    client-side, so if this check is not in the SERVICE it is not a check.
+
+    The 403 names the creator rather than saying "forbidden" -- the caller is
+    an agent relaying this to a human who now knows who to ask.
+
+    Asserting the 403 alone would pass against an implementation that returned
+    403 AFTER closing the session, so the query at the end is what says the
+    memory is still there."""
+    async with _client(FakeProvider(scripts=[MERGE_NOOP, {"ranked": [0]}])) as client:
+        sid = await _session(client, created_by="siddsing")
+        await client.post(f"/v1/sessions/{sid}/findings",
+                          json={"findings": [_finding_json("f-1")]})
+
+        r = await client.post(f"/v1/sessions/{sid}/end", json={"ended_by": "akhil"})
+        assert r.status_code == 403
+        assert r.json() == {"error": "only siddsing can end this session"}
+
+        # ...and nothing was closed on the way out.
+        live = await client.post(f"/v1/sessions/{sid}/query",
+                                 json={"query": "what do we know",
+                                       "contributor": "akhil"})
+        assert live.status_code == 200
+        assert [f["id"] for f in live.json()["findings"]] == ["f-1"]
+
+
+async def test_end_by_the_creator_succeeds():
+    """Spec Testing item 1, positive half."""
+    async with _client(FakeProvider(scripts=[])) as client:
+        sid = await _session(client, created_by="siddsing")
+
+        r = await client.post(f"/v1/sessions/{sid}/end", json={"ended_by": "siddsing"})
+
+        assert r.status_code == 200
+        assert r.json() == {"shared_id": sid, "status": "ended", "ended_by": "siddsing"}
+
+
+async def test_end_without_ended_by_is_a_422_not_a_500():
+    """The contract `_missing` exists for, applied to the new route: E4's
+    Relay treats 5xx as retryable, so a client bug that raises here becomes an
+    infinite retry loop against a request that can never succeed. Includes the
+    NO-BODY case, which is the likely shape of the bug (an MCP tool POSTing
+    with no JSON at all) and which `await request.json()` raises on."""
+    async with _client(FakeProvider(scripts=[])) as client:
+        sid = await _session(client)
+
+        r = await client.post(f"/v1/sessions/{sid}/end", json={})
+        assert r.status_code == 422 and "error" in r.json()
+
+        no_body = await client.post(f"/v1/sessions/{sid}/end")
+        assert no_body.status_code == 422 and "error" in no_body.json()
+
+
+async def test_ending_twice_over_the_route_is_idempotent():
+    """A retried POST /end -- the ordinary outcome of a dropped response on a
+    call nobody wants to leave ambiguous -- must not be an error.
+
+    This test deliberately claims NOTHING about first-vs-last closer any more.
+    It used to, and could not see it: the creator-only 403 makes any other
+    `ended_by` impossible over HTTP, so both requests necessarily carry the
+    same name and the assertion just echoed the request back. VERIFIED BY
+    MUTATION 2026-08-06 -- `store.end_session` rewritten to `return ended_by`
+    (dropping the fold's first-write-wins read entirely) left all 824 tests
+    passing. The fold semantics are pinned at the storage seam instead, in
+    `test_the_fold_keeps_the_first_closer_not_the_last` below, which is the one
+    layer where two different closers are expressible."""
+    async with _client(FakeProvider(scripts=[])) as client:
+        sid = await _session(client, created_by="siddsing")
+
+        first = await client.post(f"/v1/sessions/{sid}/end",
+                                  json={"ended_by": "siddsing"})
+        second = await client.post(f"/v1/sessions/{sid}/end",
+                                   json={"ended_by": "siddsing"})
+
+        assert first.status_code == second.status_code == 200
+        assert second.json()["ended_by"] == "siddsing"
+
+
+async def test_the_fold_keeps_the_first_closer_not_the_last():
+    """`store.end_session` returns the ORIGINAL closer on every repeat, and the
+    rebuilt fold agrees -- the same first-write-wins rule that makes a replayed
+    finding inert, reaching termination for free (store.end_session's own
+    docstring, and adr/0004's "the log is append-only and state is a fold").
+
+    Driven at the STORAGE seam because that is the only place the two closers
+    can differ: the route's creator-only gate rejects anyone but `created_by`,
+    so no HTTP-level test can distinguish "keeps the first" from "takes the
+    last". Nothing anywhere in the suite covered it -- grep for `SessionEnded`
+    or `ended_by` across test_fold/test_memory/test_store/test_log returned
+    nothing -- and the mutation named in the sibling test above is what that
+    cost.
+
+    `rebuild()` is the second assertion and not decoration: a `SessionEnded`
+    handled correctly on the live path but folded wrongly on replay would come
+    back as the WRONG closer after the restart+resync path this system's whole
+    recovery story runs through."""
+    app = build_app(FakeProvider(scripts=[]))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                 base_url="http://svc") as client:
+        sid = await _session(client, created_by="siddsing")
+    store = app.state.store
+
+    assert store.end_session(sid, "siddsing") == "siddsing"
+    # A second, DIFFERENT closer -- unreachable over the route, which is
+    # exactly why this is here.
+    assert store.end_session(sid, "akhil") == "siddsing"
+
+    store._memories[sid].rebuild()
+    assert store._memories[sid].view().ended_by == "siddsing"
+
+
+async def test_end_on_an_unknown_session_is_404_not_403():
+    """404 before the creator check: an unknown session has no creator, and
+    reporting "only <someone> can end this session" for a typo'd id would be
+    both wrong and confusing."""
+    async with _client(FakeProvider(scripts=[])) as client:
+        r = await client.post("/v1/sessions/sh-nope/end", json={"ended_by": "siddsing"})
+        assert r.status_code == 404
+
+
+# ── item 2: an ended session is fully closed ────────────────────────────────
+
+async def test_an_ended_session_409s_on_every_route_that_serves_or_extends_it():
+    """Spec Testing item 2, and the reason `_unavailable` is ONE helper.
+
+    All four routes in one test on purpose: the failure this guards against is
+    not "the check is wrong", it is "the check is missing from one of them" --
+    and per-route tests scattered through the suite are how a fifth route gets
+    added later with no guard and nothing goes red. `push_findings` matters
+    most: a 200 there would accept findings into a session the team has closed
+    and lose them in a log nothing will ever read again.
+
+    The FakeProvider is scripted EMPTY: an exhausted script raises on any
+    call, so if a guard were missing, that route would 500 rather than
+    silently pass -- either way it is not the 409 asserted here, and the
+    provider count is a second witness that nothing reached the model."""
+    provider = FakeProvider(scripts=[])
+    async with _client(provider) as client:
+        sid = await _session(client, created_by="siddsing")
+        await client.post(f"/v1/sessions/{sid}/end", json={"ended_by": "siddsing"})
+
+        responses = {
+            "query": await client.post(f"/v1/sessions/{sid}/query",
+                                       json={"query": "anything",
+                                             "contributor": "akhil"}),
+            "push_findings": await client.post(f"/v1/sessions/{sid}/findings",
+                                               json={"findings": [_finding_json("f-1")]}),
+            "synthesize": await client.post(f"/v1/sessions/{sid}/synthesize"),
+            "watermark": await client.get(f"/v1/sessions/{sid}/watermark",
+                                          params={"contributor": "akhil"}),
+        }
+
+    assert {name: r.status_code for name, r in responses.items()} == {
+        "query": 409, "push_findings": 409, "synthesize": 409, "watermark": 409}
+    assert all(r.json() == {"error": "session_ended"} for r in responses.values())
+    assert provider.calls == 0
+
+
+async def test_the_ended_guard_does_not_fire_before_the_session_is_ended():
+    """The other half of the guard, and not a tautology: a `_unavailable` that
+    returned 409 unconditionally would pass every assertion in the test above.
+    All four routes answer normally while the session is live."""
+    provider = FakeProvider(scripts=[MERGE_NOOP, MERGE_NOOP, {"ranked": [0]}])
+    async with _client(provider) as client:
+        sid = await _session(client)
+
+        assert (await client.post(f"/v1/sessions/{sid}/findings",
+                                  json={"findings": [_finding_json("f-1")]})
+                ).status_code == 200
+        assert (await client.post(f"/v1/sessions/{sid}/synthesize")).status_code == 200
+        assert (await client.get(f"/v1/sessions/{sid}/watermark",
+                                 params={"contributor": "akhil"})).status_code == 200
+        assert (await client.post(f"/v1/sessions/{sid}/query",
+                                  json={"query": "anything", "contributor": "akhil"})
+                ).status_code == 200
+
+
+async def test_a_member_can_still_leave_a_session_that_ended_underneath_them():
+    """DELETE .../members/{c} is deliberately OUTSIDE the ended guard: it is
+    exactly what a client does after seeing a 409, and gating it would trap
+    every member inside a dead session with a binding they cannot clear."""
+    async with _client(FakeProvider(scripts=[])) as client:
+        sid = await _session(client, created_by="siddsing")
+        await client.post(f"/v1/sessions/{sid}/members", json={"contributor": "akhil"})
+        await client.post(f"/v1/sessions/{sid}/end", json={"ended_by": "siddsing"})
+
+        r = await client.delete(f"/v1/sessions/{sid}/members/akhil")
+
+        assert r.status_code == 200
+        assert r.json() == {"members": []}
+
+
+async def test_termination_survives_a_rebuild_from_the_log_alone():
+    """Terminate is an EVENT, not a flag, and this is what that buys (adr/0004
+    and the spec's Durability caveat). `rebuild()` discards every index and
+    replays the log; a session that came back ACTIVE would mean the closure
+    was living somewhere the log is not -- which is precisely the state that
+    would not survive the restart + resync path this system recovers through.
+    """
+    app = build_app(FakeProvider(scripts=[MERGE_NOOP]))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                 base_url="http://svc") as client:
+        sid = await _session(client, created_by="siddsing")
+        await client.post(f"/v1/sessions/{sid}/findings",
+                          json={"findings": [_finding_json("f-1")]})
+        await client.post(f"/v1/sessions/{sid}/end", json={"ended_by": "siddsing"})
+
+        app.state.store._memories[sid].rebuild()
+
+        r = await client.post(f"/v1/sessions/{sid}/query",
+                              json={"query": "anything", "contributor": "akhil"})
+
+    assert r.status_code == 409
+    assert app.state.store.get_context(sid).status == "ended"
+
+
+# ── item 4: re-join keeps your place ────────────────────────────────────────
+
+async def test_rejoining_from_a_new_agent_session_preserves_last_seen():
+    """Spec Testing item 4 -- THE regression the identity re-key exists for.
+
+    aditya reads the memory from one conversation, leaves, and comes back in a
+    different one: a new Claude Code window, therefore a new
+    `agent_session_id` (it is the transcript filename stem,
+    worker/discovery.py:112), same human. Keyed on the conversation, the
+    second window was an unknown key with `last_seen` 0, so `new_since`
+    reported the whole Shared Memory as new to someone who had just read it
+    and the briefing opened by telling them about their own findings.
+
+    The teammate's finding is what makes `new_since` non-zero to begin with
+    (aditya's own would be suppressed), and `agent_session` is varied on the
+    REQUEST while `contributor` is held fixed -- if anything re-keys onto the
+    conversation id again, this goes to 1."""
+    provider = FakeProvider(scripts=[MERGE_NOOP, {"ranked": [0]}])
+    async with _client(provider) as client:
+        sid = await _session(client)
+        await client.post(f"/v1/sessions/{sid}/members", json={"contributor": "aditya"})
+        await client.post(f"/v1/sessions/{sid}/findings",
+                          json={"findings": [_finding_json("f-akhil",
+                                                           contributor="akhil")]})
+
+        before = (await client.get(f"/v1/sessions/{sid}/watermark",
+                                   params={"contributor": "aditya",
+                                           "agent_session": "as-window-1"})).json()
+        assert before["new_since"] == 1                # a verdict round they have not seen
+
+        # aditya reads it, in window 1
+        await client.post(f"/v1/sessions/{sid}/query",
+                          json={"query": "what do we know", "contributor": "aditya",
+                                "agent_session": "as-window-1"})
+
+        # ...leaves, and re-joins from a DIFFERENT conversation
+        await client.delete(f"/v1/sessions/{sid}/members/aditya")
+        await client.post(f"/v1/sessions/{sid}/members", json={"contributor": "aditya"})
+
+        after = (await client.get(f"/v1/sessions/{sid}/watermark",
+                                  params={"contributor": "aditya",
+                                          "agent_session": "as-window-2"})).json()
+
+    assert after["new_since"] == 0                     # their place was kept
+    assert after["members"] == ["aditya"]              # and the re-join landed
+
+
+# ── item 5: self-suppression spans a contributor's conversations ────────────
+
+async def test_self_suppression_holds_for_one_contributor_across_two_agent_sessions():
+    """Spec Testing item 5, over the route.
+
+    aditya has two conversations open -- Claude Code and Codex -- which is the
+    demo, not an edge case. Findings distilled from either are already in that
+    human's head, so neither window may be told about the other's as if a
+    teammate had written them. Keyed on the Agent Session id, as this was
+    until 2026-08-06, window 2 was shown window 1's findings.
+
+    ⟨DOCSTRING CORRECTED 2026-08-06 review⟩ This used to claim the 21 findings
+    put it above the bypass and so exercised the `exclude=` seam in
+    `store.candidates`. They do not and it does not: `api.query` branches on
+    `len(allowed)`, not on how many findings exist, and 20 of the 21 are
+    aditya's own, so `allowed` is 1 -- well under `lanes.DEFAULT_TOP_K` (14) --
+    and the BYPASS branch runs every time. The assertion could not see that
+    seam either: drop `exclude=suppressed` and `query_findings` re-applies
+    `visible_to` downstream, `visible` is still `[f-akhil]`, and this still
+    passes.
+
+    What it DOES pin, and the reason it stays: the identity re-key itself. An
+    `agent_session`-keyed `visible_to` returns the ten `f-w1-*` findings to
+    window 2 and this goes red. The size is what makes the two windows'
+    findings numerous enough to be unmissable in the result, not a branch
+    selector.
+
+    The retriever ranks every index it could possibly be offered rather than
+    just `[0]`, for the same reason as the additivity test below: `[0]` returns
+    whatever the lanes ordered first, so a re-key regression could slip through
+    on ordering alone. Out-of-range indices are dropped by `query_findings`."""
+    provider = FakeProvider(scripts=[MERGE_NOOP, {"ranked": list(range(21))}])
+    async with _client(provider) as client:
+        sid = await _session(client)
+        mine_window_1 = [_finding_json(f"f-w1-{i:02d}", contributor="aditya",
+                                       agent_session="as-window-1") for i in range(10)]
+        mine_window_2 = [_finding_json(f"f-w2-{i:02d}", contributor="aditya",
+                                       agent_session="as-window-2") for i in range(10)]
+        theirs = [_finding_json("f-akhil", contributor="akhil", agent_session="as-akhil",
+                                text="akhil-marker: the decode fails past 40 ms")]
+        await client.post(f"/v1/sessions/{sid}/findings",
+                          json={"findings": mine_window_1 + mine_window_2 + theirs})
+
+        # aditya asks from window 2, about work aditya did in window 1
+        r = await client.post(f"/v1/sessions/{sid}/query",
+                              json={"query": "insight", "contributor": "aditya",
+                                    "agent_session": "as-window-2"})
+
+    returned = [f["id"] for f in r.json()["findings"]]
+    assert returned == ["f-akhil"]
+    assert not any(fid.startswith("f-w1-") for fid in returned)
+
+
+# ── the wire change is additive ─────────────────────────────────────────────
+
+async def test_an_old_shaped_request_carrying_only_agent_session_still_works():
+    """The contract change had to be ADDITIVE, and this is what says so.
+
+    `orchestrator/server.py:141` and `briefing.py:80` send `agent_session` and
+    run as separate processes on other people's laptops. A hard rename would
+    not have errored -- it would have made every un-upgraded client anonymous,
+    silently switching their suppression off and resetting their watermark.
+
+    So an old-shaped request keeps EXACTLY today's behaviour: its own findings
+    are still suppressed and its watermark still advances.
+
+    ⟨STRENGTHENED 2026-08-06 review⟩ This fixture used to attribute the asker's
+    own finding `contributor="as-legacy"` -- an Agent Session id sitting in the
+    Contributor field, a shape no real client produces -- and so it green-lit
+    an additivity claim that did not hold on real data. On REAL data
+    (`contributor="aditya"`, `agent_session="as-legacy"`, which is what every
+    Attribution actually looks like) the re-key compared the old client's
+    `agent_session` value against `a.contributor`, never matched, and switched
+    that client's suppression off entirely: it got its OWN finding back as team
+    knowledge, credited to itself. `api._legacy_agent_session` is the fix and
+    this fixture is what holds it: with the guard removed, `f-mine` reappears
+    here.
+
+    The retriever is scripted to rank EVERY index it could be offered, not just
+    `[0]`. With `[0]` the assertion depended on which finding the lanes happened
+    to order first, and passed against an un-guarded build by luck -- verified
+    by mutation 2026-08-06: emptying `_legacy_agent_session`'s body left this
+    green. Ranking both indices means the test sees the whole visible set, so a
+    finding that should have been suppressed cannot hide behind an ordering.
+    Index 1 is simply skipped when only one finding is visible --
+    `query_findings` bounds every index against `len(visible)`."""
+    provider = FakeProvider(scripts=[MERGE_NOOP, {"ranked": [0, 1]}])
+    async with _client(provider) as client:
+        sid = await _session(client)
+        await client.post(f"/v1/sessions/{sid}/findings", json={"findings": [
+            _finding_json("f-mine", contributor="aditya", agent_session="as-legacy"),
+            _finding_json("f-theirs", contributor="akhil", agent_session="as-akhil"),
+        ]})
+
+        # No `contributor` key anywhere in this exchange -- the old shape.
+        before = (await client.get(f"/v1/sessions/{sid}/watermark",
+                                   params={"agent_session": "as-legacy"})).json()
+        r = await client.post(f"/v1/sessions/{sid}/query",
+                              json={"query": "what do we know",
+                                    "agent_session": "as-legacy"})
+        after = (await client.get(f"/v1/sessions/{sid}/watermark",
+                                  params={"agent_session": "as-legacy"})).json()
+
+    assert r.status_code == 200
+    assert [f["id"] for f in r.json()["findings"]] == ["f-theirs"]   # own one suppressed
+    assert before["new_since"] == 1 and after["new_since"] == 0      # watermark advanced
+
+
+async def test_contributor_wins_when_a_request_carries_both_fields():
+    """The transitional shape the spec asks the orchestrator to send: both
+    fields, on the same request. `contributor` is the identity; `agent_session`
+    rides along for attribution and is not what suppression reads. If the
+    precedence were the other way round, an upgraded client would get the OLD
+    behaviour and the re-key would ship dead."""
+    provider = FakeProvider(scripts=[MERGE_NOOP, {"ranked": [0]}])
+    async with _client(provider) as client:
+        sid = await _session(client)
+        await client.post(f"/v1/sessions/{sid}/findings", json={"findings": [
+            _finding_json("f-mine", contributor="aditya", agent_session="as-1"),
+            _finding_json("f-theirs", contributor="akhil", agent_session="as-2"),
+        ]})
+
+        r = await client.post(f"/v1/sessions/{sid}/query",
+                              json={"query": "what do we know", "contributor": "aditya",
+                                    "agent_session": "as-2"})
+
+    # Suppression followed `contributor` (aditya's is withheld), not
+    # `agent_session` (which named akhil's conversation).
+    assert [f["id"] for f in r.json()["findings"]] == ["f-theirs"]

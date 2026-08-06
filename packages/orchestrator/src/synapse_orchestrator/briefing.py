@@ -39,6 +39,7 @@ import httpx
 
 from synapse_contracts import LocalBinding
 
+from synapse_orchestrator.ended import is_session_ended
 from synapse_orchestrator.server import _DEFAULT_INSTRUCTIONS, SENTINEL
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,21 @@ def _clean(value: object) -> str:
     return _CONTROL_CHARS.sub(" ", str(value)).strip()
 
 
+def _ended_briefing(binding: LocalBinding) -> str:
+    """What an arriving agent is told when the session it is bound to is closed.
+
+    Keeps SENTINEL — scripts/verify_instructions.py probes for it through a
+    real MCP client, and an ended session is still a briefing this server
+    composed, not a fallback. Says what to DO, because the local binding is
+    cleared by the first tool call that observes the 409 (server.py) and an
+    agent that is only told "ended" would otherwise keep trying."""
+    return (f"{SENTINEL} The Synapse Shared Session {_clean(binding.shared_id)} this "
+            "conversation is bound to has ENDED — its team memory is closed for reading "
+            "and writing, so `query` and `contribute` have nothing to reach. Call "
+            "`create_session` to start a new one, or `join_session <shared_id>` if the "
+            "team has already moved to another.")
+
+
 async def build_briefing(binding: LocalBinding | None, service_url: str, *,
                          timeout: float = 2.0,
                          transport: httpx.AsyncBaseTransport | None = None) -> str:
@@ -77,7 +93,24 @@ async def build_briefing(binding: LocalBinding | None, service_url: str, *,
     # starts).
     try:
         async with httpx.AsyncClient(transport=transport, timeout=timeout) as client:
-            resp = await client.get(url, params={"agent_session": binding.agent_session_id})
+            # BOTH identity fields (2026-08-06). `new_since` is measured against
+            # `store.last_seen`, which is now keyed on the Contributor rather
+            # than the Agent Session — sending only `agent_session` would make
+            # this briefing and `query` (server.py) read two different
+            # watermarks for the same person. The service takes `contributor`
+            # first and falls back (`api._asking_contributor`), so an
+            # un-upgraded service still sees exactly what it saw before.
+            resp = await client.get(url, params={
+                "agent_session": binding.agent_session_id,
+                "contributor": binding.contributor})
+            # An ENDED session is not an outage and must not fall through to
+            # the fail-open default, which says "no session is bound yet — run
+            # `synapse-worker join`" and is simply false here. The spec's
+            # requirement is that the briefing reports the session as ended
+            # rather than showing stale counts; there are no counts to show,
+            # since every read route is closed.
+            if is_session_ended(resp):
+                return _ended_briefing(binding)
             resp.raise_for_status()
             w = resp.json()
 

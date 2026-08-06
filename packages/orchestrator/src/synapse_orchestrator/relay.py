@@ -77,17 +77,50 @@ Shared Sessions at once — see `app.py`'s amendment note and
 entirely from information already on the wire (`Attribution.agent`) without
 any worker change. The single-product re-join gap above is not closed by
 this pass and should not be read as closed by the paragraph above it.
+
+#### Session lifecycle (2026-08-06) — an ended session is a DEAD END, not a redirect
+
+THIS IS THE ROUND 3 SHARED-SESSION DISCIPLINE ABOVE, APPLIED TO TERMINATION,
+and it is written down here because the tempting shortcut is the exact defect
+that amendment fixed. When the service answers `409 {"error":
+"session_ended"}` for a Finding's recorded Shared Session, that Finding is
+DROPPED (`dropped.jsonl`) with a log line naming the session. It is never
+re-addressed to whatever session is bound now — not on the next `flush()`, not
+on an operator's `resync`. The round 2/3 leak was "send everything pending to
+`self.shared_id`", i.e. to whatever happened to be bound at *send* time; a
+"the target session closed, so put these somewhere they can land" fallback
+would be that same leak wearing a helpful face, and worse than the original
+because a closed session is precisely when a human is most likely to have
+decided the work is over. Every envelope keeps the `shared_id` it was recorded
+under forever (`record()`); an envelope whose session is closed simply has
+nowhere to go, which is the same guarantee an envelope recorded while unbound
+already has.
+
+Dropped rather than left pending, because "ended" is the one 4xx that can
+never stop being true — unlike the 404 above, which `cmd_resync` is designed
+to make false. Leaving them queued would re-POST a dead session on every tick
+forever.
+
+Ended session ids observed this way are also reported outward twice: in-memory
+via `ended_session_ids()` (so `contribute()` can tell the agent its note went
+nowhere, rather than silently reporting "queued") and through the
+`on_session_ended` callback, which `cli.main` points at the retained
+`ended.json` stopgap so a later `resync` does not re-create what the team
+closed (`synapse_orchestrator.ended`).
 """
 
 from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable
 from pathlib import Path
 
 import httpx
 
 from synapse_contracts import Finding
+
+from synapse_orchestrator.ended import is_session_ended
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +146,9 @@ _SYNTHESIS_AWARE_TIMEOUT = 120.0
 class Relay:
     def __init__(self, state_dir: Path, service_url: str, shared_id: str | None, *,
                  timeout: float = _SYNTHESIS_AWARE_TIMEOUT,
-                 transport: httpx.AsyncBaseTransport | None = None) -> None:
+                 transport: httpx.AsyncBaseTransport | None = None,
+                 ended_sessions: set[str] | None = None,
+                 on_session_ended: Callable[[str], None] | None = None) -> None:
         self.state_dir = Path(state_dir)
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.findings_path = self.state_dir / "findings.jsonl"
@@ -128,6 +163,14 @@ class Relay:
         # service restart the store forgets its members, and a relay restart
         # re-registering everything it pushes is exactly the recovery wanted.
         self._registered: set[tuple[str, str]] = set()
+        # Shared Sessions known to be CLOSED. Seeded from the caller's retained
+        # stopgap set (cli.main passes `ended.ended_session_ids(state_dir)`) and
+        # grown by any 409 this relay observes. Unlike `_registered` above this
+        # one must survive a restart, because "ended" -- unlike "not registered
+        # yet" -- can never become false again while the log this relay holds
+        # still names the session.
+        self._ended: set[str] = set(ended_sessions or ())
+        self._on_session_ended = on_session_ended
 
     def rebind(self, shared_id: str | None) -> None:
         """Point future `record()` calls at a different (or no) Shared Session.
@@ -143,6 +186,56 @@ class Relay:
         described in the module docstring's amendment note.
         """
         self.shared_id = shared_id
+
+    # ── termination ─────────────────────────────────────────────────────────
+    def ended_session_ids(self) -> frozenset[str]:
+        """Which Shared Sessions this relay knows are closed.
+
+        Read by `contribute()` (server.py) straight after a flush: the relay
+        swallows every HTTP outcome by design, so a tool that only sees
+        `(sent, pending)` would report "queued (1 pending)" for a note that
+        was in fact dropped and can never be delivered. Frozen so a caller
+        cannot mutate this relay's idea of what is closed."""
+        return frozenset(self._ended)
+
+    def note_ended(self, shared_id: str) -> None:
+        """Tell this relay a session closed, from an observation it did not make.
+
+        `end_session` (server.py) and `_forget_ended` see the closure on a
+        route this relay never touches -- `POST /end`, or the 409 from
+        `query`'s own request -- and both wrote it only to the on-disk stopgap
+        (`ended.record_ended`). `_ended` is otherwise seeded once at boot
+        (cli.main) and grown only by 409s the relay observes ITSELF, so between
+        those two an ended session stayed live in this process's memory:
+        findings already queued under it were re-POSTed on every flush, and
+        after a service restart forgot the session that is a 404, classified
+        "retry", requeued, forever -- for a session THIS process had already
+        written into `ended.json`. That is exactly the loop the known-ended
+        skip in `flush()` exists to prevent, missing only because the two sets
+        disagreed.
+
+        Public alias for `_note_ended`, not a second mechanism: same
+        first-observation-wins fold, same callback, same swallowing.
+        """
+        self._note_ended(shared_id)
+
+    def _note_ended(self, shared_id: str) -> None:
+        """First observation of a closure wins; the rest are no-ops.
+
+        The callback fires ONCE per session rather than per dropped batch, and
+        anything it raises is swallowed -- it is a durability convenience
+        (`ended.record_ended`), and "fail open, always" (Global Constraints)
+        outranks it on the egress path."""
+        if shared_id in self._ended:
+            return
+        self._ended.add(shared_id)
+        if self._on_session_ended is None:
+            return
+        try:
+            self._on_session_ended(shared_id)
+        except Exception as exc:            # noqa: BLE001 -- fail open, always
+            logger.warning("Could not persist ended session %r (%s: %s)",
+                           shared_id, exc.__class__.__name__, exc)
 
     # ── write-ahead ─────────────────────────────────────────────────────────
     _UNSET = object()
@@ -216,8 +309,15 @@ class Relay:
         counts here. Lets a caller (`cli.cmd_resync`) tell "resync pushed
         everything there was to push" apart from "resync pushed less than
         the eligible total" even though `resync()` itself returns a bare
-        int (see its docstring)."""
-        return sum(1 for sid, _ in self._all_entries() if sid is not None)
+        int (see its docstring).
+
+        An ENDED session's findings are excluded for the same reason an
+        unbound Finding is: there is nowhere they can ever land. Counting them
+        would make `cmd_resync` print "FAILED — 0 of 3 re-pushed" for a resync
+        that did exactly the right thing by refusing to resurrect a session the
+        team closed."""
+        return sum(1 for sid, _ in self._all_entries()
+                   if sid is not None and sid not in self._ended)
 
     def recorded_session_ids(self) -> set[str]:
         """Every Shared Session the retained log names.
@@ -285,7 +385,7 @@ class Relay:
             self._registered.add(key)
 
     async def _post(self, shared_id: str, findings: list[Finding]) -> str:
-        """'ok' | 'retry' | 'terminal'.
+        """'ok' | 'retry' | 'terminal' | 'ended'.
 
         `httpx.HTTPError` includes `HTTPStatusError`, so the single except
         below used to make a permanent 422 indistinguishable from a transient
@@ -297,8 +397,17 @@ class Relay:
         `cmd_resync` recreates it (Step 2) -- so the queue flushes itself with
         no human involved. Only 4xx that cannot become true are terminal.
 
-        Returns a STRING, not a bool. Both non-ok values are truthy; every
-        caller must compare against 'ok' explicitly.
+        'ended' (2026-08-06) is a THIRD kind of 4xx and is checked before the
+        generic terminal branch: the session is closed forever, so these
+        findings are dropped like a terminal 422 -- but unlike a 422 the id is
+        also remembered, because nothing about this session can ever succeed
+        again and `resync` must not re-create it. Split out rather than folded
+        into 'terminal' so the caller can log the real reason (a closed
+        session is a team decision; a 422 is a bug) and so the id is recorded
+        exactly once.
+
+        Returns a STRING, not a bool. All three non-ok values are truthy;
+        every caller must compare against 'ok' explicitly.
         """
         payload = {"findings": [f.model_dump(mode="json") for f in findings]}
         url = f"{self.service_url}/v1/sessions/{shared_id}/findings"
@@ -315,6 +424,18 @@ class Relay:
             return "ok"
         except httpx.HTTPStatusError as exc:
             code = exc.response.status_code
+            if is_session_ended(exc.response):
+                # Status AND body, via the one shared reader -- an unrelated
+                # 409 from an intermediary must keep falling through to the
+                # terminal branch below rather than marking a live session dead
+                # (see synapse_orchestrator.ended).
+                self._note_ended(shared_id)
+                logger.warning(
+                    "Session %r has ended; DROPPING %d finding(s) recorded under it. "
+                    "They are NOT re-addressed to any other Shared Session -- an ended "
+                    "session is a dead end, not a redirect (see this module's "
+                    "termination note).", shared_id, len(findings))
+                return "ended"
             if code == 404:
                 logger.warning(
                     "404 from %s — the service does not know session %r. %d finding(s) "
@@ -347,7 +468,9 @@ class Relay:
         pending — it is re-attempted on the next flush. A `terminal` result
         (400/422/…) writes its ids to `dropped.jsonl` and counts it as
         neither sent nor pending: no amount of re-attempting can make a
-        permanently malformed payload succeed."""
+        permanently malformed payload succeed. An `ended` result is dropped
+        the same way and for a stronger version of the same reason — see the
+        termination note in this module's docstring."""
         pending = self._pending()
         if not pending:
             return (0, 0)
@@ -357,11 +480,24 @@ class Relay:
         newly_sent_ids: list[str] = []
         newly_dropped_ids: list[str] = []
         for shared_id, findings in groups.items():
+            if shared_id in self._ended:
+                # ALREADY known closed -- from a previous 409 this process saw,
+                # or from the retained stopgap set seeded at construction. Drop
+                # without a request: the answer cannot be anything but another
+                # 409, and a session that ended while the service was down (so
+                # this relay never saw the 409 itself) would otherwise be
+                # re-POSTed on every tick forever.
+                logger.warning(
+                    "Session %r is ended; DROPPING %d queued finding(s) without "
+                    "attempting delivery. Never retargeted to another session.",
+                    shared_id, len(findings))
+                newly_dropped_ids.extend(f.id for f in findings)
+                continue
             outcome = await self._post(shared_id, findings)
             if outcome == "ok":
                 sent_total += len(findings)
                 newly_sent_ids.extend(f.id for f in findings)
-            elif outcome == "terminal":
+            elif outcome in ("terminal", "ended"):
                 newly_dropped_ids.extend(f.id for f in findings)
             else:                                       # "retry"
                 pending_total += len(findings)
@@ -389,10 +525,22 @@ class Relay:
         `dropped.jsonl` is deliberately IGNORED here: this is the
         operator-invoked recovery path, and a session recreated by
         create-or-return should get those findings offered again.
+
+        An ENDED session is the one exception, and the reason `_ended` is
+        seeded from disk rather than living only in this process's memory: the
+        recovery path's own create-or-return would otherwise re-create a
+        session the team closed and refill it (the lifecycle spec's "Durability
+        caveat"). Skipped entirely — not posted, not counted, not dropped —
+        because `cmd_resync` reports "pushed N of M retained" and a session
+        that must never be pushed is not part of M either (`retained_count`).
         """
         groups = self._group(self._all_entries())
         pushed: dict[str, int] = {}
         for shared_id, findings in groups.items():
+            if shared_id in self._ended:
+                logger.info("resync: skipping ended session %r (%d retained finding(s) "
+                            "stay where they were recorded)", shared_id, len(findings))
+                continue
             if await self._post(shared_id, findings) == "ok":     # never truthiness
                 pushed[shared_id] = pushed.get(shared_id, 0) + len(findings)
         return pushed
