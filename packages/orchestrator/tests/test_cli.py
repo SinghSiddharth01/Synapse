@@ -939,7 +939,18 @@ def test_build_npu_distiller_matches_the_workers_config_pack_and_model(monkeypat
         # the raw one -- identical values would let a regression pass.
         effective_max_tokens = 90
 
-    fake_pack = object()
+    class FakePack:
+        """A sentinel, not a PromptPack — this test is about identity and wiring.
+
+        It carries `example_finding_texts` because Distiller reads the corpus for
+        its example-echo guard off whichever pack it is handed (W7 F1), and a
+        bare object() would make this test fail for a reason that has nothing to
+        do with what it checks.
+        """
+
+        example_finding_texts: tuple[str, ...] = ()
+
+    fake_pack = FakePack()
     captured_pack_name = []
     captured_provider_kwargs = {}
 

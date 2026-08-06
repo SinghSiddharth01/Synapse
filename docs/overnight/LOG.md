@@ -109,6 +109,31 @@ Newest at the bottom.
   review's HIGH (client-killing lsof) and the 45s-threshold misread were fixed
   pre-merge; audit resolved 4 real conflicts against W2's re-keying. **W3b
   launched** (last code workstream). Still running: W5, W4a, W7 live arc.
+- **08:59** — **W7 live arc merged** (`c8baded`, 1191 green): the full
+  lifecycle — create → join as a second participant with its own
+  agent_session_id → contribute (real `claude -p` distillation, ~36–47s) →
+  attributed query → leave → rejoin under a new session id → end — ran clean
+  END-TO-END **twice, against the real stack on the real ports**. Evidence
+  verbatim in `w7-live-evidence.md`; its reviewer's verdict: "the evidence
+  holds." Suppression/watermark behaved exactly as decisions/001 specifies.
+  **Major catch (F1): the claude-cli distiller echoed 6 of 9 findings from
+  `v4-condense.toml`'s own few-shot examples**, attributed as real
+  contributions — the existing contamination test guards only the inverse
+  direction. Targeted fix agent dispatched (prompt hardening + parse-time
+  example-echo guard + the missing-direction regression test). Smaller
+  catches: end_session orphans serve_local's legacy boot binding (F2), a
+  leave/end double-unbind message (F3) — both queued behind W5 (same file).
+- **09:30** — **F1 contamination fix merged** (`3c132bf`, 1214 tests). Root
+  cause was prompt ASSEMBLY, not the model: the claude-cli arm flattened the
+  few-shot message list into one unlabeled transcript and then asked the model
+  to "rewrite the session above" — the session above was the examples. Fix:
+  the flatten now names every block (example input / wanted reply / the
+  material to work on), and the distiller gained a parse-time example-echo
+  guard (order-aware similarity vs the pack's own examples, threshold 0.60 in
+  the measured 0.46–0.67 gap, <10-word exemption, loud reason=example_echo
+  drop log). The 9 findings from the live evidence replay verbatim in tests:
+  6 drop, 3 survive. Prompt bytes untouched — the 809-token calibrated
+  overhead has zero headroom against the pinned 2787 segment budget.
 - **06:10** — **Relaunch with real isolation** (every agent now gets its own
   harness worktree + detached-HEAD checkout, push-by-ref only):
   `w1-geniex-v2` (wf_4c6491eb, full redo from recovered design) ·
