@@ -37,6 +37,7 @@ import synapse_orchestrator.cli as cli
 from synapse_orchestrator.ended import ended_session_ids, record_ended
 from synapse_orchestrator.relay import Relay
 from synapse_orchestrator.server import _NOT_JOINED, _SESSION_ENDED, create_mcp, register_tools
+from synapse_orchestrator.session_meta import SessionMeta, retained_sessions
 
 TS = datetime(2026, 8, 6, tzinfo=timezone.utc)
 
@@ -89,7 +90,8 @@ def _prejoin(wiring, shared_id: str = "sh-1", *, contributor: str = "sid",
 
 
 def _service(*, members=("sid",), end_status: int = 200, end_body=None,
-             urls: list[str] | None = None, bodies: dict | None = None):
+             urls: list[str] | None = None, bodies: dict | None = None,
+             members_body: dict | None = None):
     """A stand-in Synapse Service covering every route the four tools touch.
 
     `bodies`, when given, collects `{path: parsed json}` for every request that
@@ -102,6 +104,14 @@ def _service(*, members=("sid",), end_status: int = 200, end_body=None,
     `end_session` draws "only NOBODY can end this session" forever) and
     registers a phantom member (so the layer-3 gate refuses forever). Mirrors
     the `captured_body ==` assertion test_tools.py already uses for /query.
+
+    `POST .../members` answers with `created_by` and `purpose` alongside
+    `members` (2026-08-06 contract change): they are how a JOINING orchestrator
+    learns who owns the session it just attached to, which is what lets its
+    `resync` recreate that session under the real creator after a service
+    restart instead of under an invented one. `members_body` overrides the
+    whole object, so a test can stand in a service that has not been upgraded
+    and still only answers `{"members": [...]}`.
     """
     def handler(request: httpx.Request) -> httpx.Response:
         if urls is not None:
@@ -122,7 +132,9 @@ def _service(*, members=("sid",), end_status: int = 200, end_body=None,
                                   json=end_body or {"shared_id": "sh-1",
                                                     "status": "ended", "ended_by": "sid"})
         if "/members" in path:
-            return httpx.Response(200, json={"members": list(members)})
+            return httpx.Response(200, json=members_body if members_body is not None
+                                  else {"members": list(members), "created_by": "sid",
+                                        "purpose": "p"})
         return httpx.Response(200, json={"findings": []})
     return handler
 
@@ -195,6 +207,83 @@ async def test_join_session_binds_the_named_conversation_and_names_it_back(tmp_p
     assert "POST http://svc/v1/sessions/sh-team/members" in urls
     assert bodies["/v1/sessions/sh-team/members"] == {"contributor": "sid"}
     assert read_binding(wiring.binding_file).shared_id == "sh-team"
+
+
+# ── who owns this session, retained locally (2026-08-06) ────────────────────
+# The other half of the resync fix. `cmd_resync`'s recreate pass used to invent
+# `created_by="resync"`, which after a real restart made "resync" the CREATOR of
+# the recreated session and left `api.end_session`'s creator-only gate refusing
+# the human who started it. It can only send the truth if something wrote the
+# truth down when this machine bound the session, and these two tools are the
+# only places that ever happens. VERIFIED BY MUTATION: deleting the `_remember`
+# call from either tool leaves every other lifecycle test green, and puts
+# resync back to recreating that session ownerless.
+
+
+async def test_create_session_retains_who_created_it_and_what_for(tmp_path):
+    wiring = _wire(tmp_path, _service(), contributor="siddsing")
+    _transcript(wiring.projects, wiring.repo, "conv-mine")
+
+    await wiring.server.call_tool(
+        "create_session", {"purpose": "fec decode", "agent_session_id": "conv-mine"})
+
+    assert retained_sessions(wiring.state_dir) == {
+        "sh-new": SessionMeta(created_by="siddsing", purpose="fec decode")}
+
+
+async def test_create_session_retains_the_session_even_when_binding_is_refused(tmp_path):
+    """The session EXISTS from the moment the POST returns, whatever happens to
+    the binding — that is why the tool reports its id on a refusal rather than
+    stranding a live session nobody can name. The retained record follows the
+    same rule for the same reason: it is the SESSION's identity, and dropping it
+    here would leave a live session this machine created with no record of who
+    created it, which is exactly the hole being closed."""
+    wiring = _wire(tmp_path, _service(), contributor="siddsing")
+    _transcript(wiring.projects, wiring.repo, "conv-a", age_seconds=0)
+    _transcript(wiring.projects, wiring.repo, "conv-b", age_seconds=2)
+
+    text = str(await wiring.server.call_tool("create_session", {"purpose": "fec decode"}))
+
+    assert "Refusing to guess" in text
+    assert not wiring.binding_file.exists()
+    assert retained_sessions(wiring.state_dir) == {
+        "sh-new": SessionMeta(created_by="siddsing", purpose="fec decode")}
+
+
+async def test_join_session_retains_the_creator_the_service_reported(tmp_path):
+    """Not `who` — the person JOINING is not the person who created it. The
+    `/members` response is the one place a joiner is told, and a resync issued
+    from this machine after a restart is issued by whoever holds the findings,
+    not by the creator, so recording the wrong name here reinstates the whole
+    defect one seat over."""
+    wiring = _wire(tmp_path, _service(
+        members_body={"members": ["aditya", "sid"], "created_by": "aditya",
+                      "purpose": "fec decode"}), contributor="sid")
+    _transcript(wiring.projects, wiring.repo, "conv-mine")
+
+    await wiring.server.call_tool(
+        "join_session", {"shared_id": "sh-team", "agent_session_id": "conv-mine"})
+
+    assert retained_sessions(wiring.state_dir) == {
+        "sh-team": SessionMeta(created_by="aditya", purpose="fec decode")}
+
+
+async def test_join_session_against_a_service_that_reports_no_creator_still_joins(tmp_path):
+    """An orchestrator and a service are separate processes on separate laptops
+    and deploy in either order, so `POST .../members` may still answer the old
+    `{"members": [...]}`. The join must SUCCEED and bind — a missing field is
+    not an error — and what gets recorded is the honest unknown, which resync
+    then sends as `created_by: null` rather than as a name it made up."""
+    wiring = _wire(tmp_path, _service(members_body={"members": ["sid"]}))
+    mine = _transcript(wiring.projects, wiring.repo, "conv-mine")
+
+    text = str(await wiring.server.call_tool(
+        "join_session", {"shared_id": "sh-team", "agent_session_id": "conv-mine"}))
+
+    assert "Joined Shared Session sh-team" in text and str(mine) in text
+    assert read_binding(wiring.binding_file).shared_id == "sh-team"
+    assert retained_sessions(wiring.state_dir) == {
+        "sh-team": SessionMeta(created_by=None, purpose=None)}
 
 
 async def test_the_live_binding_supplies_the_identity_not_the_configured_default(tmp_path):

@@ -435,3 +435,170 @@ async def test_contributor_wins_when_a_request_carries_both_fields():
     # Suppression followed `contributor` (aditya's is withheld), not
     # `agent_session` (which named akhil's conversation).
     assert [f["id"] for f in r.json()["findings"]] == ["f-theirs"]
+
+
+# ── an UNKNOWN creator, 2026-08-06 ──────────────────────────────────────────
+#
+# `SynapseSession.created_by` became `str | None`. The defect that forced it:
+# `cli.cmd_resync` POSTed `created_by="resync"` when recreating a retained
+# session, which is inert against a LIVE service (create-or-return) and a real
+# CREATE against the empty store of a RESTARTED one -- so after a restart the
+# session belonged to the string "resync", the creator-only gate refused the
+# human who owned it, and anyone who read the source could close it by sending
+# `{"ended_by": "resync"}`. It refused the legitimate owner and admitted
+# everyone else, which is worse than no gate at all.
+#
+# None is the honest "we do not know", and these six tests are the contract:
+# a member may end it, a stranger may not, a session with a REAL creator is
+# untouched, and recovery can never downgrade a live session's ownership.
+
+
+async def test_a_session_with_no_known_creator_can_be_ended_by_a_current_member():
+    """The None arm's positive half. This is the human whose session it
+    actually is: after the restart their orchestrator re-joins, so they are a
+    member, and the alternative to letting them close it is a Shared Session
+    that can never be closed by anyone -- the team punished for the service's
+    lack of durability.
+
+    The 409 at the end is what says it really closed, rather than returning
+    200 while leaving the session live."""
+    async with _client(FakeProvider(scripts=[])) as client:
+        sid = await _session(client, created_by=None)
+        await client.post(f"/v1/sessions/{sid}/members", json={"contributor": "siddsing"})
+
+        r = await client.post(f"/v1/sessions/{sid}/end", json={"ended_by": "siddsing"})
+
+        assert r.status_code == 200
+        assert r.json()["ended_by"] == "siddsing"
+        after = await client.post(f"/v1/sessions/{sid}/query",
+                                  json={"query": "anything", "contributor": "siddsing"})
+        assert after.status_code == 409
+
+
+async def test_a_session_with_no_known_creator_refuses_a_non_member():
+    """The None arm's negative half, and the reason the fallback is MEMBERSHIP
+    rather than "anyone" -- without this, losing the creator would silently
+    turn the gate off.
+
+    Both halves of the message are asserted because both are load-bearing: an
+    agent told only "membership is required" reports a permissions problem to
+    its human, when what happened is that a restart lost the owner and joining
+    is the remedy.
+
+    `provider.calls == 0` and the surviving query are the second witness that
+    the refusal happened BEFORE anything was closed -- a 403 returned after
+    `store.end_session` would pass the status assertion alone."""
+    provider = FakeProvider(scripts=[MERGE_NOOP, {"ranked": [0]}])
+    async with _client(provider) as client:
+        sid = await _session(client, created_by=None)
+        await client.post(f"/v1/sessions/{sid}/members", json={"contributor": "siddsing"})
+        await client.post(f"/v1/sessions/{sid}/findings",
+                          json={"findings": [_finding_json("f-1")]})
+
+        r = await client.post(f"/v1/sessions/{sid}/end", json={"ended_by": "a-stranger"})
+
+        assert r.status_code == 403
+        message = r.json()["error"]
+        assert "member" in message and "restart" in message
+        # ...and the memory is still there.
+        still = await client.post(f"/v1/sessions/{sid}/query",
+                                  json={"query": "anything", "contributor": "siddsing"})
+        assert still.status_code == 200
+
+
+async def test_a_real_creator_is_still_the_only_one_who_can_end_it():
+    """The UNCHANGED arm, driven by a MEMBER who is not the creator -- which is
+    the case the new code could plausibly have broken and the existing
+    non-creator test could not see (its `akhil` never joined, so a gate that
+    fell through to membership would still have refused him).
+
+    Ending is creator-only whenever there IS a creator; membership is the
+    fallback only when there is not."""
+    async with _client(FakeProvider(scripts=[])) as client:
+        sid = await _session(client, created_by="siddsing")
+        await client.post(f"/v1/sessions/{sid}/members", json={"contributor": "akhil"})
+
+        r = await client.post(f"/v1/sessions/{sid}/end", json={"ended_by": "akhil"})
+
+        assert r.status_code == 403
+        assert r.json() == {"error": "only siddsing can end this session"}
+        assert (await client.post(f"/v1/sessions/{sid}/end",
+                                  json={"ended_by": "siddsing"})).status_code == 200
+
+
+async def test_created_by_may_be_null_but_the_key_is_still_required():
+    """The two halves of "required KEY, nullable VALUE", together in one test
+    because it is the DISTINCTION that matters and each half alone is
+    satisfiable by the wrong implementation: a required non-null field passes
+    the second assertion, and an optional field with a `None` default passes
+    the first.
+
+    Omitting the key must stay a 422 so that a typo, or a half-written client,
+    cannot quietly mint a session nobody owns. Not knowing who created a
+    session has to be ASSERTED."""
+    async with _client(FakeProvider(scripts=[])) as client:
+        explicit_null = await client.post("/v1/sessions",
+                                          json={"purpose": "p", "created_by": None})
+        absent = await client.post("/v1/sessions", json={"purpose": "p"})
+
+    assert explicit_null.status_code == 201
+    assert explicit_null.json()["created_by"] is None
+    assert absent.status_code == 422 and "created_by" in absent.json()["error"]
+
+
+async def test_joining_returns_the_session_identity_a_joiner_must_record():
+    """`created_by` and `purpose` on the join response (2026-08-06).
+
+    A machine that JOINED a session rather than creating it never saw either
+    field anywhere: `POST .../members` returned `{"members": [...]}` and
+    nothing else. So when the service restarted, that machine's `resync` had
+    no record to restore from and invented a creator instead -- the defect
+    this section exists for. The joiner can only retain what the service tells
+    it, and this call is the one it is guaranteed to make.
+
+    `members` is asserted unchanged in the same breath: the change is additive
+    and an un-upgraded client must keep reading exactly what it read before."""
+    async with _client(FakeProvider(scripts=[])) as client:
+        r = await client.post("/v1/sessions", json={"purpose": "fec decode",
+                                                    "created_by": "siddsing"})
+        sid = r.json()["shared_id"]
+
+        joined = await client.post(f"/v1/sessions/{sid}/members",
+                                   json={"contributor": "aditya"})
+
+    assert joined.status_code == 200
+    assert joined.json() == {"members": ["aditya"], "created_by": "siddsing",
+                             "purpose": "fec decode"}
+
+
+async def test_recreating_a_live_session_with_created_by_none_does_not_downgrade_it():
+    """THE important one. Recovery must never make a live session's ownership
+    WORSE than it already is.
+
+    `cmd_resync` is create-or-return and safe to call unconditionally, so it
+    fires against a service that never restarted just as often as against one
+    that did. If a resync with no local record (`created_by: null`) overwrote
+    the creator of a session that is perfectly alive, this change would have
+    replaced "the gate names the wrong person" with "the gate silently
+    downgrades to membership", which is the same defect wearing a different
+    hat.
+
+    The last assertion is the real one: a member who is NOT the creator is
+    still refused afterwards, which is only true if the None arm never
+    engaged. Reading `created_by` back would not prove that on its own -- a
+    response can be right while the gate reads something else."""
+    async with _client(FakeProvider(scripts=[])) as client:
+        sid = await _session(client, created_by="siddsing")
+        await client.post(f"/v1/sessions/{sid}/members", json={"contributor": "akhil"})
+
+        again = await client.post("/v1/sessions",
+                                  json={"purpose": "(recovered by resync)",
+                                        "created_by": None, "shared_id": sid})
+
+        assert again.status_code == 200                       # existed already
+        assert again.json()["created_by"] == "siddsing"       # unchanged
+        assert again.json()["purpose"] == "fec decode"        # unchanged
+
+        r = await client.post(f"/v1/sessions/{sid}/end", json={"ended_by": "akhil"})
+        assert r.status_code == 403
+        assert r.json() == {"error": "only siddsing can end this session"}

@@ -209,6 +209,74 @@ async def test_schema_prompt_shows_an_example_instance_never_the_schema():
     assert '"ok": true' in prompt  # the example instance, filled in
 
 
+async def test_truncation_is_detected_from_usage_not_finish_reason(caplog):
+    """PROBED LIVE 2026-08-06 against aisuite-indonesia: a /completions call
+    with max_tokens=3000 came back with completion_tokens=3000 and
+    `finish_reason: "stop"`. This host does NOT report "length" when it cuts
+    a response off at the cap, so the finish_reason branch above is dead code
+    here and the truncation warning never fired in production -- see the
+    sibling test, whose fixture fabricates a finish_reason the real endpoint
+    never sends, which is exactly why it passed while synthesis silently
+    stopped bumping memory_version for hours.
+
+    completion_tokens >= max_tokens is the endpoint-independent signal: the
+    model cannot emit more than the cap, so hitting it exactly means the
+    response was cut off (or ended on the boundary, which is
+    indistinguishable and equally unsafe to treat as complete)."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={
+            "choices": [{"text": '{"ok": tr', "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 4, "completion_tokens": 800}})
+    with caplog.at_level(logging.WARNING):
+        result = await _provider(handler).complete(
+            [{"role": "user", "content": "u"}], response_schema=SCHEMA)
+    assert result.schema_valid is False
+    assert any("truncat" in rec.message.lower() for rec in caplog.records)
+
+
+async def test_a_truncated_retry_shrinks_the_ask_instead_of_echoing_the_overflow():
+    """The generic repair retry appends the bad response plus "did not match
+    the schema" to the prompt. Under a LENGTH failure that is actively
+    counterproductive: it makes the input longer and gives the model no
+    reason to produce less. A truncation must instead ask for a shorter
+    answer, and must not paste the overflowing text back in."""
+    prompts = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        prompts.append(json.loads(request.content)["prompt"])
+        return httpx.Response(200, json={
+            "choices": [{"text": '{"ok": ' + "x" * 400, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 4, "completion_tokens": 800}})
+    provider = AIC100Provider(base_url="https://fake.cirrascale.test/apis/v2",
+                              api_key="k", max_tokens=800,
+                              transport=httpx.MockTransport(handler))
+    await provider.complete([{"role": "user", "content": "u"}], response_schema=SCHEMA)
+    assert len(prompts) == 2
+    retry = prompts[1]
+    assert "shorter" in retry.lower()
+    assert "did not match the schema" not in retry
+    assert "x" * 400 not in retry      # the overflow is never pasted back
+
+
+async def test_max_tokens_and_timeout_env_overrides(monkeypatch):
+    """max_tokens is the single number that decides whether a synthesis
+    verdict fits. It was a constructor default reachable only from Python,
+    so the running service had no way to change it -- the same reason
+    INFERENCE_CLOUD_MODEL exists. Timeout travels with it: raising the token
+    cap without raising the read timeout converts a truncation failure into
+    a ReadTimeout with an identical user-visible symptom (synthesis.py
+    catches both and reports "findings are landed, memory unchanged")."""
+    monkeypatch.setenv("INFERENCE_CLOUD_MAX_TOKENS", "1600")
+    monkeypatch.setenv("INFERENCE_CLOUD_TIMEOUT", "180")
+    provider = AIC100Provider(base_url="https://x", api_key="k")
+    assert provider.max_tokens == 1600
+    assert provider.timeout == 180.0
+    monkeypatch.delenv("INFERENCE_CLOUD_MAX_TOKENS")
+    monkeypatch.delenv("INFERENCE_CLOUD_TIMEOUT")
+    default = AIC100Provider(base_url="https://x", api_key="k")
+    assert default.max_tokens == 800 and default.timeout == 60.0
+
+
 async def test_model_env_override(monkeypatch):
     monkeypatch.setenv("INFERENCE_CLOUD_MODEL", "Llama-3.1-8B")
     assert AIC100Provider(base_url="https://x", api_key="k").model == "Llama-3.1-8B"

@@ -193,7 +193,15 @@ class AnthropicProvider(ModelProvider):
             self._client = AsyncAnthropic(**kwargs)
 
         self._model = model or os.environ.get("SYNAPSE_ANTHROPIC_MODEL", DEFAULT_MODEL)
-        self._max_tokens = max_tokens
+        # PUBLIC (2026-08-06): `SynthesisBudget.for_provider` reads `max_tokens`
+        # off whichever provider is wired into synthesis, so a provider that
+        # hides its cap behind a private name is silently budgeted at
+        # DEFAULT_OUTPUT_TOKENS=800 -- a 16000-token cap spent as 800, with
+        # the 500-word memory this provider can easily afford asked for as
+        # 270. Named like AIC100Provider's and OpenAICompatibleProvider's for
+        # exactly that reason: the budget reads one attribute across all of
+        # them or it reads none of them reliably.
+        self.max_tokens = max_tokens
         self._effort = effort
 
     @property
@@ -213,7 +221,7 @@ class AnthropicProvider(ModelProvider):
 
         kwargs: dict[str, Any] = {
             "model": self._model,
-            "max_tokens": self._max_tokens,
+            "max_tokens": self.max_tokens,
             "messages": rest,
             # Correction #3: no `temperature` key at all -- deliberately
             # absent, not set to a default. Sending it (even 0.0) is a 400

@@ -22,6 +22,7 @@ from starlette.testclient import TestClient
 
 import synapse_orchestrator.cli as cli
 from synapse_contracts.binding import SessionBinding, write_binding
+from synapse_orchestrator.session_meta import record_session
 
 _PRODUCER_FINDING = {"id": "f-wiring", "type": "learning", "text": "x",
                      "attributions": [{"contributor": "aditya", "agent_session": "as-1",
@@ -768,6 +769,132 @@ def test_resync_recreates_a_session_whose_findings_were_already_acked_before_a_r
     out = capsys.readouterr().out
     assert "FAILED" not in out
     assert "re-pushed 1 finding(s)" in out
+
+
+def _seed_retained_finding(tmp_path, shared_id: str, fid: str = "f-1") -> None:
+    """One finding in the relay's retained log under `shared_id` — enough to put
+    that session into `recorded_session_ids()` and therefore into resync's
+    recreate pass, which is the only thing these two tests are about."""
+    import json as _json
+
+    from synapse_contracts import Attribution, Finding
+    relay_dir = tmp_path / "relay"
+    relay_dir.mkdir(parents=True, exist_ok=True)
+    finding = Finding(id=fid, type="learning", text="insight",
+                      attributions=[Attribution(contributor="aditya", agent_session="as-1",
+                                                agent="claude-code")],
+                      ts=datetime(2026, 8, 4, tzinfo=timezone.utc))
+    with (relay_dir / "findings.jsonl").open("a", encoding="utf-8") as fh:
+        fh.write(_json.dumps({"shared_id": shared_id,
+                              "finding": _json.loads(finding.model_dump_json())}) + "\n")
+
+
+def _recreate_body_capture():
+    """A restarted, empty service that records the recreate POST's BODY.
+
+    Path-shaped assertions are what let the defect this pair pins live for a
+    week: `POST /v1/sessions` was hit with exactly the right url and exactly
+    the wrong contents. The body is the assertion."""
+    import json as _json
+
+    sent: list[dict] = []
+
+    def service(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/sessions":
+            body = _json.loads(request.content)
+            sent.append(body)
+            return httpx.Response(201, json={"shared_id": body["shared_id"],
+                                             "purpose": body["purpose"], "members": [],
+                                             "created_by": body["created_by"]})
+        if request.url.path.endswith("/synthesize"):
+            return httpx.Response(200, json={"memory_version": 1, "synthesized": True})
+        return httpx.Response(200, json={"accepted": 1, "memory_version": 0,
+                                         "synthesized": False})
+
+    return sent, service
+
+
+def test_resync_recreates_a_known_session_with_its_REAL_creator_and_purpose(
+    tmp_path, capsys
+) -> None:
+    """The defect this whole change exists for (2026-08-06, verified by reading
+    the wire).
+
+    resync's step 1 used to POST `{"purpose": "(recovered by resync)",
+    "created_by": "resync"}` because the retained log carries findings and
+    nothing about the session. Against a LIVE service that is inert —
+    `store.create_session` returns an existing session unchanged — so the only
+    run in which it did anything was the one it was written for: after a
+    genuine restart the store is empty, the POST is a real CREATE, and the
+    session's creator became the literal string "resync". `api.end_session` is
+    creator-only, so from that moment the human who created the session was
+    refused ("only resync can end this session") while anyone who had read
+    cli.py could close it by sending `{"ended_by": "resync"}` — a gate that
+    refuses the owner and admits everyone else.
+
+    `sessions.json` is what this machine recorded when `create_session` (or
+    `join_session`) bound it, so the recreate can send the truth instead. The
+    purpose rides along on the same record, which is why STATE.md's "the
+    session's purpose is lost on a genuine recreate" stops being true for a
+    session this machine knows.
+    """
+    record_session(tmp_path, "sh-joined", created_by="siddsing", purpose="fec decode")
+    _seed_retained_finding(tmp_path, "sh-joined")
+    sent, service = _recreate_body_capture()
+
+    exit_code = cli.main(["--state-dir", str(tmp_path), "resync"],
+                         transport=httpx.MockTransport(service))
+
+    assert exit_code == 0, capsys.readouterr().out
+    assert sent == [{"purpose": "fec decode", "created_by": "siddsing",
+                     "shared_id": "sh-joined"}]
+
+
+def test_resync_recreates_an_unknown_session_ownerless_never_as_a_sentinel(
+    tmp_path, capsys
+) -> None:
+    """No record on this machine — a session joined by `synapse-worker join`
+    before the lifecycle tools existed, or one whose findings this orchestrator
+    holds without ever having created or joined it.
+
+    `created_by: null`, not "resync" and not a guess. The key still travels
+    (the service requires it, so a typo cannot silently create an ownerless
+    session) but its value is the honest unknown, which the service answers by
+    letting any CURRENT MEMBER end the session instead of naming a creator who
+    never existed. `purpose` keeps a placeholder because the contract still
+    requires a string there — an unknown purpose costs a label, an unknown
+    creator would cost a permission.
+    """
+    _seed_retained_finding(tmp_path, "sh-orphan")
+    assert not (tmp_path / "sessions.json").exists()      # nothing knows who owns it
+    sent, service = _recreate_body_capture()
+
+    exit_code = cli.main(["--state-dir", str(tmp_path), "resync"],
+                         transport=httpx.MockTransport(service))
+
+    assert exit_code == 0, capsys.readouterr().out
+    assert sent == [{"purpose": "(recovered by resync)", "created_by": None,
+                     "shared_id": "sh-orphan"}]
+
+
+def test_resync_sends_each_session_its_own_identity(tmp_path, capsys) -> None:
+    """Two sessions in one backlog, one known and one not. The lookup is per
+    session — a single `metadata` read applied to whichever session happens to
+    be first would attribute one team's session to the other's creator, which
+    is the same class of error as the sentinel and just as silent."""
+    record_session(tmp_path, "sh-known", created_by="siddsing", purpose="fec decode")
+    _seed_retained_finding(tmp_path, "sh-known", fid="f-known")
+    _seed_retained_finding(tmp_path, "sh-orphan", fid="f-orphan")
+    sent, service = _recreate_body_capture()
+
+    exit_code = cli.main(["--state-dir", str(tmp_path), "resync"],
+                         transport=httpx.MockTransport(service))
+
+    assert exit_code == 0, capsys.readouterr().out
+    assert {b["shared_id"]: (b["created_by"], b["purpose"]) for b in sent} == {
+        "sh-known": ("siddsing", "fec decode"),
+        "sh-orphan": (None, "(recovered by resync)"),
+    }
 
 
 def test_build_npu_distiller_matches_the_workers_config_pack_and_model(monkeypatch) -> None:

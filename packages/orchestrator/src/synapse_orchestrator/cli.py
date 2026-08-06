@@ -38,8 +38,20 @@ from synapse_orchestrator.briefing import (
 from synapse_orchestrator.ended import ended_session_ids, record_ended
 from synapse_orchestrator.relay import Relay
 from synapse_orchestrator.server import create_mcp, register_tools
+from synapse_orchestrator.session_meta import (UNKNOWN_PURPOSE, SessionMeta,
+                                               retained_sessions)
 
 logger = logging.getLogger(__name__)
+
+# UNKNOWN_PURPOSE — the purpose `resync` recreates a session with when this
+# machine has no record of what it was for. Unchanged wording from before
+# session_meta existed, on purpose: it is still exactly what it says, and it is
+# now reached only in the case it was always honest about — a session recreated
+# from a retained log by a machine that never created or joined it through the
+# lifecycle tools. It MOVED to session_meta.py (2026-08-06) because
+# `record_session` has to recognise it coming back off the wire and must not
+# import this module to do so; re-exported by this import so `cli.UNKNOWN_PURPOSE`
+# still resolves for every existing reader.
 
 
 def _bindings_dir(state_dir: Path) -> Path:
@@ -220,6 +232,46 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _warn_if_identity_was_not_taken(shared_id: str, meta: SessionMeta, resp) -> None:
+    """Say so when this machine KNEW the session's identity and the service
+    kept a different one (2026-08-06 review).
+
+    `store.create_session` is create-or-return, which is exactly what makes the
+    recreate above safe to issue unconditionally — and it also means the send
+    is a no-op whenever the session is already there. So if another machine
+    resynced first with no record, sh-X is already back OWNERLESS and this
+    machine's correct `created_by` is silently discarded, with no code path
+    left that can restore it: the session falls to the membership gate for the
+    rest of its life even though somebody knew the owner the whole time.
+
+    Reported, not repaired. A service-side "null may be upgraded to a name"
+    rule would fix it outright and is refused: with no auth anywhere in
+    Synapse, that is a hijack primitive — any caller could claim an ownerless
+    session and lock the team out of ending it, which is strictly worse than
+    the membership fallback it would replace. An operator who sees this line
+    can end the session by joining it, which is the sanctioned remedy.
+
+    Never raises and never blocks the resync: this is a note about ownership,
+    and the findings are what the command is actually for. `logger.warning`
+    rather than `print` deliberately — the printed lines are this command's
+    result contract (`resync: ...`), read by eyes and by CI.
+    """
+    try:
+        body = resp.json()
+    except ValueError:
+        return
+    if not isinstance(body, dict):
+        return
+    served = body.get("created_by")
+    if meta.created_by is not None and served != meta.created_by:
+        logger.warning(
+            "Resync recreated %s but the service reports created_by=%r, not the %r "
+            "this machine has on record — another orchestrator recreated it first "
+            "with a different (or no) record of the owner. The session cannot be "
+            "re-owned; whoever needs to end it must be a current member of it.",
+            shared_id, served, meta.created_by)
+
+
 async def cmd_resync(args: argparse.Namespace, *,
                      transport: httpx.AsyncBaseTransport | None = None) -> int:
     """`resync()` itself is a bare int — the plan's documented signature,
@@ -252,14 +304,44 @@ async def cmd_resync(args: argparse.Namespace, *,
     # 1. RECREATE, before the push. After a real restart the sh-... does not
     #    exist, so the push 404s. `POST /v1/sessions` with a known id is
     #    create-or-return: it returns a live session UNCHANGED, so this is
-    #    safe to call every time. The purpose is lost on a genuine recreate --
-    #    the retained log does not carry it -- which is why it says so.
+    #    safe to call every time.
+    #
+    #    WHAT WE SEND AS THE SESSION'S IDENTITY (corrected 2026-08-06). This
+    #    used to post `{"purpose": "(recovered by resync)", "created_by":
+    #    "resync"}` because the retained log carries findings and nothing about
+    #    the session. Against a live service that is inert -- create-or-return
+    #    hands back the existing session unchanged -- so the only run in which
+    #    it did anything was the one it was written for: after a genuine
+    #    restart the store is empty, that POST is a real CREATE, and the
+    #    session's creator BECAME the string "resync". `api.end_session` is
+    #    creator-only, so the human who actually created the session was then
+    #    refused ("only resync can end this session") while anyone who had read
+    #    this file could close it by sending `{"ended_by": "resync"}`.
+    #
+    #    So we no longer invent one. `synapse_orchestrator.session_meta` retains
+    #    `shared_id -> {created_by, purpose}` for every session THIS machine
+    #    created or joined, and that record is what goes back on the wire -- the
+    #    purpose included, so it is no longer lost on a recreate of a session
+    #    this machine knows. When there is no record, `created_by` is None: an
+    #    honest unknown the service answers with a membership check, never a
+    #    sentinel string that locks the session against its owner. `purpose`
+    #    keeps a placeholder because the contract still requires a string, and
+    #    an unknown purpose costs a label rather than a permission.
+    #
+    #    STOPGAP, same as `ended.json` above and for the same underlying reason
+    #    (the SERVICE's log is in-memory); another machine's resync knows
+    #    nothing about this file. See session_meta.py.
+    metadata = retained_sessions(state_dir)
     async with httpx.AsyncClient(transport=transport, timeout=10.0) as client:
         for sid in known_sessions:
+            meta = metadata.get(sid, SessionMeta())
             try:
-                await client.post(f"{base}/v1/sessions",
-                                  json={"purpose": "(recovered by resync)",
-                                        "created_by": "resync", "shared_id": sid})
+                resp = await client.post(
+                    f"{base}/v1/sessions",
+                    json={"purpose": (meta.purpose if meta.purpose is not None
+                                      else UNKNOWN_PURPOSE),
+                          "created_by": meta.created_by, "shared_id": sid})
+                _warn_if_identity_was_not_taken(sid, meta, resp)
             except (httpx.HTTPError, OSError):
                 pass          # the push below reports the real failure, loudly
 

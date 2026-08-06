@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from pydantic import BaseModel, Field, ValidationError
@@ -50,15 +51,128 @@ SYNTH_SCHEMA = {
     "required": ["working_memory", "merges", "trivial_ids", "conflicts"],
 }
 
-SYNTH_SYSTEM = (
-    "You maintain one team's shared working memory. Rewrite the working memory "
-    "(under 500 words) from the current memory plus the new findings. Where two "
-    "findings state the same fact, merge them: emit ONE merged text capturing the "
-    "essence of BOTH — never drop a qualifier one of them adds. Mark findings that "
-    "merely restate actions without insight as trivial. Where two findings "
-    "contradict each other, report a conflict — do not resolve it. Return JSON "
-    "matching the schema exactly, using finding ids verbatim."
-)
+# --- the OUTPUT budget -------------------------------------------------------
+#
+# capability.py owns this discipline for the distiller: "The budget is **never**
+# a shared hard-coded constant: swapping the distiller model, or editing the
+# prompt, must re-budget segmentation automatically." Synthesis was outside that
+# system entirely, and paid for it on 2026-08-06 -- see test_synthesis_budget.py
+# for the full incident. These constants bring the same rule to the reduce half.
+#
+# Every number below is MEASURED off the live session that broke, not taken from
+# a model card:
+#   3065 chars / 477 words of real working memory  -> 6.42 chars/word
+#   token estimate at the usual ~4 chars/token     -> ~766 tokens
+#   => ~1.61 tokens/word, rounded UP to 1.7 so the estimate errs toward
+#      refusing a round rather than overflowing one.
+TOKENS_PER_WORD = 1.7
+# `{"working_memory": ..., "merges": [], "trivial_ids": [], "conflicts": []}` --
+# the four keys, braces and quoting that exist whatever the content is.
+JSON_ENVELOPE_TOKENS = 40
+# One merge verdict: two source_ids (~12 tok each), a merged text (~40 tok) and
+# a type. Conflicts cost about the same. This is what makes a candidate
+# EXPENSIVE -- every candidate offered is a verdict the model might report.
+TOKENS_PER_VERDICT_ENTRY = 70
+# Below this there is no room to report anything the round discovered, so the
+# merge would land a rewritten memory and silently drop every merge/conflict.
+MIN_VERDICT_TOKENS = 300
+# A working memory longer than this is a product decision, not a budget one:
+# past ~500 words it stops being a briefing. Kept as the ceiling so a large
+# budget spends its surplus on verdicts instead of prose.
+MAX_WM_WORDS = 500
+# Below this the memory cannot brief an arriving teammate, which is the whole
+# reason it exists -- capability.py's MIN_USABLE_SEGMENT_TOKENS, other end.
+MIN_WM_WORDS = 120
+# What `synapse_service.cli._provider()` builds when nothing overrides it, and
+# what a provider without a `max_tokens` attribute (FakeProvider in tests) is
+# assumed to allow.
+DEFAULT_OUTPUT_TOKENS = 800
+
+
+class SynthesisBudgetError(ValueError):
+    """An output budget that cannot produce a usable synthesis round."""
+
+
+@dataclass(frozen=True)
+class SynthesisBudget:
+    """How one merge call's output tokens are divided.
+
+    The working-memory word cap is DERIVED here and stated in the prompt by
+    `synth_system`, so the two can never drift apart the way "under 500 words"
+    and `max_tokens=800` did.
+    """
+
+    output_tokens: int
+    working_memory_words: int
+    verdict_tokens: int
+    max_merges: int
+
+    @classmethod
+    def derive(cls, output_tokens: int) -> SynthesisBudget:
+        """Split `output_tokens` into a memory rewrite and room for verdicts.
+
+        Verdicts are reserved FIRST. The failure being fixed was the opposite
+        order in effect -- the memory took everything and the verdicts got what
+        was left, which was nothing -- and a round that reports no merges is a
+        round that did not do its job, however good the prose is.
+        """
+        spare = output_tokens - JSON_ENVELOPE_TOKENS - MIN_VERDICT_TOKENS
+        words = min(MAX_WM_WORDS, int(spare / TOKENS_PER_WORD))
+        if words < MIN_WM_WORDS:
+            raise SynthesisBudgetError(
+                f"output budget of {output_tokens} tokens leaves room for only "
+                f"{words} words of working memory (minimum {MIN_WM_WORDS}). "
+                f"Raise the provider's max_tokens -- e.g. INFERENCE_CLOUD_MAX_TOKENS "
+                f"for AIC100Provider -- or lower MIN_VERDICT_TOKENS deliberately."
+            )
+        verdict_tokens = (output_tokens - JSON_ENVELOPE_TOKENS
+                          - int(words * TOKENS_PER_WORD))
+        return cls(
+            output_tokens=output_tokens,
+            working_memory_words=words,
+            verdict_tokens=verdict_tokens,
+            max_merges=max(1, verdict_tokens // TOKENS_PER_VERDICT_ENTRY),
+        )
+
+    @classmethod
+    def for_provider(cls, provider: ModelProvider) -> SynthesisBudget:
+        """Read the cap off whatever provider is wired in. `max_tokens` is
+        AIC100Provider's; FakeProvider and friends have none and get the
+        default, which keeps every existing test on the shipped budget."""
+        return cls.derive(int(getattr(provider, "max_tokens", DEFAULT_OUTPUT_TOKENS)))
+
+
+def synth_system(working_memory_words: int, max_merges: int = 4) -> str:
+    """The merge system prompt, with its budget filled in from `SynthesisBudget`.
+
+    Was a module-level constant reading "under 500 words". That literal was
+    the bug: it stated a size the token cap could not pay for, and nothing in
+    the system compared the two. Generating it means editing `max_tokens` --
+    or swapping the synthesis model -- re-states the cap automatically.
+
+    The last two sentences are the overflow contract, and they are stated to
+    the model rather than enforced by withholding candidates (see `merge`).
+    Dropping the OLDEST material from the memory is explicitly the sanctioned
+    way to stay inside the cap: the memory is a projection over the Log, so
+    anything evicted is still on disk and still reachable through /synthesize
+    -- unlike a merge the model declines to report, which simply does not
+    happen this round.
+    """
+    return (
+        "You maintain one team's shared working memory. Rewrite the working memory "
+        f"(under {working_memory_words} words) from the current memory plus the new "
+        "findings. Where two "
+        "findings state the same fact, merge them: emit ONE merged text capturing the "
+        "essence of BOTH — never drop a qualifier one of them adds. Mark findings that "
+        "merely restate actions without insight as trivial. Where two findings "
+        "contradict each other, report a conflict — do not resolve it. Return JSON "
+        "matching the schema exactly, using finding ids verbatim. "
+        f"Report at most {max_merges} merges — the most valuable ones — and keep each "
+        "merged text to one or two sentences. "
+        f"Staying under {working_memory_words} words is a hard requirement: when the "
+        "memory will not fit, drop the OLDEST and least-relevant material rather than "
+        "truncating mid-sentence or omitting any required key."
+    )
 
 
 class _MergeVerdict(BaseModel):
@@ -112,9 +226,36 @@ class _SynthesisVerdicts(BaseModel):
 class Synthesizer:
     def __init__(self, provider: ModelProvider) -> None:
         self.provider = provider
+        # What the LAST merge actually cost, for the rate governor in api.py.
+        # Recorded on EVERY completed provider call including schema-invalid
+        # ones -- a truncated verdict burns exactly as many tokens as a good
+        # one and must not be free in the budget, which is precisely the case
+        # that ran the key dry unnoticed on 2026-08-06. None until a call has
+        # returned, and CLEARED at the top of every round (see `merge`) so a
+        # round that raises cannot be charged at the PREVIOUS round's cost.
+        self.last_usage = None
+        # Whether the last round reached the provider AT ALL. Separate from
+        # `last_usage` because api._record_spend needs to tell two states
+        # apart that both leave `last_usage` None: "a request went out and
+        # came back without usage numbers" (charge the assumed cost -- the
+        # tokens were spent whatever the response said) and "no request was
+        # ever made" (charge nothing). Conflating them charged a full round
+        # for `merge()`s that returned at `if not candidates` without a
+        # single HTTP call: six `POST /synthesize` against a session holding
+        # no findings exhausted the hour's app-wide token budget and deferred
+        # synthesis on every OTHER session for an hour. Verified by execution
+        # 2026-08-06.
+        self.last_call_made = False
 
     async def merge(self, store: InMemoryStore, shared_id: str,
                     new_findings: list[Finding]) -> SessionContext:
+        # Reset BEFORE the early returns below, not after the call: these two
+        # describe THIS round to `api._record_spend`, and a round that never
+        # reaches the provider must leave them saying so rather than
+        # re-presenting the last round's numbers as if they had been spent
+        # again.
+        self.last_usage = None
+        self.last_call_made = False
         store.upsert(shared_id, new_findings)                       # 1. durability first
         ctx = store.get_context(shared_id)
 
@@ -174,6 +315,23 @@ class Synthesizer:
             others = [f for f in retrievable if f.id not in new_ids][-CANDIDATE_WINDOW:]
             marks = {}
 
+        # The output budget bounds what the model REPORTS, never what it is
+        # SHOWN. An earlier pass trimmed the candidate list to fit the verdict
+        # budget and two tests caught it immediately: offering fewer candidates
+        # does not save output tokens, because a candidate only costs output if
+        # it turns out to merge, and most do not. What it does instead is
+        # starve the merge -- with 5 pushed findings the trim left zero
+        # established partners, which is precisely the failure the ranked-union
+        # above exists to prevent. Candidates are an INPUT cost, and input is
+        # not the constraint here (2110 tokens against a 128K window).
+        #
+        # So the cap is stated to the model as an instruction (see
+        # `synth_system`) rather than enforced by starvation, and the shed of
+        # last resort is the working memory itself -- which is safe because the
+        # memory is a PROJECTION, not the record. Every finding stays in the
+        # log; /synthesize can rebuild the memory from it at any time.
+        budget = SynthesisBudget.for_provider(self.provider)
+
         candidates = pushed + others
         if not candidates:
             return ctx
@@ -188,17 +346,27 @@ class Synthesizer:
 
         listing = "\n".join(_line(f) for f in candidates)
         messages = [
-            {"role": "system", "content": SYNTH_SYSTEM},
+            {"role": "system", "content": synth_system(budget.working_memory_words,
+                                                       budget.max_merges)},
             {"role": "user", "content":
                 f"PURPOSE: {ctx.purpose}\n\nCURRENT WORKING MEMORY:\n"
                 f"{ctx.working_memory or '(empty)'}\n\nFINDINGS:\n{listing}"},
         ]
+        # Marked BEFORE the await, not after: an exception means the request
+        # went out and the tokens are gone (AIC100Provider has already burned
+        # its internal retry by the time it raises), so that round must still
+        # be charged -- at ASSUMED_MERGE_TOKENS, since nothing came back to
+        # measure.
+        self.last_call_made = True
         try:
             result = await self.provider.complete(messages, response_schema=SYNTH_SCHEMA)
         except Exception:                                           # noqa: BLE001
             logger.exception("Synthesis failed for %s; findings are landed, memory unchanged",
                              shared_id)
             return ctx
+        # Before the schema gate on purpose: a truncated round costs the same
+        # tokens as a successful one.
+        self.last_usage = result.usage
 
         # Every real provider's documented failure path hands back something
         # that isn't a verdicts dict: AIC100Provider returns data=None with

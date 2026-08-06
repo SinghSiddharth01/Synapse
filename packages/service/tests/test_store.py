@@ -149,25 +149,30 @@ def test_candidates_are_projected_like_every_other_read():
     assert candidate.finding.status is FindingStatus.KEPT
 
 
-def test_a_second_upsert_of_the_same_batch_appends_without_reindexing():
+def test_a_second_upsert_of_the_same_batch_costs_the_log_nothing():
     """What ONE push of N findings actually costs the log, said out loud.
 
-    `api.push_findings` calls `store.upsert(sid, findings)` (api.py:71) and then
-    `synthesizer.merge` calls `store.upsert(shared_id, new_findings)` AGAIN
-    (synthesis.py:131). Against the old dict the second call was genuinely
-    inert, and api.py:78-80's comment says so. Against an append-only log it is
-    not: `append` records a resend deliberately (the branch's own docstring:
-    "the duplicate is recorded in the log (it happened)"), so the second upsert
-    writes N more FindingAppended entries.
+    ⟨AMENDED 2026-08-06⟩ This used to pin 3N and describe the cause as
+    out-of-scope to fix. It is now 2N, and the amendment is the point.
 
-    3N per push: N FindingAppended + N TopicAssigned from the first upsert,
-    N FindingAppended from the second. `rebuild()` cost and `Log.version` scale
-    with that number, so it is pinned rather than left for the next person to
-    rediscover while wondering why the log is twice the size they expected.
+    `api.push_findings` calls `store.upsert(sid, findings)` and then
+    `synthesizer.merge` calls `store.upsert(shared_id, new_findings)` AGAIN,
+    so every finding was appended twice. That was deliberate ("the duplicate
+    is recorded in the log (it happened)") and it was wrong in practice: the
+    dashboard's log tail showed every finding twice, which is how it surfaced,
+    and the write-ahead log RETRIES by design so a flaky upstream multiplied
+    the noise further. An identical resend is not an event.
 
-    The fix -- dropping merge()'s own upsert -- is out of scope: all 19
-    `merge(store, ...)` call sites in test_synthesis.py land findings nobody
-    upserted first. See Not-in-scope."""
+    `upsert` now skips the append when the stored finding compares equal, so
+    the second upsert costs zero entries. The comparison is free -- it reads
+    the single folded view `upsert` already computes for the whole batch --
+    and only EXACT duplicates are dropped, which
+    test_a_resend_whose_content_changed_is_still_recorded pins from the other
+    side. Dropping merge()'s own upsert remains the deeper fix and remains out
+    of scope; it is no longer costing anything.
+
+    2N per push: N FindingAppended + N TopicAssigned, both from the first
+    upsert. `rebuild()` cost and `Log.version` scale with that number."""
     store, sid = _store_with_session()
     batch = [_finding("f-1"), _finding("f-2"), _finding("f-3")]
 
@@ -179,7 +184,7 @@ def test_a_second_upsert_of_the_same_batch_appends_without_reindexing():
 
     after_second = len(store._memories[sid].log.entries)
     assert after_first == 6                        # 3 FindingAppended + 3 TopicAssigned
-    assert after_second == 9                       # + 3 FindingAppended, no re-indexing
+    assert after_second == 6                       # the resend adds nothing at all
     assert len(store.all_findings(sid)) == 3       # nothing was duplicated in the VIEW
     assert store._memories[sid].view().topic_of == topics_before
 

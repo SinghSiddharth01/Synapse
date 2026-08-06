@@ -165,8 +165,27 @@ class AIC100Provider(ModelProvider):
                          or [api_key or os.environ.get("INFERENCE_CLOUD_API_KEY", "")])
         self._key_index = 0
         self.api_key = self.api_keys[0]  # kept for back-compat introspection
-        self.max_tokens = max_tokens
-        self.timeout = timeout
+        # INFERENCE_CLOUD_MAX_TOKENS / _TIMEOUT exist for the same reason
+        # INFERENCE_CLOUD_MODEL does: these are the numbers an operator must be
+        # able to change on a RUNNING deployment, and until 2026-08-06 both were
+        # constructor defaults reachable only from Python. `synapse_service.cli.
+        # _provider()` builds this with no arguments, so the service had no way
+        # to set either one.
+        #
+        # max_tokens is the number that decides whether a synthesis verdict
+        # FITS. It is not an endpoint limit -- probed live 2026-08-06, this host
+        # accepts max_tokens=3000 -- it is a bound on the shared credit pool.
+        # Raise it deliberately, against the measured budget, not by taste.
+        #
+        # timeout travels with it and must be raised TOGETHER: a bigger cap
+        # means a longer generation, and a ReadTimeout is caught by
+        # synthesis.py's `except Exception` and reported as "findings are
+        # landed, memory unchanged" -- the identical symptom truncation
+        # produces, from a different cause. Two syntheses measured at 48.5s and
+        # 51.7s against the 60.0s default on 2026-08-06 were already one slow
+        # round from that cliff.
+        self.max_tokens = int(os.environ.get("INFERENCE_CLOUD_MAX_TOKENS") or max_tokens)
+        self.timeout = float(os.environ.get("INFERENCE_CLOUD_TIMEOUT") or timeout)
         self._transport = transport
 
     @property
@@ -231,7 +250,7 @@ class AIC100Provider(ModelProvider):
                 parsed = extract_first_json_object(text)
                 if parsed is not None and _satisfies_schema(parsed, response_schema):
                     return self._result(parsed, payload, started, schema_valid=True)
-                if choice.get("finish_reason") == "length":
+                if self._was_truncated(choice, payload):
                     # A response cut off by max_tokens takes the IDENTICAL
                     # path as unparseable garbage from here on (retry, then
                     # honest schema_valid=False) -- nothing in the
@@ -241,14 +260,62 @@ class AIC100Provider(ModelProvider):
                     # the two apart and knows to raise max_tokens rather
                     # than blame the model or the prompt.
                     logger.warning("AIC100 response truncated at max_tokens=%d "
-                                   "(finish_reason=length) on attempt %d; a truncated "
-                                   "response is indistinguishable from garbage downstream "
-                                   "without this log line", self.max_tokens, attempt)
+                                   "(completion_tokens=%s, finish_reason=%s) on attempt "
+                                   "%d; a truncated response is indistinguishable from "
+                                   "garbage downstream without this log line",
+                                   self.max_tokens,
+                                   payload.get("usage", {}).get("completion_tokens"),
+                                   choice.get("finish_reason"), attempt)
+                    # SHRINK THE ASK, do not echo the overflow. The generic
+                    # repair below appends the bad response to the prompt --
+                    # under a length failure that lengthens the input and gives
+                    # the model no reason to emit less, so attempt 1 fails the
+                    # same way attempt 0 did. Asking for "much shorter" is the
+                    # only retry that can actually fit. Deliberately generic:
+                    # this provider knows nothing about working memory or word
+                    # counts. The CALLER owns its own content budget (see
+                    # synapse_service.synthesis, which derives a word cap from
+                    # this same max_tokens and states it in the prompt).
+                    prompt = (base_prompt
+                             + f"\n\nYour previous response exceeded the "
+                               f"{self.max_tokens}-token limit and was cut off "
+                               "mid-answer. Return the SAME JSON object, with every "
+                               "required key present, but MUCH SHORTER -- at most half "
+                               "the length. Prefer completeness of structure over "
+                               "detail in any one field.\nJSON:")
+                    continue
                 prompt = (base_prompt
                          + "\n\nYour previous response did not match the schema:\n"
                          + text.strip()[:500]
                          + "\n\nReturn ONLY the corrected JSON object, nothing else.\nJSON:")
             return self._result(None, payload, started, schema_valid=False)
+
+    def _was_truncated(self, choice: dict[str, Any], payload: dict[str, Any]) -> bool:
+        """Whether the response was cut off at the token cap.
+
+        `finish_reason == "length"` is the documented signal and is checked
+        first, but it CANNOT BE RELIED ON HERE. Probed live 2026-08-06 against
+        aisuite-indonesia: a /completions call with max_tokens=3000 returned
+        completion_tokens=3000 and `finish_reason: "stop"`. The response was
+        cut off at exactly the cap and the endpoint said it stopped naturally.
+
+        That single wrong field is why synthesis failed silently for hours:
+        every truncation took the unparseable-garbage path with no warning, so
+        the logs showed nothing but HTTP 200s and a memory_version that would
+        not move. The unit test covering the warning fabricated a
+        finish_reason="length" fixture the host never sends, so it passed
+        throughout.
+
+        completion_tokens >= max_tokens is endpoint-independent: the model
+        cannot emit more than the cap, so reaching it exactly means either a
+        cut-off response or one that ended precisely on the boundary. Those are
+        indistinguishable from here, and treating the second as complete is the
+        unsafe direction -- a whole synthesis round is lost either way.
+        """
+        if choice.get("finish_reason") == "length":
+            return True
+        emitted = payload.get("usage", {}).get("completion_tokens")
+        return isinstance(emitted, int) and emitted >= self.max_tokens
 
     def _result(self, data: Any, payload: dict[str, Any], started: float,
                 *, schema_valid: bool) -> ModelResult:

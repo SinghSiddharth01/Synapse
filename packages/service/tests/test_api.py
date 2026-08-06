@@ -49,8 +49,20 @@ def _finding_json(fid: str, agent_session: str = "as-1", text: str | None = None
 
 
 def _client(provider) -> httpx.AsyncClient:
-    return httpx.AsyncClient(transport=httpx.ASGITransport(app=build_app(provider)),
-                             base_url="http://svc")
+    """merge_min_interval_s=0 restores merge-on-every-push for these tests.
+
+    Production debounces to one synthesis per MERGE_MIN_INTERVAL_S per session
+    (api.py: the hosted key allows ~7 merges/hour and a live worker pushes far
+    more often than that). Several tests below assert on INCREMENTAL synthesis
+    -- one version bump per push, replay convergence counted in merge rounds --
+    which is a statement about what merge() does when it runs, not about how
+    often it is allowed to. Debouncing them would test the rate limiter twice
+    and the convergence property not at all. test_merge_debounce.py owns the
+    interval's own behaviour.
+    """
+    return httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=build_app(provider, merge_min_interval_s=0)),
+        base_url="http://svc")
 
 
 async def test_full_flow_push_watermark_query():
@@ -66,7 +78,8 @@ async def test_full_flow_push_watermark_query():
 
         r = await client.post(f"/v1/sessions/{sid}/findings",
                               json={"findings": [_finding_json("f-1")]})
-        assert r.json() == {"accepted": 1, "memory_version": 1, "synthesized": True}
+        assert r.json() == {"accepted": 1, "memory_version": 1, "synthesized": True,
+                            "deferred": False, "pending": 0}
 
         r = await client.get(f"/v1/sessions/{sid}/watermark", params={"agent_session": "as-9"})
         # Exact equality on purpose: this is the ONLY thing pinning the route
@@ -103,7 +116,8 @@ async def test_replayed_push_is_a_noop_and_skips_the_model():
         first = await client.post(f"/v1/sessions/{sid}/findings", json=body)
         replay = await client.post(f"/v1/sessions/{sid}/findings", json=body)
     assert first.json()["accepted"] == 1
-    assert replay.json() == {"accepted": 0, "memory_version": 1, "synthesized": False}
+    assert replay.json() == {"accepted": 0, "memory_version": 1, "synthesized": False,
+                             "deferred": False, "pending": 0}
     assert provider.calls == 1     # the replay must never reach the provider a 2nd time
 
 
@@ -122,7 +136,8 @@ async def test_push_response_reports_whether_synthesis_actually_ran():
               ).json()["shared_id"]
         r = await client.post(f"/v1/sessions/{sid}/findings",
                               json={"findings": [_finding_json("f-1")]})
-        assert r.json() == {"accepted": 1, "memory_version": 0, "synthesized": False}
+        assert r.json() == {"accepted": 1, "memory_version": 0, "synthesized": False,
+                            "deferred": False, "pending": 0}
 
 
 async def test_watermark_applies_the_same_suppression_rule_as_query():
@@ -274,10 +289,11 @@ async def test_synthesize_self_heals_a_session_whose_last_push_failed():
 
         r = await client.post(f"/v1/sessions/{sid}/findings",
                               json={"findings": [_finding_json("f-1")]})
-        assert r.json() == {"accepted": 1, "memory_version": 0, "synthesized": False}
+        assert r.json() == {"accepted": 1, "memory_version": 0, "synthesized": False,
+                            "deferred": False, "pending": 0}
 
         r = await client.post(f"/v1/sessions/{sid}/synthesize")
-        assert r.json() == {"memory_version": 1, "synthesized": True}
+        assert r.json() == {"memory_version": 1, "synthesized": True, "flushed": 0}
 
         r = await client.get(f"/v1/sessions/{sid}/watermark", params={"agent_session": "as-x"})
         assert r.json()["version"] == 1
@@ -340,7 +356,7 @@ async def test_full_log_replay_into_a_fresh_store_converges_with_the_original_st
         assert r.json()["memory_version"] == 1
 
         r = await client.post(f"/v1/sessions/{sid}/synthesize")
-        assert r.json() == {"memory_version": 2, "synthesized": True}
+        assert r.json() == {"memory_version": 2, "synthesized": True, "flushed": 0}
         replay_version = r.json()["memory_version"]
 
         r = await client.post(f"/v1/sessions/{sid}/query",

@@ -165,6 +165,36 @@ notes = "QAIRT/W4A16, NPU-exclusive, Snapdragon X Elite X1E80100."
 # response_reserve, prefill_toks_per_sec * max_seconds_per_call) = min(~983k,
 # 90,000) = 90,000 -- the exact "90,000-token segments" failure the pin
 # exists to prevent).
+# The SYNTHESIS model — the reduce half of the pipeline. Recorded 2026-08-06,
+# after synthesis silently stopped bumping memory_version for 40 minutes while
+# findings kept landing normally.
+#
+# The cause was that this record did not exist. Every DISTILLER model has one
+# and the segmenter derives its budget from it (capability.py: "The budget is
+# **never** a shared hard-coded constant"). The synthesizer sat outside that
+# system: `AIC100Provider.__init__` carried `max_tokens=800` as a constructor
+# default, `SYNTH_SYSTEM` asked for a working memory "under 500 words" (~850
+# tokens at the measured 1.7 tok/word), and nothing anywhere compared the two.
+# The memory alone overran the output cap, every response was cut off
+# mid-object, and the tolerant JSON extractor returned None.
+#
+# PROBED LIVE, both worth knowing before touching these numbers:
+#   * The endpoint accepts max_tokens=3000. 800 was never a limit of the host,
+#     only a bound on the shared credit pool.
+#   * It reports `finish_reason: "stop"` on a response cut off at exactly the
+#     cap. The truncation guard therefore keys on completion_tokens >=
+#     max_tokens instead; the finish_reason branch is kept but cannot fire here.
+#
+# usable_context is the ADVERTISED 128K window — /models on this host returns
+# names only, with no max_model_len, so unlike the NPU record below this number
+# is not locally measured. It has never bound anything: the largest failing
+# synthesis used 2110 input tokens, 1.6% of it. Output is the whole story.
+[capability."Llama-3.3-70B"]
+usable_context = 128000        # advertised, NOT measured — the host does not report it
+prefill_toks_per_sec = 3000.0  # illustrative; a hosted API is not prefill-bound
+response_reserve = 1600        # THE number this record exists for — see synthesis.py
+notes = "Cirrascale aisuite-indonesia, the synthesis arm (SYNAPSE_SYNTHESIZER=aic100). response_reserve is the output budget SynthesisBudget divides into a working-memory word cap and verdict room; override at runtime with INFERENCE_CLOUD_MAX_TOKENS, and raise INFERENCE_CLOUD_TIMEOUT with it. Rate limits observed 2026-08-06: 20 req/hour and 25,000 tokens/hour per key, so ~7 syntheses/hour at this budget."
+
 [capability."claude-opus-5"]
 usable_context = 1000000       # Claude Opus 5's context window; 1M is both the default and the max
 prefill_toks_per_sec = 3000.0  # illustrative only -- not measured, see note above

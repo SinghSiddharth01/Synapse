@@ -52,7 +52,7 @@ class InMemoryStore:
         self._last_seen: dict[tuple[str, str], int] = {}
 
     # ── sessions ────────────────────────────────────────────────────────────
-    def create_session(self, purpose: str, created_by: str, *,
+    def create_session(self, purpose: str, created_by: str | None, *,
                        shared_id: str | None = None) -> SynapseSession:
         """Create, or return an EXISTING session unchanged.
 
@@ -65,7 +65,19 @@ class InMemoryStore:
         Returning the existing session UNCHANGED is what makes this safe to
         call unconditionally, which is what `cmd_resync` does: a recovering
         client does not know whether the service still has the session, and
-        must not overwrite a live one's purpose if it does."""
+        must not overwrite a live one's purpose if it does.
+
+        `created_by` may be None since 2026-08-06 -- "recreated after a restart
+        and this machine has no record of who created it" (see
+        `SynapseSession.created_by` for why that is a None and not a sentinel).
+        The unchanged-on-return rule above is what makes accepting it safe:
+        a resync that genuinely knows nothing POSTs None, and if the service is
+        actually LIVE the existing session comes back with its real creator
+        intact. Recovery must never DOWNGRADE a live session's ownership to
+        unknown, and that property is this one `return` rather than a check --
+        pinned by test_lifecycle.py's
+        test_recreating_a_live_session_with_created_by_none_does_not_downgrade_it.
+        """
         if shared_id is not None and shared_id in self._sessions:
             return self._sessions[shared_id]
         shared_id = shared_id or f"sh-{uuid.uuid4().hex[:8]}"
@@ -192,14 +204,35 @@ class InMemoryStore:
         to each `append` as `is_new=`, rather than each append re-folding a
         log that the previous append just invalidated."""
         memory = self._memories[shared_id]
-        seen = set(memory.view().findings)
+        view = memory.view()
+        seen = dict(view.findings)
         new = 0
         for finding in findings:
             is_new = finding.id not in seen
             if is_new:
-                seen.add(finding.id)
+                seen[finding.id] = finding
                 new += 1
-            memory.append(finding, is_new=is_new)
+                memory.append(finding, is_new=True)
+                continue
+            # AN IDENTICAL RESEND IS NOT AN EVENT. Skipped entirely rather
+            # than appended, which is what stopped one push of N from costing
+            # 3N log entries (N FindingAppended + N TopicAssigned here, then N
+            # more FindingAppended when synthesis.merge upserts the SAME list
+            # again). Every finding showed up twice in the dashboard's log
+            # tail, which is how this surfaced -- and the write-ahead log
+            # RETRIES by design, so a flaky upstream multiplied it further.
+            #
+            # Only exact duplicates are dropped. A resend whose CONTENT
+            # changed is still a real event and still appended: the log is the
+            # record, and silently discarding a changed finding because its id
+            # was seen before would lose data rather than noise.
+            #
+            # The comparison is free: `seen` already holds the folded view
+            # this method computes once for the whole batch, so nothing here
+            # re-folds -- the O(N**2) trap `memory.append`'s `is_new` hint
+            # exists to avoid.
+            if seen[finding.id] != finding:
+                memory.append(finding, is_new=False)
         return new
 
     def get(self, shared_id: str, finding_id: str) -> Finding | None:

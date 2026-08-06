@@ -174,7 +174,33 @@ class SynapseSession(BaseModel):
     shared_id: str
     purpose: str
     members: list[str]  # Contributors (humans)
-    created_by: str
+
+    # `str | None` since 2026-08-06. None means exactly one thing: this session
+    # was RECREATED after a service restart and nobody on the machine doing the
+    # recreating knows who created it. An honest unknown.
+    #
+    # It used to be `str`, so the only way to express that was to invent a name,
+    # and `orchestrator/cli.py:261` did — its recreate pass POSTs
+    # `created_by="resync"`. Harmless against a LIVE service, because
+    # `store.create_session` is create-or-return and hands the existing session
+    # back unchanged. Against the empty in-memory store of a RESTARTED one it is
+    # a real CREATE, and the session then belongs to the string "resync": the
+    # creator-only gate in `api.end_session` refuses the human who actually owns
+    # it ("only resync can end this session") while admitting anyone who reads
+    # the source and sends `{"ended_by": "resync"}`. A gate that refuses the
+    # owner and admits everyone else is worse than no gate at all.
+    #
+    # Rejected: keeping `str` and using a SENTINEL ("", "unknown", "resync").
+    # Every candidate is a string a real Contributor could be called, all of
+    # them format into the 403 as though they were a person, and none of them is
+    # distinguishable from a real creator at any reader. None is checkable at
+    # every use site; a sentinel is only rememberable at every use site.
+    #
+    # REQUIRED but nullable: the field has no default on purpose, so a client
+    # that omits the key entirely is a 422 rather than silently minting an
+    # ownerless session. "I do not know who created this" must be asserted,
+    # never defaulted into.
+    created_by: str | None
 
 
 class LocalBinding(BaseModel):

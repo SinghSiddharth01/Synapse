@@ -66,5 +66,13 @@ RECOVERY_SCRIPTS = [
 
 if __name__ == "__main__":
     scripts = RECOVERY_SCRIPTS if os.environ.get("REHEARSAL_PHASE") == "recovery" else SCRIPTS
-    uvicorn.run(build_app(FakeProvider(scripts=scripts)),
+    # merge_min_interval_s=0: the scripts above are a QUEUE, and one verdict is
+    # popped per merge. The 60s debounce would defer pushes 2 and 3 (the
+    # rehearsal pushes all three back to back), leaving their verdicts unpopped
+    # and every later query reading another beat's script -- a silent
+    # desynchronisation of the whole beat sequence, not a single red beat.
+    # `rehearse_demo.boot_service` also exports SYNAPSE_MERGE_MIN_INTERVAL_S=0,
+    # which is what covers `--live`; this line is what makes running THIS file
+    # directly behave the same.
+    uvicorn.run(build_app(FakeProvider(scripts=scripts), merge_min_interval_s=0),
                 host="127.0.0.1", port=8899, log_level="warning")

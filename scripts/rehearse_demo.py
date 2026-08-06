@@ -39,6 +39,16 @@ OUT = ROOT / ".measurements"
 SVC = "http://127.0.0.1:8899"
 ORCH = "http://127.0.0.1:8787"
 
+# WHO creates the Shared Session in beat 1, and what for. Named constants
+# because beats 7e and 8e assert them BY VALUE after a restart+resync round
+# trip: session identity is not durable service-side (the store is in-memory),
+# so the only thing that can carry the creator across a restart is the
+# orchestrator's locally retained `sessions.json`, and "the creator is still
+# the real one" is a claim about these exact strings rather than about whatever
+# the service happens to hand back. See beat 7e.
+CREATOR = "siddsing"
+PURPOSE = "fec decode on the NPU"
+
 LOG_LINES: list[str] = []
 
 
@@ -157,6 +167,23 @@ OBSERVER_SESSION = "as-observer"
 def boot_service(live: bool, phase: str = "main") -> subprocess.Popen:
     env = dict(os.environ)
     env["REHEARSAL_PHASE"] = phase
+    # NO DEBOUNCE IN THE REHEARSAL (2026-08-06, with the debounce itself).
+    # api.MERGE_MIN_INTERVAL_S defaults to 60s and this file pushes beats 2, 4a
+    # and 5a back to back, so pushes 2 and 3 would be DEFERRED and the flagship
+    # merge beat (5b, the seg-005a/seg-005b merge the whole fixture corpus is
+    # built around) would simply never run. Worse than a red beat: the deferred
+    # rounds do not consume their scripted verdict slots either, so every later
+    # query pops the wrong script and beats 4c and 6 assert against another
+    # beat's response. Set on the ENV rather than passed to `build_app`, because
+    # it has to reach BOTH branches below -- the scripted `_rehearsal_service.py`
+    # and the real `synapse-service` that `--live` runs, which has no such
+    # parameter to pass. test_api.py sets `merge_min_interval_s=0` for exactly
+    # this reason; the rehearsal is the demo-readiness gate and was missed.
+    #
+    # The debounce itself still has coverage: test_merge_debounce.py owns it.
+    # What this file rehearses is the demo, and the demo does not wait 60s
+    # between pushes.
+    env["SYNAPSE_MERGE_MIN_INTERVAL_S"] = "0"
     if live:
         env["SYNAPSE_SYNTHESIZER"] = "aic100"
         if "INFERENCE_CLOUD_API_KEY" not in env:
@@ -206,7 +233,7 @@ def main() -> int:
         run_beat("boot: service + orchestrator", wait_up(f"{SVC}/debug") and wait_up(f"{ORCH}/producer/findings" if False else f"{ORCH}/mcp"))
 
         code, body = http("POST", f"{SVC}/v1/sessions",
-                          {"purpose": "fec decode on the NPU", "created_by": "siddsing"})
+                          {"purpose": PURPOSE, "created_by": CREATOR})
         sid = body.get("shared_id", "")
         run_beat("beat 1: create session", code == 201 and bool(sid), sid)
 
@@ -289,14 +316,28 @@ def main() -> int:
                  f"{len(llm)} calls, {len(ok_calls)} ok, {len(valid)} schema-valid")
 
         # beat 7 — durable recovery through the orchestrator
+        #
+        # Two files stand in for what the lifecycle MCP tools write when a human
+        # drives them: the BINDING (`synapse_worker.discovery.join_session`) and
+        # the retained SESSION METADATA (`session_meta.record_session`, added
+        # 2026-08-06). Both are written through the production writers rather
+        # than as hand-built JSON, so a format change breaks this line rather
+        # than silently rehearsing a shape nothing produces. That the real
+        # `create_session`/`join_session` actually call them is asserted, by
+        # mutation, in packages/orchestrator/tests/test_lifecycle_tools.py --
+        # what is being rehearsed here is what happens NEXT, over real sockets:
+        # whether the creator survives the restart and the resync.
         subprocess.run(
             ["uv", "run", "python", "-c",
              "from synapse_contracts.binding import write_binding, SessionBinding\n"
+             "from synapse_orchestrator.session_meta import record_session\n"
              "from datetime import datetime, timezone\n"
              "write_binding('.synapse-rehearsal/bindings/claude-code.json', SessionBinding("
              f"agent_session_id='as-demo-aditya', shared_id='{sid}', contributor='aditya',"
              "agent='claude-code', transcript_path='(rehearsal)',"
-             "pinned_at=datetime.now(timezone.utc)))"],
+             "pinned_at=datetime.now(timezone.utc)))\n"
+             f"record_session('.synapse-rehearsal', {sid!r}, created_by={CREATOR!r},"
+             f" purpose={PURPOSE!r})"],
             cwd=ROOT, check=True)
         terminate_tree(svc)
         time.sleep(1)
@@ -326,6 +367,34 @@ def main() -> int:
         run_beat("beat 7d: recovery finding retrievable after restart",
                  code == 200 and (recovered or args.live),
                  "recovered" if recovered else "not ranked (live ranking is the 8B's call)" if args.live else str(body)[:140])
+
+        # beat 7e — WHO OWNS THE SESSION THAT JUST CAME BACK.
+        #
+        # The restart above wiped the service's store, so the sh-... beats 1-7d
+        # used no longer existed and resync RE-CREATED it. Until 2026-08-06 it
+        # re-created it as `{"purpose": "(recovered by resync)", "created_by":
+        # "resync"}` -- the orchestrator had no record of the session, only of
+        # its findings. Against a live service that is inert (create-or-return
+        # hands back the existing session unchanged), so it only ever bit in
+        # exactly this arc: the recreated session's creator BECAME the string
+        # "resync", after which `api.end_session`'s creator-only gate refused
+        # siddsing ("only resync can end this session") and accepted anyone who
+        # sent `{"ended_by": "resync"}`.
+        #
+        # Asserted BY VALUE against the beat 1 constants, not "whatever comes
+        # back": reading the creator back and trusting it is precisely how the
+        # defect stayed invisible for a week (see beat 8e, which used to do
+        # that). The read is `POST /v1/sessions` with a known id --
+        # create-or-return -- so it doubles as the pin that recreating an
+        # existing session hands back the ORIGINAL identity unchanged.
+        code, session = http("POST", f"{SVC}/v1/sessions",
+                             {"purpose": "(rehearsal: who owns this session?)",
+                              "created_by": "not-the-creator", "shared_id": sid})
+        run_beat("beat 7e: the real creator and purpose survive restart + resync",
+                 code == 200 and session.get("created_by") == CREATOR
+                 and session.get("purpose") == PURPOSE,
+                 f"created_by={session.get('created_by')!r} "
+                 f"purpose={session.get('purpose')!r}")
 
         # ── beat 8 — the lifecycle arc: join, leave, re-join, end ────────────
         # Added 2026-08-06 with the lifecycle routes themselves. Everything
@@ -398,24 +467,35 @@ def main() -> int:
                  f"new_since {caught_up} -> {after} at version {version_after} "
                  f"(a reset to the Agent Session key would read {version_after})")
 
-        # WHO the creator is here is not who created it in beat 1. cmd_resync's
-        # recreate pass (cli.py step 1) POSTs the retained shared_id with
-        # created_by="resync", and against the fresh store of the restarted
-        # service that is a CREATE, not a create-or-return -- so the session this
-        # arc is about to end is owned by "resync", not by "siddsing".
+        # THE CREATOR the gate below is about, re-read here because everything
+        # between 7e and now (two joins, a leave, a re-join) touches membership,
+        # and the creator-only gate must be unmoved by any of it.
         #
-        # Read it back rather than hardcoding either name: a wrong guess would
-        # make the 403 below pass for the WRONG REASON (every non-creator is
-        # rejected, including the one the demo thinks is the creator), which is a
-        # green beat over a broken check. The read is `POST /v1/sessions` with a
-        # known id, i.e. create-or-return, so it also pins that recreating an
-        # existing session hands back the original created_by unchanged.
+        # ⟨TIGHTENED 2026-08-06⟩ This beat used to read the creator back and
+        # assert only that it was non-empty and not the name just sent, with a
+        # comment explaining that the creator here is NOT beat 1's because
+        # resync's recreate had overwritten it with "resync". That comment was
+        # describing the defect, and the loose assertion was the reason it could
+        # be described rather than caught: with the creator taken from the wire,
+        # the 403 in 8f and the 200 in 8g pass for ANY creator, including one no
+        # human can be. Now that resync restores the real one (beat 7e), the
+        # assertion is the real one -- `creator` is the beat 1 constant, so 8f
+        # proves a teammate is refused and 8g proves the ACTUAL OWNER is
+        # accepted, which is the property the gate exists for.
         code, session = http("POST", f"{SVC}/v1/sessions",
                              {"purpose": "(rehearsal: who owns this session?)",
                               "created_by": "not-the-creator", "shared_id": sid})
-        creator = session.get("created_by", "")
-        run_beat("beat 8e: create-or-return names the original creator",
-                 code == 200 and bool(creator) and creator != "not-the-creator", creator)
+        # `or ""`, not `get(..., "")`: `created_by` is `str | None` since
+        # 2026-08-06 and the service serialises the unknown case as JSON null,
+        # so the key is PRESENT and the default never applies. `creator` is used
+        # as the left operand of an `in` against the 403's error text in 8f,
+        # where a None raises TypeError -- and run_beat exists precisely so a
+        # failing beat is RECORDED and the rehearsal continues, so an uncaught
+        # crash here would take beats 8g/8h/8i with it and report nothing. The
+        # `== CREATOR` at 394 is null-safe already and left alone.
+        creator = session.get("created_by") or ""
+        run_beat("beat 8e: the session is still owned by the human who created it",
+                 code == 200 and creator == CREATOR, f"{creator!r} (expected {CREATOR!r})")
 
         # BEFORE the successful end, deliberately: once the session is closed the
         # creator-only check would still fire, but it would be indistinguishable
@@ -423,13 +503,29 @@ def main() -> int:
         # asserted here is the service-side gate (spec's layer 2 of three) -- the
         # one an agent cannot talk its way past.
         code, body = http("POST", f"{SVC}/v1/sessions/{sid}/end", {"ended_by": TEAMMATE})
+        # `creator and creator in ...` rather than the bare `in`: with `creator`
+        # normalised to "" above, an empty left operand is `in` EVERY string, so
+        # a lost creator would turn this beat into "any 403 will do" — the beat
+        # asserting the gate names the owner would pass hardest exactly when
+        # the owner is unknown. When it IS unknown the honest assertion is the
+        # other arm of the gate (api.end_session: membership required, and why),
+        # so that is what is checked instead.
+        error_text = body.get("error", "")
+        named_the_gate = (creator in error_text if creator
+                          else "member" in error_text)
         run_beat("beat 8f: a non-creator cannot end the session",
-                 code == 403 and creator in body.get("error", ""), f"{code} {body}")
+                 code == 403 and named_the_gate, f"{code} {body}")
 
-        code, body = http("POST", f"{SVC}/v1/sessions/{sid}/end", {"ended_by": creator})
-        run_beat("beat 8g: the creator ends the session",
+        # The gate ACCEPTS the real owner -- the half that a sentinel creator
+        # silently broke, and the half no status code would have flagged: with
+        # created_by="resync" this same call returned 403 to siddsing, and the
+        # session could only be closed by someone quoting a string out of
+        # cli.py. `CREATOR`, not `creator`, so the beat cannot pass by agreeing
+        # with whatever the previous read happened to return.
+        code, body = http("POST", f"{SVC}/v1/sessions/{sid}/end", {"ended_by": CREATOR})
+        run_beat("beat 8g: the creator-only gate accepts the real creator",
                  code == 200 and body.get("status") == "ended"
-                 and body.get("ended_by") == creator, str(body))
+                 and body.get("ended_by") == CREATOR, str(body))
 
         # ALL FOUR routes that serve the memory or extend it, in one beat,
         # because the gate is one helper (api._unavailable) and the failure mode

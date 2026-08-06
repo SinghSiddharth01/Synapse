@@ -85,6 +85,41 @@ class RecordingProvider(ModelProvider):
     def capabilities(self) -> ProviderCapabilities:
         return self.inner.capabilities
 
+    @property
+    def max_tokens(self) -> int:
+        """The wrapped provider's output cap, forwarded.
+
+        Added 2026-08-06 from an observed defect, and the reason this file's
+        first line says "transparent": it was transparent for the two
+        attributes someone had needed so far and opaque for everything else.
+        `SynthesisBudget.for_provider` reads `max_tokens` off whatever provider
+        the `Synthesizer` holds, and in the DEFAULT deployment
+        (`build_app(..., debug=True)`, which is what `synapse-service` runs)
+        that is this wrapper -- so the `getattr(..., DEFAULT_OUTPUT_TOKENS)`
+        fallback fired on every merge and the whole budget was derived from
+        800 regardless of `INFERENCE_CLOUD_MAX_TOKENS`. Measured with the env
+        var at 1600: the raw provider derives 500 words / 10 merges, the
+        wrapped one derived 270 words / 4 merges, so the prompt asked for HALF
+        the memory the operator had paid for. Worse in the other direction: a
+        cap LOWERED to 600 still produced a 270-word ask, i.e. the exact
+        mid-object truncation the budget exists to prevent, and
+        `SynthesisBudgetError` could never fire because `derive` only ever saw
+        800.
+
+        AttributeError propagates on purpose when `inner` has no cap of its own
+        (FakeProvider, ClaudeCLIProvider's `None`-able one is still an
+        attribute): `getattr(provider, "max_tokens", DEFAULT_OUTPUT_TOKENS)`
+        catches it and every such caller keeps the documented default.
+
+        Rejected alternative: a blanket `__getattr__` delegating everything to
+        `inner`. It would fix this instance and every future one, but it also
+        makes the wrapper silently satisfy `hasattr` for attributes it does not
+        proxy behaviourally, which is how a recorder starts being mistaken for
+        the thing it records. Explicit properties, one per configuration
+        attribute that matters, match the two already here.
+        """
+        return self.inner.max_tokens  # type: ignore[attr-defined]
+
     async def complete(
         self,
         messages: list[dict[str, Any]],

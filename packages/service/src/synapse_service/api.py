@@ -9,6 +9,9 @@ route; see its docstring.
 
 from __future__ import annotations
 
+import logging
+import os
+import time
 from collections import Counter
 from collections.abc import Mapping
 
@@ -28,10 +31,59 @@ from synapse_service.retrieval import query_findings, visible_to
 from synapse_service.store import InMemoryStore
 from synapse_service.synthesis import Synthesizer
 
+logger = logging.getLogger(__name__)
+
 # How many findings reach ONE retrieval prompt, regardless of log size. The
 # route used to pass store.retrievable(sid) -- the entire visible log --
 # growing linearly until an 8B could not read it.
 TOP_K = DEFAULT_TOP_K
+
+# The floor between two synthesis rounds for ONE session -- the LATENCY knob.
+#
+# 60s is the product answer: a teammate's contribution should reach the working
+# memory within a minute. It is deliberately NOT the rate limit. A clock is a
+# poor proxy for a token budget, and picking one fixed interval means choosing
+# between "too slow when quiet" and "over budget when busy". The floor keeps
+# latency honest; `_affordable` below keeps spend honest.
+MERGE_MIN_INTERVAL_S = float(os.environ.get("SYNAPSE_MERGE_MIN_INTERVAL_S", 60))
+
+# The synthesis key's measured ceilings (2026-08-06, read off the provider
+# dashboard): 20 requests AND 25,000 tokens per hour, PER KEY.
+#
+# One merge currently costs ~4,000 tokens (input ~2,500 and rising with the
+# candidate listing, output up to SynthesisBudget's cap), so ONE key affords
+# ~6 rounds/hour. At the 60s floor a busy session would want 60. That gap is
+# why the governor exists rather than a bigger constant: it spends the real
+# budget at the real rate and defers only when the next round genuinely will
+# not fit, instead of pacing to the worst case around the clock.
+#
+# SYNAPSE_SYNTHESIS_KEYS scales all of it. The pool is REAL but currently
+# unused: `AIC100Provider` rotates INFERENCE_CLOUD_API_KEYS on 429, and
+# scripts/local_model_server.py (the proxy the service actually talks to in
+# --live) holds a single key with no rotation at all. Activating more keys is
+# the only way to hold 60s under sustained load -- ~10 of them, on these
+# numbers. Until then the governor degrades gracefully instead of 429ing,
+# which is the same "landed, memory unchanged" symptom by another road.
+#
+# WHAT THIS GOVERNOR DOES NOT SEE, stated because the names above overstate it
+# (2026-08-06 review): retrieval shares the SAME provider object, hence the same
+# key and the same hourly ceiling, and `/query` is never charged to `_spend`.
+# So a team that runs 20 queries and no pushes exhausts the key's request
+# budget while `_affordable()` still answers True, and the next merge 429s
+# inside the provider. That is a real gap and it is deliberately still open:
+# metering retrieval here would let query traffic DEFER synthesis, which is a
+# product decision (whose latency gives way to whose?) and not a bug fix. The
+# constants keep their SYNTHESIS_ prefix to say exactly what they cover. The
+# honest fix is one metered wrapper around the single provider before it is
+# split in two -- with a shared ledger and per-component policy -- and it
+# belongs with service-side persistence, post-demo.
+SYNTHESIS_TOKENS_PER_HOUR = 25_000
+SYNTHESIS_REQUESTS_PER_HOUR = 20
+SYNTHESIS_KEYS = int(os.environ.get("SYNAPSE_SYNTHESIS_KEYS", 1))
+
+# What one round is assumed to cost before we have measured one. Replaced by
+# real usage as soon as a merge reports it -- see `_record_spend`.
+ASSUMED_MERGE_TOKENS = 4_000
 
 
 def _missing(body: dict, *required: str) -> JSONResponse | None:
@@ -94,7 +146,8 @@ def _legacy_agent_session(source: Mapping[str, str]) -> str | None:
     return source.get("agent_session") or None
 
 
-def build_app(provider: ModelProvider, *, debug: bool = True) -> Starlette:
+def build_app(provider: ModelProvider, *, debug: bool = True,
+              merge_min_interval_s: float | None = None) -> Starlette:
     """`debug=True` (the default, preserving every existing call site's
     behavior) mounts `/debug` on this same listener and wraps the provider in
     `RecordingProvider` so the dashboard has something to read.
@@ -129,6 +182,83 @@ def build_app(provider: ModelProvider, *, debug: bool = True) -> Starlette:
         RecordingProvider(provider, "retrieval", call_log) if debug else provider
     )
     synthesizer = Synthesizer(synthesis_provider)
+
+    # Debounce state, per session and per app instance -- see
+    # MERGE_MIN_INTERVAL_S. `_pending` carries the findings of every deferred
+    # push so the next round still receives them as `new_findings` and they
+    # still force their way into the candidate window. Closure scope, not
+    # module scope, so two apps in one test process cannot debounce each other.
+    _last_merge: dict[str, float] = {}
+    _pending: dict[str, list[Finding]] = {}
+    # `merge_min_interval_s=0` is the seam that keeps merge-per-push available
+    # to tests asserting on incremental synthesis (replay convergence, the
+    # push response's `synthesized` flag). Same shape as `debug=` above: the
+    # production default lives in the module constant, the parameter overrides
+    # it, and nothing has to monkeypatch a global.
+    interval_s = (MERGE_MIN_INTERVAL_S if merge_min_interval_s is None
+                  else merge_min_interval_s)
+
+    # (monotonic ts, tokens) per completed synthesis round, last hour. App
+    # scope rather than per session: the ceiling belongs to the KEY, and two
+    # busy sessions share one.
+    _spend: list[tuple[float, int]] = []
+
+    def _record_spend() -> None:
+        """Charge the round that just ran, at its real cost when the provider
+        reported one. `last_usage` is set even for a schema-invalid verdict --
+        a truncated response is billed like any other.
+
+        ⟨CORRECTED 2026-08-06⟩ Charge only rounds that actually reached the
+        provider. `Synthesizer.merge` returns at `if not candidates` -- a
+        session with nothing retrievable -- without making a request, and both
+        call sites charged it anyway: with `last_usage` still None that is a
+        full ASSUMED_MERGE_TOKENS for zero spend. `POST /synthesize` is public
+        and ungated, so six calls against an EMPTY session pushed `_spend` to
+        24,000 of the 25,000/hour ceiling with no model call made, and the next
+        genuine push -- on a DIFFERENT session, because `_spend` is app-scoped
+        -- came back `deferred: true`. A governor that defers real synthesis on
+        the strength of rounds that spent nothing produces the exact "findings
+        landed, memory unchanged" symptom it was added to make visible.
+        `cmd_resync` POSTs /synthesize once per session in the backlog, so one
+        resync could book several phantom rounds in a single command.
+
+        The three states are now distinct, and each is charged for what it
+        really cost: no call (nothing), a call whose usage came back (its real
+        cost), a call that raised or reported nothing (the assumed cost -- the
+        tokens went out regardless of what came back).
+        """
+        if not getattr(synthesizer, "last_call_made", True):
+            return
+        usage = getattr(synthesizer, "last_usage", None)
+        tokens = ASSUMED_MERGE_TOKENS
+        if usage is not None:
+            tokens = max(1, usage.input_tokens + usage.output_tokens)
+        _spend.append((time.monotonic(), tokens))
+
+    def _affordable() -> tuple[bool, str]:
+        """Whether one more synthesis round fits the hour's remaining budget.
+
+        Charges the NEXT round at the most expensive recent one rather than an
+        average: merge cost grows with the candidate listing, so an average
+        lags the trend and the governor would keep authorising rounds the key
+        can no longer pay for. Requests are checked at 2 per round because
+        AIC100Provider retries once internally, and a failing round -- the
+        expensive kind -- always takes that retry.
+        """
+        cutoff = time.monotonic() - 3600
+        while _spend and _spend[0][0] < cutoff:
+            _spend.pop(0)
+        tokens_spent = sum(t for _, t in _spend)
+        next_cost = max([t for _, t in _spend[-5:]] or [ASSUMED_MERGE_TOKENS])
+        token_budget = SYNTHESIS_TOKENS_PER_HOUR * SYNTHESIS_KEYS
+        request_budget = SYNTHESIS_REQUESTS_PER_HOUR * SYNTHESIS_KEYS
+        if tokens_spent + next_cost > token_budget:
+            return False, (f"token budget: {tokens_spent}+{next_cost} would exceed "
+                           f"{token_budget}/hour across {SYNTHESIS_KEYS} key(s)")
+        if (len(_spend) + 1) * 2 > request_budget:
+            return False, (f"request budget: {len(_spend)} round(s) this hour against "
+                           f"{request_budget}/hour, 2 requests each worst case")
+        return True, ""
 
     def _session_or_404(sid: str):
         return store.get_session(sid)
@@ -188,6 +318,20 @@ def build_app(provider: ModelProvider, *, debug: bool = True) -> Starlette:
         )
 
     async def create_session(request: Request) -> JSONResponse:
+        """`created_by` is a REQUIRED KEY whose VALUE may be null (2026-08-06).
+
+        `_missing` tests key PRESENCE, not truthiness, which is exactly the
+        split this needs: `{"created_by": null}` means "recreated after a
+        restart and the caller genuinely does not know who owns this" and is
+        accepted, while omitting the key is still a 422 so a typo or a
+        half-written client cannot silently mint an ownerless session. Not
+        knowing has to be asserted; it must never be the default.
+
+        Nothing is done to STOP a null here landing on a session that already
+        has a real creator, because nothing needs to be: `store.create_session`
+        is create-or-return and hands the existing session back untouched. See
+        its docstring.
+        """
         body = await request.json()
         if (err := _missing(body, "purpose", "created_by")) is not None:
             return err
@@ -200,6 +344,22 @@ def build_app(provider: ModelProvider, *, debug: bool = True) -> Starlette:
                             status_code=200 if existed else 201)
 
     async def add_member(request: Request) -> JSONResponse:
+        """Join. The response also carries `created_by` and `purpose`
+        (2026-08-06) so the joining orchestrator can RECORD who owns the
+        session it just joined.
+
+        Those two fields are the whole of a Shared Session's identity and, on
+        a machine that joined rather than created, this response was the only
+        place they were ever visible -- and it dropped them. So after a service
+        restart the joiner's `resync` had nothing to restore from and invented
+        a creator instead (`cli.py:261`, `created_by="resync"`), which is the
+        defect `SynapseSession.created_by`'s comment describes. Returning them
+        here is what lets a joiner keep the same local record a creator keeps,
+        from the one call it is guaranteed to make.
+
+        Additive: `members` is unchanged in name, shape and position, so an
+        un-upgraded client reads exactly what it read before.
+        """
         sid = request.path_params["sid"]
         if _session_or_404(sid) is None:
             return JSONResponse({"error": f"unknown session {sid}"}, status_code=404)
@@ -207,10 +367,14 @@ def build_app(provider: ModelProvider, *, debug: bool = True) -> Starlette:
         if (err := _missing(body, "contributor")) is not None:
             return err
         store.add_member(sid, body["contributor"])
-        return JSONResponse({"members": store.get_session(sid).members})
+        session = store.get_session(sid)
+        return JSONResponse({"members": session.members,
+                             "created_by": session.created_by,
+                             "purpose": session.purpose})
 
     async def end_session(request: Request) -> JSONResponse:
-        """Close a Shared Session for everyone. CREATOR ONLY.
+        """Close a Shared Session for everyone. CREATOR ONLY -- or, when the
+        creator is unknown, MEMBER ONLY.
 
         Layer 2 of the three the spec puts around this call (the harness
         permission prompt is layer 1, and "refuse while other members are
@@ -219,6 +383,28 @@ def build_app(provider: ModelProvider, *, debug: bool = True) -> Starlette:
         the client on purpose: it is the only one an agent cannot talk its way
         past, and closing a session is the one operation that can destroy the
         team's memory for everyone at once.
+
+        ⟨AMENDED 2026-08-06⟩ `created_by` became `str | None`, so this gate has
+        two arms:
+
+          * a real creator  -> creator only, 403 otherwise. UNCHANGED.
+          * `created_by is None` ("recreated after a restart, nobody here knows
+            who owned it") -> any CURRENT MEMBER may end it; a non-member gets
+            a 403 that says membership is required and that the creator was
+            lost to a restart.
+
+        WHY membership is a proportionate fallback: there is no auth anywhere
+        in Synapse. `ended_by` is self-asserted, exactly like `contributor` on
+        every other route, and `POST .../members` is ungated -- anyone who can
+        reach this route can make themselves a member first. So this gate has
+        never been a control against an attacker and cannot become one here;
+        it is a guardrail against ACCIDENT, and the accidents it catches
+        (ending the wrong session id, an agent closing a session it merely
+        joined) are caught just as well by membership. The two alternatives
+        are both worse: leaving a restart-recovered session permanently
+        UNENDABLE punishes the team for the service's lack of durability, and
+        inventing a creator is the defect this whole change removes -- it
+        refuses the real owner and admits everyone who reads the source.
 
         Ending an already-ended session is a 200, not a 409. The fold keeps
         the first `SessionEnded`, so a retried POST -- the ordinary outcome of
@@ -240,11 +426,26 @@ def build_app(provider: ModelProvider, *, debug: bool = True) -> Starlette:
         if (err := _missing(body, "ended_by")) is not None:
             return err
         ended_by = body["ended_by"]
-        if ended_by != session.created_by:
-            # Names the creator rather than saying "forbidden": the caller is
-            # an agent relaying this to a human who now knows who to ask.
+        if session.created_by is not None:
+            if ended_by != session.created_by:
+                # Names the creator rather than saying "forbidden": the caller
+                # is an agent relaying this to a human who now knows who to ask.
+                return JSONResponse(
+                    {"error": f"only {session.created_by} can end this session"},
+                    status_code=403)
+        elif ended_by not in session.members:
+            # The None arm. `is not None` above rather than truthiness, so a
+            # creator legitimately named "" is still compared as a creator and
+            # never falls through to here.
+            #
+            # The message says WHY, in both halves: an agent that only read
+            # "membership is required" would report a permissions problem to
+            # its human, when what actually happened is that a service restart
+            # lost the session's owner and joining is the remedy.
             return JSONResponse(
-                {"error": f"only {session.created_by} can end this session"},
+                {"error": "this session's creator was lost to a service "
+                          "restart, so ending it requires being a current "
+                          f"member of it; {ended_by!r} is not one"},
                 status_code=403)
         attributed_to = store.end_session(sid, ended_by)
         return JSONResponse({"shared_id": sid, "status": SessionStatus.ENDED.value,
@@ -277,7 +478,51 @@ def build_app(provider: ModelProvider, *, debug: bool = True) -> Starlette:
         accepted = store.upsert(sid, findings)
         version_before = store.get_context(sid).memory_version
         synthesized = False
+        deferred = False
         if accepted:
+            # DEBOUNCE. Synthesis is the only thing here that costs a model
+            # call, and the hosted synthesis key allows 20 requests and 25,000
+            # tokens per hour. One merge runs ~3,250 tokens, so the TOKEN
+            # ceiling binds first at roughly 7 rounds/hour -- and a merge whose
+            # verdict fails costs TWO requests, because AIC100Provider retries
+            # internally. Merging on every push was fine when pushes were
+            # occasional; a live `synapse-worker run` pushes every couple of
+            # minutes, which is ~30 rounds/hour and blows through both limits.
+            #
+            # Nothing is lost by waiting. The findings are already upserted
+            # above, so /query and the watermark see them IMMEDIATELY -- only
+            # the synthesized working memory lags, and it catches up on the
+            # next round with the whole accumulated batch. The pending list is
+            # what makes that true: a deferred push's findings are carried
+            # forward so they still arrive as `new_findings` and still force
+            # their way into the candidate window (synthesis.merge's
+            # docstring), rather than aging out unsynthesized.
+            pending = _pending.setdefault(sid, [])
+            pending.extend(findings)
+            now = time.monotonic()
+            last = _last_merge.get(sid)
+            if last is not None and (now - last) < interval_s:
+                deferred = True
+                logger.info(
+                    "Synthesis for %s deferred: %.0fs since last round (minimum "
+                    "%.0fs), %d finding(s) pending. They are queryable now; the "
+                    "working memory folds them in next round.",
+                    sid, now - last, interval_s, len(pending))
+            elif not (afford := _affordable())[0]:
+                # The floor has passed and we still will not spend. Distinct
+                # from the interval case in the log because the fix is
+                # different: this one is answered by more keys
+                # (SYNAPSE_SYNTHESIS_KEYS + INFERENCE_CLOUD_API_KEYS), never
+                # by lowering SYNAPSE_MERGE_MIN_INTERVAL_S.
+                deferred = True
+                logger.warning(
+                    "Synthesis for %s deferred on BUDGET, not latency (%s). %d "
+                    "finding(s) pending and queryable; the working memory is "
+                    "behind until the hour rolls or more keys are activated.",
+                    sid, afford[1], len(pending))
+        if accepted and not deferred:
+            findings = _pending.pop(sid, findings)
+            _last_merge[sid] = time.monotonic()
             # `findings` is passed through (not []) so synthesis knows which
             # ids were just pushed and can force them into its candidate
             # window regardless of CANDIDATE_WINDOW (see synthesis.merge's
@@ -295,6 +540,7 @@ def build_app(provider: ModelProvider, *, debug: bool = True) -> Starlette:
             # to upsert first -- post-demo.
             log_before = len(store.log_entries(sid))
             await synthesizer.merge(store, sid, findings)
+            _record_spend()
             _record_synthesis_feed(sid, log_before)
             # A provider outage, an exhausted retry, or a verdict that
             # fails structural validation all make merge() return with
@@ -306,8 +552,13 @@ def build_app(provider: ModelProvider, *, debug: bool = True) -> Starlette:
             # treating every 200 as a completed merge.
             synthesized = store.get_context(sid).memory_version > version_before
         version = store.get_context(sid).memory_version
+        # `deferred` distinguishes "we ran a merge and it did not move the
+        # version" (a failed verdict -- the truncation bug) from "we chose not
+        # to run one yet". Both leave `synthesized` false, and conflating them
+        # is what made the 2026-08-06 failure so hard to see from the outside.
         return JSONResponse({"accepted": accepted, "memory_version": version,
-                             "synthesized": synthesized})
+                             "synthesized": synthesized, "deferred": deferred,
+                             "pending": len(_pending.get(sid, []))})
 
     async def synthesize(request: Request) -> JSONResponse:
         """Self-heal path (E3 residual, Finding #11's sibling gap): a
@@ -320,17 +571,32 @@ def build_app(provider: ModelProvider, *, debug: bool = True) -> Starlette:
         even reached with a nonempty list). It is also Plan C.3's replay
         primitive: pushing a machine's entire retained log into a fresh
         store as one batch, then calling this once, is how a resync
-        converges to the same state as the original incremental stream."""
+        converges to the same state as the original incremental stream.
+
+        Since the debounce landed (2026-08-06) this is also the FORCE-NOW
+        override: it ignores MERGE_MIN_INTERVAL_S and flushes whatever
+        `push_findings` has been holding back. An operator who does not want to
+        wait out the interval -- mid-demo, most obviously -- has one call that
+        settles it, and the rate limit stays an automatic default rather than
+        a thing anyone has to fight. Draining `_pending` here (rather than
+        merging `[]` and leaving it queued) is what stops the next push from
+        re-offering findings this round already synthesized."""
         sid = request.path_params["sid"]
         if (gate := _unavailable(sid)) is not None:
             return gate
         version_before = store.get_context(sid).memory_version
         log_before = len(store.log_entries(sid))
-        await synthesizer.merge(store, sid, [])
+        pending = _pending.pop(sid, [])
+        _last_merge[sid] = time.monotonic()
+        await synthesizer.merge(store, sid, pending)
+        # Charged like any other round: this route is the operator override
+        # for the CLOCK, not a way to spend budget that is not there.
+        _record_spend()
         _record_synthesis_feed(sid, log_before)
         version = store.get_context(sid).memory_version
         return JSONResponse({"memory_version": version,
-                             "synthesized": version > version_before})
+                             "synthesized": version > version_before,
+                             "flushed": len(pending)})
 
     async def watermark(request: Request) -> JSONResponse:
         sid = request.path_params["sid"]

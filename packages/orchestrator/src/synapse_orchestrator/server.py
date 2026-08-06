@@ -93,6 +93,7 @@ from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 
 from synapse_orchestrator.ended import is_session_ended, record_ended
+from synapse_orchestrator.session_meta import record_session
 
 logger = logging.getLogger(__name__)
 
@@ -272,6 +273,50 @@ def register_tools(server: FastMCP, *, resolve_binding, service_url: str, relay,
         except ValueError:
             pass
         return f"the service answered {resp.status_code}"
+
+    def _remember(shared_id: str, *, created_by: str | None, purpose: str | None) -> None:
+        """Retain who owns `shared_id` and what it is for, on THIS machine.
+
+        Called by `create_session` and `join_session` — the two tools that
+        attach this machine to a session — so that `cmd_resync` can send the
+        REAL creator and purpose after a service restart instead of inventing
+        `created_by="resync"`, which used to leave the recreated session owned
+        by a string nobody can be and its creator-only end gate refusing the
+        person who created it. See `synapse_orchestrator.session_meta`, which
+        is a STOPGAP for service-side log persistence exactly as `ended.py` is.
+
+        `record_session` never raises, so this is not wrapped: it swallows and
+        logs, because nothing may raise out of an MCP tool and a lost record
+        degrades to "resync recreates this session ownerless", never to a
+        failed create or join.
+        """
+        if state_dir is None:
+            return
+        record_session(state_dir, shared_id, created_by=created_by, purpose=purpose)
+
+    def _session_identity(resp) -> tuple[str | None, str | None]:
+        """`(created_by, purpose)` as the service reported them, or `(None, None)`.
+
+        `POST /v1/sessions/{sid}/members` returns these alongside `members`
+        (2026-08-06) precisely so a joining orchestrator can record who owns the
+        session it just joined. Every step is tolerant because an orchestrator
+        and a service are separate processes on separate laptops and deploy in
+        either order: against a service that has not been upgraded the body is
+        still `{"members": [...]}`, and "learned nothing" must read as None
+        rather than as an exception out of a join that in fact succeeded.
+        `created_by` is legitimately null on a session recreated after a
+        restart by a machine with no record — that null is the answer, and it
+        is stored as one.
+        """
+        try:
+            body = resp.json()
+        except ValueError:
+            return None, None
+        if not isinstance(body, dict):
+            return None, None
+        created_by, purpose = body.get("created_by"), body.get("purpose")
+        return (created_by if isinstance(created_by, str) else None,
+                purpose if isinstance(purpose, str) else None)
 
     def _bindings_on(shared_id: str) -> list:
         """EVERY Agent product on this machine bound to `shared_id`.
@@ -617,6 +662,21 @@ def register_tools(server: FastMCP, *, resolve_binding, service_url: str, relay,
                                          json={"purpose": purpose, "created_by": who})
                 resp.raise_for_status()
                 shared_id = resp.json()["shared_id"]
+                # WHO owns this session and WHAT it is for, retained locally
+                # before anything else can go wrong. `who`/`purpose` as sent
+                # rather than as echoed back: this call never passes a
+                # `shared_id`, so it is always a fresh create and the service
+                # cannot have returned anyone else's — and reading the echo
+                # would make the record depend on a response field an
+                # un-upgraded service may not send.
+                #
+                # Recorded even if the bind below is refused. The session
+                # exists from the line above onwards whatever happens to the
+                # binding, and it is the SESSION's identity being retained;
+                # dropping it on a refused bind would leave a live session this
+                # machine created with no record of who created it, which is
+                # the exact hole this closes.
+                _remember(shared_id, created_by=who, purpose=purpose)
                 # The creator is a MEMBER of what they just created. The
                 # service's `create_session` starts `members: []` and never
                 # adds `created_by` (api.py), and `POST /v1/sessions` had no
@@ -704,6 +764,14 @@ def register_tools(server: FastMCP, *, resolve_binding, service_url: str, relay,
                 resp = await client.post(f"{base}/v1/sessions/{shared_id}/members",
                                          json={"contributor": who})
                 resp.raise_for_status()
+                # The creator and purpose of the session we just joined, from
+                # the one response that carries them. Retained so that if THIS
+                # machine is the one that resyncs after a service restart, the
+                # session comes back owned by whoever really owns it rather
+                # than by "resync" — a create-or-return recreate is issued by
+                # whichever orchestrator has the findings, not by the creator.
+                created_by, purpose = _session_identity(resp)
+                _remember(shared_id, created_by=created_by, purpose=purpose)
         except (_httpx.HTTPError, OSError) as exc:
             return (f"Shared memory is unreachable right now ({exc.__class__.__name__}) "
                     f"— not joined to {shared_id}. Is `synapse-service` running?")
