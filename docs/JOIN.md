@@ -50,6 +50,19 @@ locally: fine for wiring, but it only knows this repo's fixture corpus, so
 your own words will not distil into findings. Ask the host for `--live` (a
 real model behind the seam) when you want to test that for real.
 
+**No NPU, no key, nothing?** Add `--listen`. You still get the arrival
+briefing and full `query` — reading needs no model on your side at all,
+because the HOST's service does the ranking. Only `contribute` needs a
+distiller locally, and it declines politely rather than failing: *"Couldn't
+process that right now — your note was not recorded."* Verified against an
+orchestrator with nothing whatsoever on its model port. Listening and
+learning is the zero-setup path; contributing is what costs you a model.
+
+One machine runs one Synapse. If you are already hosting, you do not need a
+second instance to listen — your own orchestrator is already connected. The
+script refuses rather than starting one, because a second copy would
+overwrite your binding and quietly turn your agent into somebody else.
+
 ## 3. Connect Claude Code
 
 From whatever project you want shared memory in:

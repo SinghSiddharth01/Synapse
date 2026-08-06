@@ -138,6 +138,39 @@ def wait_for(url: str, process: subprocess.Popen | None, name: str, seconds: flo
     return False
 
 
+def claim_ports(ports: list[int]) -> None:
+    """Refuse to start if something already holds a port we need.
+
+    Runs BEFORE anything is written. Without it, a second `serve_local` on the
+    same machine — a listener joining alongside the host, say — sails past the
+    orchestrator bind failure (the EXISTING orchestrator answers the health
+    check, so it looks up), and by then it has already overwritten
+    `.synapse/bindings/claude-code.json` with ITS contributor. The host's own
+    agent silently becomes somebody else. Observed doing exactly that
+    2026-08-06.
+    """
+    import socket
+
+    taken = []
+    for port in ports:
+        probe = socket.socket()
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            probe.bind(("127.0.0.1", port))
+        except OSError:
+            taken.append(port)
+        finally:
+            probe.close()
+    if taken:
+        raise SystemExit(
+            f"ports already in use: {', '.join(str(p) for p in taken)}\n"
+            "Another Synapse is running on this machine. Stop it first, or — if "
+            "you are trying to listen alongside a host you are already running — "
+            "you do not need a second one: your existing orchestrator is already "
+            "connected to that session."
+        )
+
+
 def spawn(name: str, argv: list[str], env: dict[str, str] | None = None) -> subprocess.Popen:
     (STATE / "logs").mkdir(parents=True, exist_ok=True)
     log = (STATE / "logs" / f"{name}.log").open("w")
@@ -190,14 +223,33 @@ def main(argv: list[str] | None = None) -> int:
                              "Claude Opus 5 with YOUR OWN key, so several people can "
                              "run the full loop at once instead of contending for the "
                              "one NPU box and the ~20-req/hour Cirrascale key.")
+    parser.add_argument("--listen", action="store_true",
+                        help="READ-ONLY: join without any model at all. Queries and "
+                             "the arrival briefing work — the HOST's service does "
+                             "the ranking — but `contribute` cannot distil and will "
+                             "say so. For anyone with no NPU and no key.")
     parser.add_argument("--npu", action="store_true",
                         help="a real model is already serving on :18181 (geniex serve) — "
                              "do not start the stand-in")
     args = parser.parse_args(argv)
 
+    needed = [8787] + ([] if args.service_url else [8899]) + \
+             ([] if (args.listen or args.npu) else [18181])
+    claim_ports(needed)
+
     model_url = NPU_URL if args.npu else STANDIN_URL
 
-    if args.npu:
+    if args.listen:
+        # Nothing is started here on purpose. Reading needs no model: the
+        # briefing is an HTTP GET against the host's watermark, and `query`
+        # is ranked by the host's service, not by anything local. Only the
+        # write path needs a distiller, and `contribute` already fails soft
+        # and says so rather than crashing (server.py's guard) — verified
+        # against an orchestrator with nothing listening on the model port.
+        print("model      NONE — listen-only. Queries and the briefing work; "
+              "`contribute` will decline, because distilling your prose is the "
+              "one thing that needs a model on YOUR machine.", flush=True)
+    elif args.npu:
         if not wait_for(f"{model_url}/models", None, "npu", seconds=3):
             raise SystemExit("--npu given but nothing is serving on :18181. "
                              "Start `geniex serve` first, or drop --npu.")
