@@ -218,11 +218,14 @@ def main(argv: list[str] | None = None) -> int:
                         help="--live: the small model standing where the NPU sits")
     parser.add_argument("--synthesizer-model", default="Llama-3.3-70B",
                         help="--live: the large model standing where the cloud sits")
-    parser.add_argument("--distiller", choices=("npu", "anthropic"), default="npu",
-                        help="which model does the distilling. `anthropic` uses "
-                             "Claude Opus 5 with YOUR OWN key, so several people can "
-                             "run the full loop at once instead of contending for the "
-                             "one NPU box and the ~20-req/hour Cirrascale key.")
+    parser.add_argument("--distiller", choices=("npu", "anthropic", "claude-cli"),
+                        default="npu",
+                        help="which model does the distilling. `anthropic` uses Claude "
+                             "Opus 5 with your own API key; `claude-cli` uses the local "
+                             "`claude` binary on your own SUBSCRIPTION, needing no "
+                             "credential at all. Either lets several people run the "
+                             "full loop at once instead of contending for the one NPU "
+                             "box and the ~20-req/hour Cirrascale key.")
     parser.add_argument("--listen", action="store_true",
                         help="READ-ONLY: join without any model at all. Queries and "
                              "the arrival briefing work — the HOST's service does "

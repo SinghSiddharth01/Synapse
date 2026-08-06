@@ -171,6 +171,12 @@ prefill_toks_per_sec = 3000.0  # illustrative only -- not measured, see note abo
 response_reserve = 16000       # matches AnthropicProvider's hardcoded max_tokens
 notes = "Claude Opus 5 via the Messages API (packages/providers/src/synapse_providers/anthropic_provider.py). usable_context is the advertised 1M window, not locally measured like the NPU record above. segment_budget is pinned in [distiller] to 2787, so this record's own derivation never actually governs segmentation -- see that comment."
 
+[capability."claude-cli-sonnet"]
+usable_context = 200000        # advertised for the CLI's default Sonnet; not locally measured
+prefill_toks_per_sec = 3000.0  # illustrative only -- not measured, see note above
+response_reserve = 4096        # the CLI exposes no max_tokens flag; this is a budgeting figure only
+notes = "Claude via the local `claude` CLI in headless mode (packages/providers/src/synapse_providers/claude_cli_provider.py), on the developer's own subscription -- no API key. Two properties are unlike every other arm: the CLI reports usage.input_tokens as the UNCACHED REMAINDER (~10 for a 31k-token prompt, measured on 2.1.223), so the provider sums it with the two cache fields to keep assert_prompt_conditioned meaningful; and `-p` is an agent, restricted here to one turn with no tools. segment_budget is pinned in [distiller] to 2787, so this record's derivation never governs segmentation."
+
 # Example of a second arm for the bake-off. llama.cpp Q4_0 also lands on the
 # Hexagon NPU and, unlike qairt, honours --nctx — so usable_context here is a
 # choice rather than a ceiling. Numbers below are UNMEASURED placeholders.

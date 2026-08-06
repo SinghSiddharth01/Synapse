@@ -103,18 +103,29 @@ def build_npu_distiller(binding: LocalBinding):
     path.
 
     SYNAPSE_DISTILLER selects the provider the same way worker/cli.py's
-    build_distiller does: "npu" (default, unchanged) or "anthropic" (opt-in
-    — Claude Opus 5, for running the full loop in parallel without the
-    single NPU box). Unset, this function behaves exactly as before.
+    build_distiller does: "npu" (default, unchanged), "anthropic" (Claude
+    Opus 5 via the Messages API, one API key per developer), or "claude-cli"
+    (Claude through the local `claude` binary on the developer's own
+    subscription — no credential to distribute at all). The last two exist so
+    several people can run the full loop at once instead of queueing for the
+    single NPU box. Unset, this behaves exactly as before.
     """
     from synapse_distiller import Distiller, load_config, load_pack_by_name
     from synapse_providers import NPUProvider
 
     config = load_config()
-    if os.environ.get("SYNAPSE_DISTILLER", "npu") == "anthropic":
+    arm = os.environ.get("SYNAPSE_DISTILLER", "npu")
+    if arm == "anthropic":
         from synapse_providers import AnthropicProvider
 
         provider = AnthropicProvider()
+    elif arm == "claude-cli":
+        # No credential at all: Claude through the local `claude` binary on the
+        # developer's own subscription. Lets several people exercise the full
+        # loop at once with no key to distribute and no NPU box to queue for.
+        from synapse_providers import ClaudeCliProvider
+
+        provider = ClaudeCliProvider(max_tokens=config.provider.max_tokens)
     else:
         provider = NPUProvider(
             base_url=config.provider.base_url,

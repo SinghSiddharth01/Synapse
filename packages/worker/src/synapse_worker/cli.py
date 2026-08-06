@@ -99,10 +99,13 @@ def build_distiller(config, binding: LocalBinding) -> Distiller:
     NPU-backed `Distiller` — the binding is the only thing that varies.
 
     SYNAPSE_DISTILLER selects the provider: "npu" (default, unchanged — the
-    demo is the NPU story) or "anthropic" (opt-in — Claude Opus 5 via the
-    Messages API, for running the full loop in parallel without the single
-    NPU box or the Cirrascale key's rate limit). Nobody who leaves the env
-    var unset sees any change in behaviour.
+    demo is the NPU story), "anthropic" (Claude Opus 5 via the Messages API,
+    an API key per developer), or "claude-cli" (Claude through the local
+    `claude` binary, on the developer's own subscription, with no credential
+    to distribute). The last two exist so the full loop can be run in
+    parallel instead of queueing for the single NPU box or sharing the
+    Cirrascale key's ~20-req/hour ceiling. Nobody who leaves the env var
+    unset sees any change in behaviour.
     """
     provider = _build_distiller_provider(config)
     return Distiller(
@@ -115,10 +118,19 @@ def build_distiller(config, binding: LocalBinding) -> Distiller:
 
 
 def _build_distiller_provider(config):
-    if os.environ.get("SYNAPSE_DISTILLER", "npu") == "anthropic":
+    arm = os.environ.get("SYNAPSE_DISTILLER", "npu")
+    if arm == "anthropic":
         from synapse_providers import AnthropicProvider
 
         return AnthropicProvider()
+    if arm == "claude-cli":
+        # No credential at all: runs Claude through the local `claude` binary on
+        # the developer's own subscription. The arm that lets several people
+        # exercise the full loop at once without a key to distribute or the one
+        # NPU box to queue for.
+        from synapse_providers import ClaudeCliProvider
+
+        return ClaudeCliProvider(max_tokens=config.provider.max_tokens)
     return NPUProvider(
         base_url=config.provider.base_url,
         model=config.model,
