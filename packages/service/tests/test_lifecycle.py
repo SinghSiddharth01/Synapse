@@ -434,21 +434,25 @@ async def test_an_old_shaped_request_carrying_only_agent_session_still_works():
     Contributor field, a shape no real client produces -- and so it green-lit
     an additivity claim that did not hold on real data. On REAL data
     (`contributor="aditya"`, `agent_session="as-legacy"`, which is what every
-    Attribution actually looks like) the re-key compared the old client's
-    `agent_session` value against `a.contributor`, never matched, and switched
-    that client's suppression off entirely: it got its OWN finding back as team
-    knowledge, credited to itself. `api._legacy_agent_session` is the fix and
-    this fixture is what holds it: with the guard removed, `f-mine` reappears
-    here.
+    Attribution actually looks like) the contributor re-key compared the old
+    client's `agent_session` value against `a.contributor`, never matched, and
+    switched that client's suppression off entirely: it got its OWN finding
+    back as team knowledge, credited to itself.
+
+    ⟨UNCHANGED BY THE SPLIT, 2026-08-06⟩ That defect needed an explicit hatch
+    (`api._legacy_agent_session`) only while the Contributor was the key. Since
+    the split the old client's field IS the key, so this passes through the
+    primary path with no special case at all, and the hatch is deleted. The
+    assertions did not move: an old-shaped request still has its own findings
+    suppressed and its watermark still advances.
 
     The retriever is scripted to rank EVERY index it could be offered, not just
     `[0]`. With `[0]` the assertion depended on which finding the lanes happened
     to order first, and passed against an un-guarded build by luck -- verified
-    by mutation 2026-08-06: emptying `_legacy_agent_session`'s body left this
-    green. Ranking both indices means the test sees the whole visible set, so a
-    finding that should have been suppressed cannot hide behind an ordering.
-    Index 1 is simply skipped when only one finding is visible --
-    `query_findings` bounds every index against `len(visible)`."""
+    by mutation 2026-08-06. Ranking both indices means the test sees the whole
+    visible set, so a finding that should have been suppressed cannot hide
+    behind an ordering. Index 1 is simply skipped when only one finding is
+    visible -- `query_findings` bounds every index against `len(visible)`."""
     provider = FakeProvider(scripts=[MERGE_NOOP, {"ranked": [0, 1]}])
     async with _client(provider) as client:
         sid = await _session(client)
