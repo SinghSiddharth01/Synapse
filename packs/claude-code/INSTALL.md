@@ -102,6 +102,25 @@ a session. The tools appear as `mcp__synapse__query` and
 
 ## Install
 
+Two locations work, and the repo uses both. Know which one you are in:
+
+| | skill goes to | hook goes to | who does it |
+|---|---|---|---|
+| **Per project** (this section) | `<project>/.claude/skills/` | `<project>/.claude/synapse-pack/hooks/` | you, by hand |
+| **Per user** | `~/.claude/skills/` | *(not installed)* | `install.sh` / `install.ps1`, phase P5 |
+
+`install.sh` copies `skills/`, `commands/` and `agents/` into `~/.claude/`, so
+the skill is available in every project on the machine without repeating this
+section. It deliberately does **not** install the hook and does **not** touch
+`settings.json`: `settings-snippet.json`'s command is
+`$CLAUDE_PROJECT_DIR/.claude/synapse-pack/hooks/freshness_pointer.py`, which is
+per-project by construction, and rewriting a settings file the installer does
+not own is an overwrite risk. If you want the hook, do the `hooks` half of the
+steps below even after running the installer — the installer prints the two
+commands for exactly that. `scripts/doctor.py`'s `awareness` check looks at
+`~/.claude/skills/synapse-shared-memory`, i.e. the per-user row; a per-project
+install is invisible to it and that WARN is then expected.
+
 From this project's root:
 
 ```bash

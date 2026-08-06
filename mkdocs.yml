@@ -11,6 +11,32 @@ docs_dir: docs
 # See docs/overnight/decisions/007-docs-in-repo-not-wiki.md and
 # docs/overnight/decisions/009-mkdocs-material-for-pages.md.
 
+# WHAT DOES NOT GET PUBLISHED.
+#
+# `docs_dir: docs` means "render everything in docs/", and `validation.nav`
+# below only governs whether an unlisted file is a WARNING — not whether it is
+# built. Without this block `mkdocs build` emitted the entire internal working
+# tree: overnight/ (STATE, LOG, PLAN, FLOW, the scope reviews, the slide
+# outline, decisions/), plans/, brainstorming/, superpowers/, HUMAN-TODO.md and
+# the raw meeting transcript — 138 of the search index's entries — all
+# reachable by direct URL and by full-text search from the Pages front page.
+# Absence from the nav hid them from the sidebar and from nothing else.
+#
+# These are working documents: half-finished plans, an audit that quotes
+# unfixed defects, and a transcript of people talking. They stay in the repo,
+# where a contributor reads them in context; they do not go on the public site.
+exclude_docs: |
+  overnight/
+  plans/
+  brainstorming/
+  superpowers/
+  HUMAN-TODO.md
+  demo-transcripts.txt
+  # The generated twin of architecture.md. README.md linked the .html and the
+  # nav publishes the .md, so the site carried two copies of one document that
+  # can drift apart with nothing to notice.
+  architecture.html
+
 theme:
   name: material
   palette:
@@ -41,7 +67,15 @@ markdown_extensions:
   - tables
   - toc:
       permalink: true
-  - pymdownx.superfences
+  - pymdownx.superfences:
+      custom_fences:
+        # Without this, a ```mermaid fence is treated as a code sample and
+        # docs/architecture.md's flowchart publishes as literal `flowchart TB`
+        # text inside a <pre>. --strict never complained, because a fence
+        # rendering as code is valid Markdown, just not a diagram.
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
   - pymdownx.highlight
   - pymdownx.inlinehilite
   - pymdownx.details
@@ -66,18 +100,20 @@ plugins:
             docstring_section_style: list
             filters: ["!^_"]
 
-# ⟨strict-safe⟩ The six writer files below (index, first-run, architecture,
-# reference/service-http, troubleshooting, contributing) are EXPECTED to be
-# missing at SETUP time — the writer/consistency-review agents land them
-# afterward. `strict: false` + `validation.nav.not_found: warn` lets
-# `mkdocs build` succeed tonight with warnings instead of failing on files
-# that don't exist yet. Once every nav target below exists, flip `strict`
-# to `true` and tighten the two `warn`s to `warn` -> the assembler agent's
-# job, not SETUP's — this comment is the flip instruction.
-strict: false
+# ⟨strict-safe⟩ All six writer files (index, first-run, architecture,
+# reference/service-http, troubleshooting, contributing) exist and every nav
+# target below resolves, so the build can afford to treat a warning as an
+# error. (Earlier revisions of this comment pointed at a "SETUP section above"
+# that was never written; there is no such section, and this paragraph is the
+# whole instruction.)
+strict: true
 validation:
   nav:
-    omitted_files: warn
+    # Historical/scratch docs (plans/, brainstorming/, overnight/, superpowers/
+    # specs) are deliberately not in the nav — see "Historical documents stay
+    # historical" in docs/contributing.md. Presence in docs/ without a nav
+    # entry is expected here, not a mistake to chase.
+    omitted_files: ignore
     not_found: warn
     absolute_links: warn
   links:
