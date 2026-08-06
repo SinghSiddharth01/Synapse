@@ -164,6 +164,16 @@ These three causes produce the *same* symptom — findings are queryable immedia
 
 **Fix.** More keys (`SYNAPSE_SYNTHESIS_KEYS` / `INFERENCE_CLOUD_API_KEYS`) — lowering `SYNAPSE_MERGE_MIN_INTERVAL_S` does nothing here, that's the point of logging the two cases distinctly. One key holds roughly 6 rounds/hour under the governor (ADR 0005, "One key cannot deliver 60-second latency"), which is why quiet periods get their 60s and busy periods stretch.
 
+Raise `SYNAPSE_SYNTHESIS_KEYS` **only together with the actual pool.** The setting multiplies the governor's ceiling whether or not the keys exist, and the excess doesn't defer — it 429s inside the provider, which reads back as "findings landed, memory unchanged". Since 2026-08-06 the service compares the two at boot and warns when the claim exceeds the pool; if you see that line, the budget you think you have is not the budget the key can pay.
+
+⟨2026-08-06, W3b⟩ The reason list now includes **queries**. `/query` runs a real model call against the *same* provider object, key and hourly ceiling as synthesis, and is charged to the same ledger. The deferral message names the spenders (`"… (3 retrieval, 1 synthesis)"`), so a team seeing budget deferrals with barely any pushes should look at query volume, not at the merge interval. Findings stay queryable throughout; only the synthesized memory lags.
+
+### Worker log: `Provider rate limit: N admitted this tick … M deferred` / `Provider-seam BACKPRESSURE`
+
+**Cause.** The worker→provider limiter, not the service's (`packages/worker/src/synapse_worker/limiter.py`, decisions/002). One tick admits at most `[worker] max_calls_per_tick` segments (default 4) to the distiller; the rest wait in a FIFO queue persisted to `.synapse/deferred-segments.json`. At `max_deferred_segments` (default 64) the loop stops reading new transcript bytes — that's the `BACKPRESSURE` warning. Nothing is dropped in either case: the deferred segments are on disk, and the unread bytes stay behind the follower's offset.
+
+**Fix.** Usually nothing — a burst (a long paste, a catch-up after the worker was stopped) drains on its own at ~4 segments per poll interval. If the backlog is persistently growing, the distiller is slower than the conversation: raise `max_calls_per_tick`, lower `poll_interval_seconds`, or accept the lag. Raising `max_concurrent_calls` above 1 only helps on a provider that serves concurrent requests — the local NPU does not, and the worker dashboard's "currently distilling" slot shows only the most recent call above 1.
+
 ### `Synthesis returned schema_valid=False … findings are landed, memory unchanged`
 
 **Cause.** A truncated verdict. This was a real 2026-08-06 outage: the prompt asked for a working memory "under 500 words" while the provider's output cap made that arithmetically impossible, so every response was cut off mid-JSON and the parser returned `None`. `SynthesisBudget.derive` (`packages/service/src/synapse_service/synthesis.py`) now derives the working-memory word cap and verdict room from the actual `max_tokens` instead of stating them independently, and refuses to start on an impossible configuration rather than fail silently at merge time. Full account: ADR 0005.
