@@ -306,37 +306,30 @@ async def test_rejoining_from_a_new_agent_session_preserves_last_seen():
     assert after["members"] == ["aditya"]              # and the re-join landed
 
 
-# ── item 5: self-suppression spans a contributor's conversations ────────────
+# ── W2: two windows of one human are two participants ───────────────────────
 
-async def test_self_suppression_holds_for_one_contributor_across_two_agent_sessions():
-    """Spec Testing item 5, over the route.
+async def test_two_windows_of_one_contributor_see_each_others_findings():
+    """⟨INVERTED 2026-08-06 by the split, `docs/overnight/decisions/001`⟩ This
+    test asserted the opposite until today, and the assertion it made was the
+    defect W2 exists to remove.
 
-    aditya has two conversations open -- Claude Code and Codex -- which is the
-    demo, not an edge case. Findings distilled from either are already in that
-    human's head, so neither window may be told about the other's as if a
-    teammate had written them. Keyed on the Agent Session id, as this was
-    until 2026-08-06, window 2 was shown window 1's findings.
+    aditya has two Claude Code windows open on the same problem — which is the
+    demo, not an edge case. Under the contributor-keyed rule every Attribution
+    on window 1's findings named `aditya`, so window 2 was shown NONE of them:
+    the two windows were the same participant and could not learn from each
+    other at all, silently. One agent invocation is one Agent Session, so what
+    window 2 already has in its context window is what window 2 produced —
+    that, and only that, is what suppression may hide from it.
 
-    ⟨DOCSTRING CORRECTED 2026-08-06 review⟩ This used to claim the 21 findings
-    put it above the bypass and so exercised the `exclude=` seam in
-    `store.candidates`. They do not and it does not: `api.query` branches on
-    `len(allowed)`, not on how many findings exist, and 20 of the 21 are
-    aditya's own, so `allowed` is 1 -- well under `lanes.DEFAULT_TOP_K` (14) --
-    and the BYPASS branch runs every time. The assertion could not see that
-    seam either: drop `exclude=suppressed` and `query_findings` re-applies
-    `visible_to` downstream, `visible` is still `[f-akhil]`, and this still
-    passes.
-
-    What it DOES pin, and the reason it stays: the identity re-key itself. An
-    `agent_session`-keyed `visible_to` returns the ten `f-w1-*` findings to
-    window 2 and this goes red. The size is what makes the two windows'
-    findings numerous enough to be unmissable in the result, not a branch
-    selector.
+    The rejoin fix the contributor key was introduced for is kept whole, one
+    layer over: the watermark is still keyed by Contributor
+    (`store.last_seen`), pinned by
+    `test_rejoining_as_the_same_contributor_keeps_their_watermark` above.
 
     The retriever ranks every index it could possibly be offered rather than
-    just `[0]`, for the same reason as the additivity test below: `[0]` returns
-    whatever the lanes ordered first, so a re-key regression could slip through
-    on ordering alone. Out-of-range indices are dropped by `query_findings`."""
+    just `[0]`: `[0]` returns whatever the lanes ordered first, so a re-key
+    regression could slip through on ordering alone. Out-of-range indices are
+    dropped by `query_findings`."""
     provider = FakeProvider(scripts=[MERGE_NOOP, {"ranked": list(range(21))}])
     async with _client(provider) as client:
         sid = await _session(client)
@@ -355,8 +348,72 @@ async def test_self_suppression_holds_for_one_contributor_across_two_agent_sessi
                                     "agent_session": "as-window-2"})
 
     returned = [f["id"] for f in r.json()["findings"]]
-    assert returned == ["f-akhil"]
-    assert not any(fid.startswith("f-w1-") for fid in returned)
+    # window 1's work reaches window 2, exactly like a teammate's...
+    assert {fid for fid in returned if fid.startswith("f-w1-")} == {
+        f"f-w1-{i:02d}" for i in range(10)}
+    assert "f-akhil" in returned
+    # ...and window 2's own findings are still suppressed for window 2, which
+    # is what suppression is FOR: they are already in the context window asking.
+    assert not any(fid.startswith("f-w2-") for fid in returned)
+
+
+async def test_the_watermark_splits_its_two_halves_between_the_two_keys():
+    """The split, on the one route that reads BOTH keys at once.
+
+    `by_type`/`conflicts`/`topics` are CONTENT — "what would this asker
+    actually see" — so they suppress by the asking CONVERSATION. `new_since`
+    is CHANGE — "how much has the memory moved since I last looked" — and
+    stays keyed by the CONTRIBUTOR, which is what keeps a new conversation
+    from replaying the entire memory at the same human.
+
+    Both halves in one test on purpose: they are only correct together, and
+    keying either one the other way is a silent behaviour change with no
+    error attached."""
+    provider = FakeProvider(scripts=[MERGE_NOOP, {"ranked": [0]}])
+    async with _client(provider) as client:
+        sid = await _session(client)
+        await client.post(f"/v1/sessions/{sid}/findings", json={"findings": [
+            _finding_json("f-w1", contributor="aditya", agent_session="as-window-1"),
+            _finding_json("f-akhil", contributor="akhil", agent_session="as-akhil"),
+        ]})
+
+        # aditya reads, from window 1.
+        await client.post(f"/v1/sessions/{sid}/query",
+                          json={"query": "what do we know", "contributor": "aditya",
+                                "agent_session": "as-window-1"})
+
+        w1 = (await client.get(f"/v1/sessions/{sid}/watermark",
+                               params={"contributor": "aditya",
+                                       "agent_session": "as-window-1"})).json()
+        w2 = (await client.get(f"/v1/sessions/{sid}/watermark",
+                               params={"contributor": "aditya",
+                                       "agent_session": "as-window-2"})).json()
+
+    # CHANGE: one person, one place in the memory — window 2 is not told the
+    # whole session is new just because it is a different conversation.
+    assert w1["new_since"] == 0 and w2["new_since"] == 0
+    # CONTENT: window 1 is not shown its own finding; window 2 is, because it
+    # has never seen it.
+    assert w1["by_type"] == {"learning": 1}
+    assert w2["by_type"] == {"learning": 2}
+
+
+async def test_a_window_still_never_reads_its_own_findings_back():
+    """The other side of the split, on the smallest possible fixture, so the
+    inversion above cannot be read as "suppression was switched off"."""
+    provider = FakeProvider(scripts=[MERGE_NOOP, {"ranked": [0, 1]}])
+    async with _client(provider) as client:
+        sid = await _session(client)
+        await client.post(f"/v1/sessions/{sid}/findings", json={"findings": [
+            _finding_json("f-mine", contributor="aditya", agent_session="as-window-1"),
+            _finding_json("f-theirs", contributor="akhil", agent_session="as-akhil"),
+        ]})
+
+        r = await client.post(f"/v1/sessions/{sid}/query",
+                              json={"query": "what do we know", "contributor": "aditya",
+                                    "agent_session": "as-window-1"})
+
+    assert [f["id"] for f in r.json()["findings"]] == ["f-theirs"]
 
 
 # ── the wire change is additive ─────────────────────────────────────────────
@@ -414,27 +471,31 @@ async def test_an_old_shaped_request_carrying_only_agent_session_still_works():
     assert before["new_since"] == 1 and after["new_since"] == 0      # watermark advanced
 
 
-async def test_contributor_wins_when_a_request_carries_both_fields():
-    """The transitional shape the spec asks the orchestrator to send: both
-    fields, on the same request. `contributor` is the identity; `agent_session`
-    rides along for attribution and is not what suppression reads. If the
-    precedence were the other way round, an upgraded client would get the OLD
-    behaviour and the re-key would ship dead."""
-    provider = FakeProvider(scripts=[MERGE_NOOP, {"ranked": [0]}])
+async def test_agent_session_decides_suppression_when_a_request_carries_both_fields():
+    """⟨INVERTED 2026-08-06 by the split, `docs/overnight/decisions/001`⟩ Both
+    fields on one request is the shape every upgraded orchestrator sends, and
+    the two are now read for two different jobs: `agent_session` decides
+    suppression, `contributor` keys the watermark and attribution. If the
+    precedence were the other way round the split would ship dead — an
+    upgraded client would get the contributor-keyed behaviour and two windows
+    would still be one participant.
+
+    Same person, two windows: aditya asks from window 2 about two findings,
+    one produced in window 1 and one by a teammate. Both are visible, because
+    neither is in the asking context window."""
+    provider = FakeProvider(scripts=[MERGE_NOOP, {"ranked": [0, 1]}])
     async with _client(provider) as client:
         sid = await _session(client)
         await client.post(f"/v1/sessions/{sid}/findings", json={"findings": [
-            _finding_json("f-mine", contributor="aditya", agent_session="as-1"),
-            _finding_json("f-theirs", contributor="akhil", agent_session="as-2"),
+            _finding_json("f-w1", contributor="aditya", agent_session="as-1"),
+            _finding_json("f-theirs", contributor="akhil", agent_session="as-akhil"),
         ]})
 
         r = await client.post(f"/v1/sessions/{sid}/query",
                               json={"query": "what do we know", "contributor": "aditya",
                                     "agent_session": "as-2"})
 
-    # Suppression followed `contributor` (aditya's is withheld), not
-    # `agent_session` (which named akhil's conversation).
-    assert [f["id"] for f in r.json()["findings"]] == ["f-theirs"]
+    assert {f["id"] for f in r.json()["findings"]} == {"f-w1", "f-theirs"}
 
 
 # ── an UNKNOWN creator, 2026-08-06 ──────────────────────────────────────────

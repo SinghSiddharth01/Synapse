@@ -1,6 +1,13 @@
 # 001 — Split suppression from the watermark: two identities, two keys
 
-**Status:** decided, executing (W2). Partially reverses commit `6d6779b`.
+**Status:** decided and IMPLEMENTED (W2, 2026-08-06). Partially reverses commit
+`6d6779b`. The behaviour change is one service-side commit, subject
+"feat(service): suppression by agent_session, watermark by contributor",
+carrying the CONTEXT.md contract note with it — see "How to undo" below.
+Two tests were INVERTED by it rather than added around it
+(`test_lifecycle.py`'s two-windows and both-fields cases): they asserted the
+behaviour this decision reverses, so leaving them green would have meant the
+split had not landed.
 
 ## Question
 `visible_to` (self-suppression) and `last_seen` (the watermark) both need an
