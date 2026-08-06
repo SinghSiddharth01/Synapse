@@ -49,3 +49,65 @@ Edge distillation on Snapdragon plus cloud synthesis on Cloud AI 100 is the divi
 ## Impact
 
 Our demo highlights one concrete use case: a team debugging a shared issue, combining a lab engineer's on-target context with a developer's code context. The architecture applies to any collaborative work where AI agents operate alone — from incident response to code review to design exploration.
+
+## Getting Started
+
+### Prerequisites
+
+- Python 3.12+
+- [`uv`](https://docs.astral.sh/uv/) for dependency management and running the workspace
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) as the agent to connect (the worker auto-detects the agent product; Codex support is unbuilt — see Stretch Goals)
+- (Optional) a Snapdragon X Elite machine running `geniex serve` on `:18181` for real on-device NPU inference, and Cirrascale/Cloud AI 100 credentials for real cloud synthesis. Without either, `scripts/serve_local.py` (below) starts a model stand-in automatically, so the full pipeline is runnable on any machine.
+
+### Setup (from scratch)
+
+```bash
+git clone https://github.com/SinghSiddharth01/Synapse.git
+cd Synapse
+uv sync
+```
+
+> **Windows on ARM64:** point `uv` at the ARM64 interpreter explicitly (e.g. `uv venv --python <path-to-arm64-python.exe>` before `uv sync`) — a bare `uv venv` can silently provision an emulated x86_64 environment, which breaks NPU wheel installs. Also pin `mcp==1.9.4`; newer `mcp` releases pull a `cryptography` dependency with no ARM64 Windows wheel.
+
+### Run it
+
+The fastest way to see Synapse end to end, with no NPU or cloud credentials required, is `scripts/serve_local.py`. It starts the Synapse Service, the Orchestrator, and a model stand-in, then creates (or joins) a Shared Session:
+
+```bash
+uv run python scripts/serve_local.py --purpose "my first shared session"
+```
+
+This prints a Shared Session id and an MCP URL. Connect Claude Code to it:
+
+```bash
+claude mcp add --transport http --scope project synapse http://127.0.0.1:8787/mcp
+```
+
+Start a **new** Claude Code session in that project and approve the `synapse` server when prompted — the `mcp__synapse__query` and `mcp__synapse__contribute` tools then become available (verify with `/mcp` inside the session). A second teammate joins the same Shared Session by re-running `serve_local.py --shared-id <the id printed above>` from their own machine, or by running `synapse-worker join <shared_id>` to passively observe an existing Claude Code transcript instead of calling `contribute` directly.
+
+Add `--npu` if a real `geniex serve` instance is already running, or `--live` to proxy the model seam to a real cloud model instead of the stand-in.
+
+### Run the test suite
+
+```bash
+uv run pytest
+```
+
+### Further reading
+
+- [`docs/demo-script.md`](docs/demo-script.md) — the full scripted walkthrough (multiple contributors, cross-teammate retrieval, and recovery after a service restart)
+- [`packs/claude-code/INSTALL.md`](packs/claude-code/INSTALL.md) — optional awareness hooks that make shared-memory updates surface proactively inside a Claude Code session, rather than only on demand via `query`
+- [`docs/architecture.html`](docs/architecture.html) — architecture deep-dive
+- [`CONTEXT.md`](CONTEXT.md) — vocabulary and design invariants
+
+## Team
+
+| Name | Email |
+|---|---|
+| Aditya Thagarthi Arun | adityata98@gmail.com |
+| Siddharth Singh | sid17011998@gmail.com |
+| Akhil Agrawal | agrawal.akhil14@gmail.com |
+
+## License
+
+MIT — see [`LICENSE`](LICENSE).
