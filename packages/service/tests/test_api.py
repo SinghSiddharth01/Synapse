@@ -363,15 +363,20 @@ async def test_query_sends_at_most_top_k_findings_into_one_prompt():
     assert 0 < len(provider.seen[-1]) <= TOP_K
 
 
-async def test_a_small_session_sends_every_visible_finding_exactly_as_main_did():
-    """THE HEDGE. At or below TOP_K allowed findings the route skips select()
-    entirely and passes the visible log through in arrival order -- byte-
-    identical to what main does today, which is what makes this task a no-op
-    at demo scale and a scaling property above it.
+async def test_a_small_session_sends_every_visible_finding():
+    """THE HEDGE, and it is about MEMBERSHIP. At or below TOP_K allowed
+    findings, every one of them reaches the prompt — select() may reorder
+    them, but it may never drop one. That is what makes the lanes a scaling
+    property rather than a filter that could quietly lose a small team's
+    knowledge.
 
-    Without this branch, a five-finding session's answer would depend on BM25
-    + symbol overlap + a HashingEmbedder with no paraphrase signal, for no
-    gain: everything fits in the prompt anyway."""
+    ⟨AMENDED 2026-08-05⟩ This used to also assert ARRIVAL order, because the
+    route used to pass the log straight through. It no longer does: below
+    TOP_K the lanes now run purely to ORDER the same set (api.py). Asserting
+    arrival order here would pin the exact defect that change removed — a
+    session where the one relevant finding came back last of six because
+    nothing had ever ranked it. Membership is the guarantee; order is
+    supposed to move."""
     from synapse_service.api import TOP_K
 
     provider = _RecordingProvider(scripts=[MERGE_NOOP, {"ranked": [0]}])
@@ -388,7 +393,9 @@ async def test_a_small_session_sends_every_visible_finding_exactly_as_main_did()
     prompt = provider.prompts[-1]
     for i in range(5):
         assert f"insight f-{i}" in prompt               # every one of them, not 14 of 5
-    assert prompt.index("insight f-0") < prompt.index("insight f-4")   # arrival order
+    # Ordering is the lanes' business now and deliberately unpinned here; that
+    # nothing was DROPPED is the property this test exists for.
+    assert len(provider.seen[-1]) == 5
 
 
 async def test_the_bypass_boundary_is_where_the_guarantee_stops():

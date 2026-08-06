@@ -277,17 +277,41 @@ def build_app(provider: ModelProvider, *, debug: bool = True) -> Starlette:
         visible = store.retrievable(sid)
         allowed = visible_to(visible, agent_session)
 
+        suppressed = frozenset(f.id for f in visible) - {f.id for f in allowed}
         if len(allowed) <= TOP_K:
-            # THE BYPASS. Everything the asker may see already fits in one
-            # prompt, so selecting a subset of it can only lose recall -- and
-            # the selectors available here (BM25, symbol overlap, a
-            # HashingEmbedder with no paraphrase signal) are weaker at this
-            # scale than the 8B reading all of it. Byte-identical to what this
-            # route did before lanes existed. Above TOP_K the lanes are the
-            # only way the prompt stays bounded, and they run.
-            candidates = allowed
+            # THE BYPASS, on MEMBERSHIP only. Everything the asker may see
+            # already fits in one prompt, so selecting a subset of it can only
+            # lose recall -- and the selectors available here (BM25, symbol
+            # overlap, a HashingEmbedder with no paraphrase signal) are weaker
+            # at this scale than the 8B reading all of it.
+            #
+            # ⟨AMENDED 2026-08-05⟩ It used to bypass ORDER as well, and those
+            # are separable. `candidates = allowed` handed the model the
+            # arrival order, so below TOP_K the route had no ordering, no
+            # relevance signal and no drops -- none of the three -- which is
+            # the small-session case, i.e. every demo and every new team. The
+            # system was weakest exactly where it is most watched.
+            #
+            # Measured on the six findings then in shared memory, asked
+            # "Cirrascale API key rejected / 401 unauthorized": the lanes put
+            # the one relevant finding at rank 1 for 7 of 10 phrasings and in
+            # the top 3 for 10 of 10, with NO model involved. The shipped path
+            # returned it sixth of six every time. That ordering was being
+            # computed-for-free and thrown away.
+            #
+            # So: run the lanes to ORDER, then append anything they did not
+            # surface, in arrival order. Recall below TOP_K is provably
+            # unchanged -- every allowed finding still reaches the prompt --
+            # while the model now reads them best-first instead of
+            # oldest-first. Above TOP_K nothing here changes at all.
+            ordered = store.candidates(sid, body["query"],
+                                       top_k=max(TOP_K, len(allowed)),
+                                       exclude=suppressed).candidates
+            by_id = {c.finding.id: c.finding for c in ordered}
+            candidates = list(by_id.values()) + [
+                f for f in allowed if f.id not in by_id
+            ]
         else:
-            suppressed = frozenset(f.id for f in visible) - {f.id for f in allowed}
             cands = store.candidates(sid, body["query"], top_k=TOP_K, exclude=suppressed)
             candidates = [c.finding for c in cands.candidates]
 

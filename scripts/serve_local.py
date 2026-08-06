@@ -100,6 +100,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--shared-id", help="join an existing Shared Session instead of creating one")
     parser.add_argument("--contributor", default=os.environ.get("USER", "me"))
     parser.add_argument("--purpose", default="live session")
+    parser.add_argument("--live", action="store_true",
+                        help="proxy the model seam to the real instance in "
+                             "secrets.jsonc, so retrieval is actually RANKED by a "
+                             "model and `contribute` can distil arbitrary prose. "
+                             "Costs real requests (~20/hour/key).")
+    parser.add_argument("--distiller-model", default="Llama-3.1-8B",
+                        help="--live: the small model standing where the NPU sits")
+    parser.add_argument("--synthesizer-model", default="Llama-3.3-70B",
+                        help="--live: the large model standing where the cloud sits")
     parser.add_argument("--npu", action="store_true",
                         help="a real model is already serving on :18181 (geniex serve) — "
                              "do not start the stand-in")
@@ -113,11 +122,24 @@ def main(argv: list[str] | None = None) -> int:
                              "Start `geniex serve` first, or drop --npu.")
         print(f"model      using what is already on {model_url}", flush=True)
     else:
-        model = spawn("model", [sys.executable, "scripts/local_model_server.py"])
+        argv_model = [sys.executable, "scripts/local_model_server.py"]
+        if args.live:
+            argv_model += ["--mode", "proxy",
+                           "--distiller-model", args.distiller_model,
+                           "--synthesizer-model", args.synthesizer_model]
+        model = spawn("model", argv_model)
         if not wait_for(f"{model_url}/models", model, "model"):
             raise SystemExit("the model stand-in did not come up")
-        print(f"model      stand-in on {model_url} (replays this repo's corpus; "
-              f"not a model, not the NPU)")
+        if args.live:
+            print(f"model      LIVE — proxying to the host in secrets.jsonc; "
+                  f"distil {args.distiller_model}, synthesis {args.synthesizer_model}",
+                  flush=True)
+            print("           retrieval is really ranked now, and `contribute` can "
+                  "distil your own words. Budget ~20 requests/hour/key.", flush=True)
+        else:
+            print(f"model      stand-in on {model_url} (replays this repo's corpus; "
+                  f"not a model, not the NPU — retrieval ranking is identity)",
+                  flush=True)
 
     service = spawn("service", [str(BIN / "synapse-service")], {
         "SYNAPSE_SYNTHESIZER": "aic100",
