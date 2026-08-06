@@ -188,14 +188,28 @@ background processes from here on — job numbers get confusing with two backgro
 of which gets killed and restarted mid-script.
 
 Right after these two boot steps, open **`http://127.0.0.1:8790/debug`** (`synapse-worker`) and
-**`http://127.0.0.1:8899/debug`** (`synapse-service`, mounted on the same port the beats below
+**`http://127.0.0.1:8899/debug/log`** (`synapse-service`, mounted on the same port the beats below
 already curl) side by side — Beats 3–5 are *watchable*: NPU-now counts the distil seconds live
 when a worker is condensing, and the `Merged` log-tail entry on the service page appears the
 moment Beat 5's push lands, ahead of the narrator reading the JSON off the terminal. (This script's
 own pushes go straight from `.measurements/demo-push*.json` to the service by `curl`, bypassing a
-live worker entirely, so `/debug`'s NPU-now reads `idle` throughout unless a `synapse-worker run`
-is also on stage — the service side is live regardless, since every push and merge above goes
-through it either way.)
+live worker entirely, so the worker `/debug`'s NPU-now reads `idle` throughout unless a
+`synapse-worker run` is also on stage — the service side is live regardless, since every push and
+merge above goes through it either way.)
+
+> **⟨W4a, 2026-08-06⟩ The service's `/debug` is now the *brain page* — the state of the memory,
+> not the log.** The log tail moved to **`/debug/log`**, which is what the beats below point at.
+> `/debug` itself is the better "Global View" frame (working memory, its revisions, the participant
+> roster, latest findings into memory) and is worth cutting to at the end of Beat 5 — but the
+> `Merged` entry the beats verify against lives on `/debug/log`.
+>
+> One caveat if you are on the raw-`curl` path below rather than `scripts/serve_local.py`: these
+> beats never `POST /members`, and nothing on the ingest path registers anybody, so the brain
+> page's roster will show each contributor as **not a member** and the Contributors tile will
+> read `0 registered · N in the log`. That is the page being accurate about a membership call
+> the script never makes, not a fault. `curl -X POST localhost:8899/v1/sessions/$SID/members -H
+> 'content-type: application/json' -d '{"contributor":"sid"}'` (once per name) before Beat 1 makes
+> the roster read `active` if you want the fuller frame on camera.
 
 **Beats 1–4** are identical to §A's, against the new `$SID`. At beat 4's `/watermark`, expected
 output now additionally carries a `topics` key with at least one label derived from the pushed
@@ -218,7 +232,7 @@ on every structurally-valid verdict, merges or not (`adr/0004`'s Amendment, 2026
 call above is one observation — but **⟨rehearsed live 2026-08-05⟩ the sum arithmetic only holds
 if *exactly* the flagship pair merges, and the live 8B merges and trivia-marks far more than that**
 (24 pushed → 8 retrievable in one observed run — a better story, and it breaks the arithmetic).
-The robust observation is the **service `/debug` log tail**: point at the `Merged` entry naming
+The robust observation is the **service `/debug/log` log tail**: point at the `Merged` entry naming
 `f-005a-01, f-005b-01` (or the chain absorbing them); `scripts/rehearse_demo.py --live` checks it.
 The arithmetic remains valid in §A where nothing merges: sum `by_type` against §A's — **25**
 here (26 pushed findings minus 2 merge sources plus 1 synthesized result), against **26** in §A,

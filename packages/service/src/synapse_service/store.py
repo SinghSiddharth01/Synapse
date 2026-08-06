@@ -50,6 +50,14 @@ class InMemoryStore:
         self._contexts: dict[str, SessionContext] = {}
         self._memories: dict[str, SharedMemory] = {}
         self._last_seen: dict[tuple[str, str], int] = {}
+        # Contributors this PROCESS has watched leave, per session. Not the
+        # member list and not the log -- see `remove_member` for why departure
+        # is in neither. It exists so that "not in `members`" can be told
+        # apart from "left", which are three different situations wearing one
+        # shape: never registered, registered elsewhere before a restart, and
+        # actually departed. Anything that reads this must treat absence as
+        # UNKNOWN rather than as "did not leave".
+        self._departed: dict[str, set[str]] = {}
         # How many findings had EVER entered a session's memory when this
         # contributor last read it (W5). A second watermark alongside
         # `_last_seen`, and deliberately not a replacement for it: they answer
@@ -109,6 +117,10 @@ class InMemoryStore:
         session = self._sessions[shared_id]
         if contributor not in session.members:
             session.members.append(contributor)
+        # Re-joining retracts the departure. Someone who left and came back is
+        # present, not "left", and leaving the marker would make the next
+        # DELETE-less absence read as a second departure that never happened.
+        self._departed.get(shared_id, set()).discard(contributor)
 
     def remove_member(self, shared_id: str, contributor: str) -> None:
         """Detach one member. Leaving is not ending (2026-08-06 spec): the
@@ -132,10 +144,29 @@ class InMemoryStore:
         keying the watermark on the Contributor rather than on a conversation
         id (see `last_seen` below), and clearing it here would reinstate the
         exact "everything is new again" briefing the re-key removes.
+
+        `_departed` IS written, and it is not a second representation of
+        membership -- it is this process's record that it watched the DELETE
+        arrive. `members` alone cannot answer "did they leave?", because an
+        absent contributor may equally never have registered (nothing on the
+        ingest path calls `add_member`; only the relay does) or have
+        registered against a service that has since restarted. Callers that
+        need to tell those apart ask `has_departed`; callers that only need
+        the roster keep reading `members`.
         """
         session = self._sessions[shared_id]
         if contributor in session.members:
             session.members.remove(contributor)
+        self._departed.setdefault(shared_id, set()).add(contributor)
+
+    def has_departed(self, shared_id: str, contributor: str) -> bool:
+        """Did THIS PROCESS observe a `DELETE /members/{contributor}`?
+
+        `False` is not "they are still here" -- it is "no departure was
+        observed", which after a restart is true of everyone. The only honest
+        reading of `False` for a non-member is UNKNOWN.
+        """
+        return contributor in self._departed.get(shared_id, set())
 
     # ── lifecycle ───────────────────────────────────────────────────────────
     def end_session(self, shared_id: str, ended_by: str) -> str:

@@ -134,6 +134,20 @@ Newest at the bottom.
   drop log). The 9 findings from the live evidence replay verbatim in tests:
   6 drop, 3 survive. Prompt bytes untouched — the 809-token calibrated
   overhead has zero headroom against the pinned 2787 segment budget.
+- **09:45** — **W5 merged** (`64a422f`, **1265 tests**). Arrival summary:
+  new service `/v1/sessions/{sid}/arrival` (no model call — decisions/004:
+  the JOINING agent does the natural-language summarising, which is what the
+  storyboard shows), ACCUMULATED + NEW-SINCE sections, arrival-keyed
+  watermarks (a version-keyed "new since" provably missed freshly-pushed
+  findings), structural cache keys. `join_session` returns the summary in its
+  tool result; the review caught that the DOCUMENTED demo path (serve_local
+  joins before the agent connects) would still be silent — the fix wired the
+  summary into the connect-path briefing as well, and the audit rendered the
+  real joiner text in-process to prove the beat fires: purpose, members,
+  counts, highlights, new-since. Also flagged for other suites: decision 008
+  made exhausted FakeProvider scripts raise, which exposed two of W5's own
+  tests as passing on a swallowed failure — the same shape may lurk in suites
+  written before 008.
 - **06:10** — **Relaunch with real isolation** (every agent now gets its own
   harness worktree + detached-HEAD checkout, push-by-ref only):
   `w1-geniex-v2` (wf_4c6491eb, full redo from recovered design) ·

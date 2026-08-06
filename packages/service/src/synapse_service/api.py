@@ -25,7 +25,7 @@ from synapse_contracts import Finding, SessionStatus
 from synapse_providers import CallLog, ModelProvider, RecordingProvider
 
 from synapse_service.arrival import SummaryCache
-from synapse_service.debug import Feed, debug_routes
+from synapse_service.debug import Feed, WorkingMemoryLog, debug_routes
 from synapse_service.lanes import DEFAULT_TOP_K
 from synapse_service.log import MarkedTrivial, Merged
 from synapse_service.retrieval import (RetrievalUnavailable, query_findings,
@@ -239,6 +239,13 @@ def build_app(provider: ModelProvider, *, debug: bool = True,
     # nothing retains a call/prompt history no one can ever look at.
     call_log = CallLog() if debug else None
     feed = Feed() if debug else None
+    # ⟨W4a, decisions/003⟩ Same gating, same reason, third of a set: the
+    # Finding Log has no entry kind carrying the Working Memory prose, so a
+    # rewrite is overwritten and gone the moment the next merge lands. This
+    # retains the last ten per session so the brain page can show the memory
+    # CHANGING rather than only its current value. Nothing outside /debug
+    # reads it, and it does not exist at all when debug is off.
+    wm_log = WorkingMemoryLog() if debug else None
     synthesis_provider = (
         RecordingProvider(provider, "synthesis", call_log) if debug else provider
     )
@@ -450,6 +457,13 @@ def build_app(provider: ModelProvider, *, debug: bool = True,
         trivial = [e for e in entries if isinstance(e, MarkedTrivial)]
         trivial_count = sum(len(e.finding_ids) for e in trivial)
         ctx = store.get_context(sid)
+        # `synthesis.merge` does `set_context` then `bump_version`, so the ctx
+        # read here carries the new prose AND the new version together --
+        # which is the whole reason the recorder lives at this one call site
+        # rather than inside synthesis. `WorkingMemoryLog.record` drops an
+        # empty or unchanged text itself, so a verdict that omitted the
+        # rewrite books no revision.
+        wm_log.record(sid, ctx.working_memory, ctx.memory_version)
         feed.event(
             "synthesis",
             f"{sid}: {len(merged)} merge(s), {trivial_count} trivial, "
@@ -985,6 +999,12 @@ def build_app(provider: ModelProvider, *, debug: bool = True,
                 # `d.asked_by` (debug.py:549) and this is a Contributor now,
                 # which is what an operator wanted to read there anyway.
                 asked_by=contributor or "anonymous",
+                # ⟨W4a⟩ ...and the Agent Session alongside it, which was in
+                # scope and discarded. It is what makes the brain page's "last
+                # query" a fact about THIS CONVERSATION rather than about the
+                # person -- the distinction W2 made real, and the one the page
+                # labels explicitly when it has to fall back.
+                asked_by_session=asking_session,
                 candidates=len(candidates),
                 ranked=len(ranked),
                 suppressed=withheld,
@@ -1009,11 +1029,14 @@ def build_app(provider: ModelProvider, *, debug: bool = True,
         Route("/v1/sessions/{sid}/query", query, methods=["POST"]),
     ]
     if debug:
-        routes.extend(debug_routes(store, call_log, feed))
+        routes.extend(debug_routes(store, call_log, feed, wm_log))
 
     app = Starlette(routes=routes)
     app.state.store = store          # test seam: no route reads it
     # test seam: lets a test confirm no CallLog exists at all when debug is
     # disabled (not merely that it's unreachable) -- no route reads this.
     app.state.call_log = call_log
+    # Same seam, same reason: a disabled dashboard must not leave a ring of
+    # Working Memory prose retained where nothing can read it.
+    app.state.working_memory_log = wm_log
     return app
