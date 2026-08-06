@@ -262,6 +262,47 @@ async def test_a_member_who_left_keeps_their_row_and_their_findings() -> None:
         assert session["recent"][0]["authors"] == ["aditya"]
 
 
+async def test_a_contributor_who_never_registered_is_not_reported_as_left() -> None:
+    """`left` asserts a human action. Absence from `members` does not: nothing
+    on the ingest path calls `add_member`, so a raw `POST /findings` -- which
+    is exactly what `docs/demo-script.md`'s Beats 1-6 do -- produces a
+    contributor who is in the log and was never in the member list. Calling
+    that "left" puts a false claim about a teammate on a page that may be on
+    camera, directly above a Contributors tile reading 0."""
+    async with _client(build_app(FakeProvider(scripts=[_verdict()]))) as client:
+        sid = await _new_session(client)
+        await client.post(f"/v1/sessions/{sid}/findings",
+                          json={"findings": [_finding("f-1", "aditya", "as-a")]})
+
+        session = (await _brain(client, sid))["session"]
+        row = _row({"session": session}, "aditya", "as-a")
+        assert row["state"] == "unregistered"
+        assert row["contributions"] == 1
+        # Both halves of what the tile shows, so the 0 is never alone.
+        assert session["counts"]["contributors"] == 0
+        assert session["counts"]["contributors_in_log"] == 1
+
+
+async def test_re_joining_retracts_the_departure() -> None:
+    """A member who leaves and comes back is present, not `left` -- and the
+    stale marker must not survive to make some later absence read as a second
+    departure that never happened."""
+    async with _client(build_app(FakeProvider(scripts=[_verdict()]))) as client:
+        sid = await _new_session(client)
+        await client.post(f"/v1/sessions/{sid}/members", json={"contributor": "aditya"})
+        await client.post(f"/v1/sessions/{sid}/findings",
+                          json={"findings": [_finding("f-1", "aditya", "as-a")]})
+        await client.delete(f"/v1/sessions/{sid}/members/aditya")
+        assert _row(await _brain(client, sid), "aditya", "as-a")["state"] == "left"
+
+        await client.post(f"/v1/sessions/{sid}/members", json={"contributor": "aditya"})
+        assert _row(await _brain(client, sid), "aditya", "as-a")["state"] == "active"
+
+        # And after leaving again it is a departure once more, not a stuck one.
+        await client.delete(f"/v1/sessions/{sid}/members/aditya")
+        assert _row(await _brain(client, sid), "aditya", "as-a")["state"] == "left"
+
+
 async def test_behind_tracks_the_contributor_s_watermark() -> None:
     provider = FakeProvider(scripts=[_verdict("first"), {"ranked": [0]},
                                      _verdict("second")])
@@ -274,9 +315,14 @@ async def test_behind_tracks_the_contributor_s_watermark() -> None:
         await client.post(f"/v1/sessions/{sid}/query",
                           json={"query": "what do we know", "contributor": "sid",
                                 "agent_session": "as-a"})
-        row = _row(await _brain(client, sid), "sid", "as-a")
+        brain = await _brain(client, sid)
+        row = _row(brain, "sid", "as-a")
         assert row["behind"] == 0
-        assert row["last_seen_version"] == row["last_seen_version"]
+        # The watermark itself, not just the derived gap: `behind == 0` also
+        # holds when both sides are 0, which is the exact ambiguity the row
+        # below this one exists to refuse.
+        assert brain["session"]["memory_version"] == 1
+        assert row["last_seen_version"] == 1
 
         # One more verdict round moves the memory out from under them.
         await client.post(f"/v1/sessions/{sid}/synthesize")
@@ -404,6 +450,30 @@ async def test_before_any_synthesis_there_are_no_revisions_and_no_update_time() 
         # Null, never a timestamp: the page must say the history is not
         # persisted rather than render an empty list as "nothing changed".
         assert wm["updated_iso"] is None
+
+
+async def test_updated_iso_never_dates_prose_no_revision_matches() -> None:
+    """`_record_synthesis_feed` is the only recorder, so any rewrite reaching
+    `store.set_context` by another path leaves the newest revision stale --
+    and dating the CURRENT prose by an observation of DIFFERENT prose is the
+    confident-wrong-timestamp this page exists to refuse. Latent today (both
+    merge call sites run the recorder), pinned so it stays latent."""
+    app = build_app(FakeProvider(scripts=[_verdict("the observed prose")]))
+    async with _client(app) as client:
+        sid = await _new_session(client)
+        await client.post(f"/v1/sessions/{sid}/findings",
+                          json={"findings": [_finding("f-1", "sid", "as-a")]})
+        assert (await _brain(client, sid))["session"]["working_memory"]["updated_iso"]
+
+        # A rewrite that goes around the recorder, which is the whole scenario.
+        app.state.store.set_context(sid, working_memory="prose nobody watched arrive")
+
+        wm = (await _brain(client, sid))["session"]["working_memory"]
+        assert wm["text"] == "prose nobody watched arrive"
+        assert wm["updated_iso"] is None
+        # The observed revision is still shown -- it happened -- it just no
+        # longer claims to be the timestamp of what is on screen.
+        assert wm["revisions"][0]["text"] == "the observed prose"
 
 
 # ---------------------------------------------------------------------------

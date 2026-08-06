@@ -377,10 +377,25 @@ def _participants(store: InMemoryStore, feed: Feed, sid: str,
             row["state"] = "listening"
         elif contributor in members:
             row["state"] = "active"
-        else:
+        elif store.has_departed(sid, contributor):
             # Left, not deleted. Leaving is not ending: their findings stay in
             # the log attributed to them, so the row stays too.
             row["state"] = "left"
+        else:
+            # NOT a member, and this process never watched them leave. Three
+            # situations share that shape and only one of them is "left":
+            #   * they never registered -- nothing on the ingest path calls
+            #     `add_member`, so a raw `POST /findings` (the demo script's
+            #     Beats 1-6 are exactly that) produces a contributor who is
+            #     in the log and was never in `members`;
+            #   * they registered against a service that has since restarted
+            #     -- `Relay._registered` caches per process and will not
+            #     re-POST, while the restarted store starts at `members=[]`;
+            #   * they were removed before this process started.
+            # Calling any of those "left" asserts a human action that may not
+            # have happened, so the page reports the membership fact it
+            # actually holds and nothing more.
+            row["state"] = "unregistered"
 
     participants.sort(key=lambda r: (
         max(r["last_contribution_iso"] or "", r["last_query_iso"] or ""),
@@ -451,14 +466,24 @@ def _recent(store: InMemoryStore, sid: str) -> list[dict[str, Any]]:
 
 def _working_memory(ctx: Any, wm_log: WorkingMemoryLog | None, sid: str) -> dict[str, Any]:
     revisions = wm_log.snapshot(sid) if wm_log is not None else []
+    # The newest revision's OBSERVATION time, or null when this process has
+    # watched no rewrite. Never the current time, and never the session's --
+    # the prose itself carries no timestamp anywhere.
+    #
+    # Guarded on the TEXT MATCHING, not merely on the list being non-empty:
+    # `_record_synthesis_feed` is the only recorder, so a rewrite reaching
+    # `store.set_context` by any other path would leave the newest revision
+    # stale and this timestamp would then date the prose ON SCREEN by an
+    # observation of different prose. The page can say "not observed"; it
+    # must not say "rewritten at 21:14" about text nobody watched arrive.
+    updated_iso = None
+    if revisions and revisions[0]["text"] == ctx.working_memory:
+        updated_iso = revisions[0]["ts_iso"]
     return {
         "text": ctx.working_memory,
         "words": len(ctx.working_memory.split()),
         "version": ctx.memory_version,
-        # The newest revision's OBSERVATION time, or null when this process
-        # has watched no rewrite. Never the current time, and never the
-        # session's -- the prose itself carries no timestamp anywhere.
-        "updated_iso": revisions[0]["ts_iso"] if revisions else None,
+        "updated_iso": updated_iso,
         "revisions": revisions,
     }
 
@@ -826,10 +851,18 @@ _PAGE = """<!doctype html>
     return tag + "|" + ts;
   }
 
+  // Text-node escaping only -- the serializer leaves quotes alone, so
+  // anything landing inside an attribute needs `escAttr` (same pair as the
+  // brain page; `shared_id` in the picker below is client-supplied through
+  // `POST /v1/sessions`).
   function esc(s) {
     var d = document.createElement("div");
     d.textContent = String(s == null ? "" : s);
     return d.innerHTML;
+  }
+
+  function escAttr(s) {
+    return esc(s).replace(/"/g, "&quot;").replace(/'/g, "&#39;");
   }
 
   function hhmmss(iso) {
@@ -873,7 +906,7 @@ _PAGE = """<!doctype html>
     var html = "";
     for (var i = logTail.length - 1; i >= 0; i--) {
       var e = logTail[i];
-      html += '<div class="entry" data-kind="' + esc(e.kind) + '">';
+      html += '<div class="entry" data-kind="' + escAttr(e.kind) + '">';
       html += '<span class="pos">#' + esc(e.position) + '</span>';
       html += '<span class="kind">' + esc(e.kind) + '</span>';
       html += '<span class="summary">' + esc(e.summary) + '</span>';
@@ -906,7 +939,7 @@ _PAGE = """<!doctype html>
       if (m.tag === "llm") {
         var c = m.data;
         var ok = c.ok ? "ok" : "FAILED";
-        html += '<div class="' + cls + '" data-tag="llm" data-key="' + esc(key) + '">';
+        html += '<div class="' + cls + '" data-tag="llm" data-key="' + escAttr(key) + '">';
         html += '<span class="ts">' + esc(hhmmss(c.ts_iso)) + '</span>';
         html += '<span class="tag">llm</span>';
         html += '<span class="summary">' + esc(c.component) + " · " + esc(ok) + " · " +
@@ -919,7 +952,7 @@ _PAGE = """<!doctype html>
           "output:\\n" + esc(c.output_preview) + '</div>';
       } else {
         var e = m.data;
-        html += '<div class="' + cls + '" data-tag="' + esc(m.tag) + '" data-key="' + esc(key) + '">';
+        html += '<div class="' + cls + '" data-tag="' + escAttr(m.tag) + '" data-key="' + escAttr(key) + '">';
         html += '<span class="ts">' + esc(hhmmss(e.ts_iso)) + '</span>';
         html += '<span class="tag">' + esc(m.tag) + '</span>';
         html += '<span class="summary">' + esc(e.summary) + '</span>';
@@ -974,7 +1007,7 @@ _PAGE = """<!doctype html>
     var topicsEl = document.getElementById("topics");
     topicsEl.innerHTML = session.topics.length
       ? session.topics.map(function (t) {
-          return '<span class="topic-chip" title="' + esc(t.size) + ' finding(s) in this topic">'
+          return '<span class="topic-chip" title="' + escAttr(t.size) + ' finding(s) in this topic">'
             + '<b>x' + esc(t.size) + '</b> ' + esc(t.label) + '</span>';
         }).join("")
       : '<span class="topic-chip">no topics yet</span>';
@@ -989,7 +1022,7 @@ _PAGE = """<!doctype html>
     var select = document.getElementById("session-select");
     var prior = currentSid;
     select.innerHTML = sessions.map(function (s) {
-      return '<option value="' + esc(s.shared_id) + '">' + esc(s.shared_id) +
+      return '<option value="' + escAttr(s.shared_id) + '">' + esc(s.shared_id) +
         " — " + esc(s.purpose) + '</option>';
     }).join("");
     if (prior && sessions.some(function (s) { return s.shared_id === prior; })) {
@@ -1252,7 +1285,12 @@ _BRAIN_PAGE = """<!doctype html>
   .state { font-size: 9px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; }
   .state.active    { color: var(--k-merged); }
   .state.listening { color: var(--tag-query); }
-  .state.left      { color: var(--dimmer); }
+  .state.left      { color: var(--dim); }
+  /* The honest unknown, dimmest of the four and dotted-underlined so it
+     reads as "there is a caveat here" rather than as a verdict. */
+  .state.unregistered {
+    color: var(--dimmer); border-bottom: 1px dotted var(--dimmer); cursor: help;
+  }
   .scope { color: var(--dimmer); font-size: 10px; }
   .none { color: var(--dimmer); }
 
@@ -1331,7 +1369,12 @@ _BRAIN_PAGE = """<!doctype html>
     <div class="node">
       <div class="label">Contributors</div>
       <div class="value" id="stat-contributors">0</div>
-      <div class="sub">members of this session</div>
+      <!-- BOTH numbers, because they routinely disagree and the difference is
+           the interesting part: a raw `POST /findings` never registers
+           anybody, so the log can name people the member list has never
+           heard of. Showing only the first put a "0" directly above a table
+           of contributors. -->
+      <div class="sub">registered · <span id="stat-contributors-log">0</span> in the log</div>
     </div>
     <div class="node">
       <div class="label">Conversations</div>
@@ -1372,9 +1415,16 @@ _BRAIN_PAGE = """<!doctype html>
     connection registry, so nothing on this page reports whether anyone is
     <i>connected</i>: it reports when they were last seen doing something.
     <b>Join and leave times are not recorded anywhere</b> — membership is a list
-    with no timestamps — so participation is shown as state only.
+    with no timestamps — so participation is shown as state only, and
+    <b>not a member</b> means exactly that: absent from the list with no
+    departure observed, which is equally what a never-registered contributor
+    and a service restart look like. Only <b>left</b> is a departure this
+    process actually watched happen.
     <b>Memory position is per contributor, not per conversation</b>: the watermark
     is a fact about a person, so both of one person's windows show the same one.
+    <b>Last query comes from a 200-event ring shared by every session</b>, so a
+    busy stretch can push an older query out of it and the cell falls back to
+    an em-dash — “not in the window”, never “never asked”.
     <b>Revision history is kept in this process</b> and is empty after a restart.
   </p>
 </main>
@@ -1389,10 +1439,22 @@ _BRAIN_PAGE = """<!doctype html>
   // row does not become a different row when the list shifts underneath it.
   var expandedKeys = new Set();
 
+  // Text-node escaping ONLY -- the serializer handles & < >, and deliberately
+  // does NOT touch quotes, so `esc` alone is unsafe inside an attribute.
+  // Every string on this page that reaches an attribute is client-supplied
+  // and unvalidated (`Finding.id`, `Attribution.agent_session` and
+  // `shared_id` are all bare `str` in contracts/schemas.py, written by
+  // whichever teammate's machine pushed them -- across the device boundary,
+  // which is the whole premise of the system), so attributes go through
+  // `escAttr`, which closes the quotes as well.
   function esc(s) {
     var d = document.createElement("div");
     d.textContent = String(s == null ? "" : s);
     return d.innerHTML;
+  }
+
+  function escAttr(s) {
+    return esc(s).replace(/"/g, "&quot;").replace(/'/g, "&#39;");
   }
 
   function hhmmss(iso) {
@@ -1469,6 +1531,7 @@ _BRAIN_PAGE = """<!doctype html>
   function renderVitals(s) {
     var c = s.counts;
     document.getElementById("stat-contributors").textContent = c.contributors;
+    document.getElementById("stat-contributors-log").textContent = c.contributors_in_log;
     document.getElementById("stat-conversations").textContent = c.conversations;
     document.getElementById("stat-visible").textContent = c.visible;
     document.getElementById("stat-superseded").textContent = c.superseded;
@@ -1508,14 +1571,16 @@ _BRAIN_PAGE = """<!doctype html>
       return;
     }
     var html = "";
+    var liveRevs = new Set();
     for (var i = 0; i < revs.length; i++) {
       var r = revs[i];
       var key = "rev|" + r.version + "|" + r.ts_iso;
+      liveRevs.add(key);
       var d = r.delta_words;
       var dCls = d == null ? "unk" : (d > 0 ? "up" : (d < 0 ? "down" : ""));
       var dText = d == null ? "—" : (d > 0 ? "+" + d : String(d));
       html += '<div class="rev' + (expandedKeys.has(key) ? " expanded" : "") +
-        '" data-key="' + esc(key) + '">';
+        '" data-key="' + escAttr(key) + '">';
       html += '<span class="v">v' + esc(r.version) + '</span>';
       html += '<span class="ts">' + esc(hhmmss(r.ts_iso)) + '</span>';
       html += '<span class="w">' + esc(r.words) + 'w</span>';
@@ -1524,8 +1589,33 @@ _BRAIN_PAGE = """<!doctype html>
       html += '<span class="full">' + esc(r.text) + '</span>';
       html += '</div>';
     }
+    // Same pruning the recent list does: a revision evicted from the 10-deep
+    // ring must not leave its key behind, or the set grows for as long as the
+    // tab is open.
+    expandedKeys.forEach(function (k) {
+      if (k.indexOf("rev|") === 0 && !liveRevs.has(k)) expandedKeys.delete(k);
+    });
     el.innerHTML = html;
   }
+
+  // The four membership states, in the words the page owes the viewer, and
+  // what each one is actually claiming. `unregistered` is the honest unknown:
+  // absent from `members` with no departure observed, which the service
+  // cannot tell apart from "never registered" or "registered before a
+  // restart" -- so it says the membership fact and stops there.
+  var STATE_LABEL = {
+    active: "active",
+    listening: "listening",
+    left: "left",
+    unregistered: "not a member"
+  };
+  var STATE_TITLE = {
+    active: "in this session's member list, with a conversation in the log",
+    listening: "in the member list; no agent session of theirs is in the log yet",
+    left: "this service watched a DELETE /members for them",
+    unregistered: "in the log but not in the member list, and no departure was " +
+      "observed — they may never have registered, or this service restarted"
+  };
 
   function renderParticipants(rows) {
     var el = document.getElementById("participants");
@@ -1562,15 +1652,17 @@ _BRAIN_PAGE = """<!doctype html>
         : '<span class="none">—</span>';
       html += "<tr>";
       html += '<td class="who"><span class="adot ' + act.cls + '" title="' +
-        esc(act.title) + '"></span>' + esc(p.contributor) + "</td>";
+        escAttr(act.title) + '"></span>' + esc(p.contributor) + "</td>";
       html += "<td>" + em(p.agent) + "</td>";
-      html += '<td title="' + esc(p.agent_session || "") + '">' + conv + "</td>";
+      html += '<td title="' + escAttr(p.agent_session || "") + '">' + conv + "</td>";
       html += '<td class="num">' + esc(p.contributions) + "</td>";
       html += "<td>" + (p.last_contribution_iso
         ? esc(hhmmss(p.last_contribution_iso)) : '<span class="none">—</span>') + "</td>";
       html += "<td>" + lastQuery + "</td>";
       html += "<td>" + position + "</td>";
-      html += '<td><span class="state ' + esc(p.state) + '">' + esc(p.state) + "</span></td>";
+      html += '<td><span class="state ' + escAttr(p.state) + '" title="' +
+        escAttr(STATE_TITLE[p.state] || "") + '">' +
+        esc(STATE_LABEL[p.state] || p.state) + "</span></td>";
       html += "</tr>";
     }
     html += "</tbody></table>";
@@ -1598,7 +1690,7 @@ _BRAIN_PAGE = """<!doctype html>
       live.add(key);
       var tomb = f.merged_into ? " tombstone" : "";
       html += '<div class="row' + tomb + (expandedKeys.has(key) ? " expanded" : "") +
-        '" data-prov="' + esc(f.provenance) + '" data-key="' + esc(key) + '">';
+        '" data-prov="' + escAttr(f.provenance) + '" data-key="' + escAttr(key) + '">';
       html += '<span class="ts">' + esc(hhmmss(f.ts_iso)) + '</span>';
       html += '<span class="who">' + esc(f.authors.join(" + ")) + '</span>';
       html += '<span class="type">' + esc(f.type) + '</span>';
@@ -1634,9 +1726,23 @@ _BRAIN_PAGE = """<!doctype html>
     renderRecent(s.recent);
   }
 
+  // EVERY region, not just the two lists: the working-memory pane and the
+  // vitals rail keep their markup placeholders otherwise, and a "…" body over
+  // a rail of zeros reads as a session whose memory is empty rather than as
+  // no session at all.
   function renderNoSession() {
     document.getElementById("purpose").textContent = "the service holds no shared session yet";
     document.getElementById("ident").textContent = "";
+    document.getElementById("wm-body").textContent = "";
+    document.getElementById("wm-meta").textContent = "—";
+    document.getElementById("rev-count").textContent = "";
+    document.getElementById("revisions").innerHTML =
+      '<div class="rev-note">no session, so no revisions</div>';
+    ["stat-contributors", "stat-contributors-log", "stat-conversations",
+     "stat-visible", "stat-superseded", "stat-trivial", "stat-conflicts",
+     "stat-version", "stat-entries"].forEach(function (id) {
+      document.getElementById(id).textContent = "—";
+    });
     document.getElementById("participants").innerHTML =
       '<div class="empty">nobody has joined or contributed to this session yet</div>';
     document.getElementById("recent").innerHTML =
@@ -1647,7 +1753,7 @@ _BRAIN_PAGE = """<!doctype html>
     var select = document.getElementById("session-select");
     var prior = currentSid;
     select.innerHTML = sessions.map(function (s) {
-      return '<option value="' + esc(s.shared_id) + '">' + esc(s.shared_id) +
+      return '<option value="' + escAttr(s.shared_id) + '">' + esc(s.shared_id) +
         (s.status === "ended" ? " (ended)" : "") + " — " + esc(s.purpose) + '</option>';
     }).join("");
     if (prior && sessions.some(function (s) { return s.shared_id === prior; })) {

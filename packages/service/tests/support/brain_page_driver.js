@@ -11,7 +11,8 @@
 //      than a zero -- the honesty property the whole page is built on.
 
 ["banner", "session-select", "purpose", "ident",
- "stat-contributors", "stat-conversations", "stat-visible", "stat-superseded",
+ "stat-contributors", "stat-contributors-log", "stat-conversations",
+ "stat-visible", "stat-superseded",
  "stat-trivial", "stat-conflicts", "stat-version", "stat-entries",
  "wm-meta", "wm-body", "rev-count", "revisions", "participants",
  "recent"].forEach(function (id) { seed("div", id); });
@@ -53,6 +54,14 @@ var SESSION = {
       contributions: 0, first_contribution_iso: null, last_contribution_iso: null,
       last_query_iso: null, last_query_scope: "none",
       last_seen_version: null, behind: null, state: "listening" },
+    // In the log, never in `members`, no departure observed -- and carrying a
+    // quote in the id that reaches a `title` attribute, because every one of
+    // these strings comes off another teammate's machine unvalidated.
+    { contributor: "mallory", agent: "codex",
+      agent_session: 'as-q" onmouseover="x',
+      contributions: 1, first_contribution_iso: NOW, last_contribution_iso: NOW,
+      last_query_iso: null, last_query_scope: "none",
+      last_seen_version: null, behind: null, state: "unregistered" },
   ],
   recent: [
     { id: "f-005a-01", ts_iso: NOW, type: "learning", provenance: "synthesized",
@@ -68,12 +77,42 @@ var SESSION = {
         { contributor: "aditya", agent_session: "as-x", agent: "codex" },
       ],
       status: "kept", merged_into: null },
+    // `FindingId` is a bare `str` (contracts/schemas.py) written by whoever
+    // POSTed it, and it lands in `data-key`. If the page escapes only text
+    // nodes, this breaks out of the attribute.
+    { id: 'f-x" onmouseover="alert(1)', ts_iso: NOW, type: "gotcha",
+      provenance: "distilled", text: "a hostile id", authors: ["mallory"],
+      attributions: [
+        { contributor: "mallory", agent_session: 'as-q" onmouseover="x',
+          agent: "codex" },
+      ],
+      status: "kept", merged_into: null },
   ],
 };
 
 var PAYLOAD = {
-  sessions: [{ shared_id: "sh-1a2b3c4d", purpose: "p", status: "active" }],
+  sessions: [
+    { shared_id: "sh-1a2b3c4d", purpose: "p", status: "active" },
+    // `shared_id` is client-supplied through `POST /v1/sessions` and lands in
+    // an `<option value="...">`.
+    { shared_id: 'sh-q" onfocus="alert(1)', purpose: "p2", status: "ended" },
+  ],
   session: SESSION,
+};
+
+// Snapshotted BEFORE the extracted script runs, because the page mutates the
+// payload it is handed (`renderSession` stamps `memory_version_ref` onto every
+// participant row). Comparing post-render keys against the server's would be
+// comparing the fixture to itself plus the page's own additions.
+var FIXTURE_KEYS = {
+  session: Object.keys(SESSION).sort(),
+  counts: Object.keys(SESSION.counts).sort(),
+  working_memory: Object.keys(SESSION.working_memory).sort(),
+  revision: Object.keys(SESSION.working_memory.revisions[0]).sort(),
+  participant: Object.keys(SESSION.participants[0]).sort(),
+  recent: Object.keys(SESSION.recent[0]).sort(),
+  attribution: Object.keys(SESSION.recent[0].attributions[0]).sort(),
+  sessions_row: Object.keys(PAYLOAD.sessions[0]).sort(),
 };
 
 // The extracted script calls refresh() once, synchronously, as the very last
@@ -127,7 +166,30 @@ async function main() {
     && revsAfter[0].classList.contains("expanded")
     && !revsAfter[1].classList.contains("expanded");
 
+  var captured = {
+    recentHtml: document.getElementById("recent").innerHTML,
+    selectHtml: document.getElementById("session-select").innerHTML,
+    workingMemory: document.getElementById("wm-body").textContent,
+    wmMeta: document.getElementById("wm-meta").textContent,
+    expandedKey: revsAfter[0].getAttribute("data-key"),
+  };
+
+  // Third poll: the service now holds no session at all (restarted, or the
+  // last one was never recreated). Every region must clear -- a "…" body over
+  // a rail of stale numbers would read as a session with an empty memory.
+  fetchQueue.push({ sessions: [], session: null });
+  intervals[1000]();
+  await wait(50);
+  var empty = {
+    purpose: document.getElementById("purpose").textContent,
+    wmBody: document.getElementById("wm-body").textContent,
+    contributors: document.getElementById("stat-contributors").textContent,
+    version: document.getElementById("stat-version").textContent,
+    revisions: document.getElementById("revisions").innerHTML,
+  };
+
   console.log(JSON.stringify({
+    emptyState: empty,
     revisionCount: revs.length,
     recentCount: recentRows.length,
     expandedAfterClick: expandedAfterClick,
@@ -135,10 +197,19 @@ async function main() {
     // Rendered by the first refresh, captured before the poll -- the real
     // first paint, not a re-render.
     rosterHtml: participantsHtml,
-    workingMemory: document.getElementById("wm-body").textContent,
-    wmMeta: document.getElementById("wm-meta").textContent,
     provenances: recentRows.map(function (r) { return r.getAttribute("data-prov"); }),
-    expandedKey: revsAfter[0].getAttribute("data-key"),
+    // Captured with a session still loaded, before the empty poll cleared
+    // everything: the rendered HTML of the two lists that carry
+    // client-supplied strings into attributes, plus the session picker.
+    workingMemory: captured.workingMemory,
+    wmMeta: captured.wmMeta,
+    expandedKey: captured.expandedKey,
+    recentHtml: captured.recentHtml,
+    selectHtml: captured.selectHtml,
+    // The fixture's own key names, echoed back so the Python side can
+    // compare them against what `_brain_payload` really produces. Without
+    // this the fixture is free to drift from the server and stay green.
+    fixtureKeys: FIXTURE_KEYS,
   }));
 }
 

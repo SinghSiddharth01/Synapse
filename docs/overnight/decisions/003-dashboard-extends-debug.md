@@ -214,9 +214,17 @@ citations in `docs/overnight/w4a-page1-spec.md`:
 - **Join and leave *times*.** Membership is a list on `SynapseSession`, mutated
   by `add_member`/`remove_member`; `store.remove_member`'s own docstring says
   membership has never been in the log and explains why making only the removal
-  an entry would be worse. Joined/left is shown as **state**, derived truthfully
-  (a Contributor with findings in the log but no longer in `members` has left);
-  the times are omitted and the page says so.
+  an entry would be worse. Joined/left is shown as **state**; the times are
+  omitted and the page says so. ⟨Amended 2026-08-06, adversarial review⟩ the
+  first cut derived that state *untruthfully*: it read "in the log but no
+  longer in `members`" as *left*, when that shape is equally produced by a
+  contributor who never registered (nothing on the ingest path calls
+  `add_member`) or by a service restart. `left` now requires an observed
+  `DELETE /members/{c}` — recorded by `store.remove_member` as a fact about
+  what this process *saw*, not as a second representation of membership — and
+  the fallback is **not a member**, an unknown that names its own three
+  causes. The correction is the same rule as everything else here: absence of
+  evidence is rendered as absence, not as the most dramatic reading of it.
 - **Health, in the sense of a heartbeat or a liveness check.** There is none —
   the service is plain HTTP and holds no connection registry, so "who is
   connected" is not a question it can answer. The page shows **recency of last

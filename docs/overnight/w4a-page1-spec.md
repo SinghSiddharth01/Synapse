@@ -141,7 +141,15 @@ Then union in membership:
 |---|---|---|
 | `active` | contributor ∈ `members` **and** has ≥1 conversation in the log | joined and producing |
 | `listening` | contributor ∈ `members`, **no** attributions anywhere | joined, contributed nothing yet — one row, `agent_session: null`. This is the demo's teammate #2 before their first finding |
-| `left` | has attributions, contributor ∉ `members` | was here, has been removed via `DELETE /members/{c}` (api.py:453-466 → store.py:100-126). Their findings stay in the log, attributed to them, so the row stays |
+| `left` | has attributions, contributor ∉ `members`, **and this process observed the DELETE** | was here, has been removed via `DELETE /members/{c}` (api.py:453-466 → store.py:100-126). Their findings stay in the log, attributed to them, so the row stays |
+| `unregistered` (rendered **not a member**) | has attributions, contributor ∉ `members`, **no departure observed** | ⟨amended 2026-08-06, adversarial review⟩ the honest unknown. `∉ members` has three causes and only the first is `left`: removed; **never registered** (nothing on the ingest path calls `add_member` — a raw `POST /findings`, which is what `docs/demo-script.md` Beats 1–6 do, registers nobody); or **registered before a restart** (`Relay._registered` caches per process and will not re-POST, while the restarted store starts at `members=[]`). Rendering all three as `left` asserts a human action that may not have happened |
+
+`left` is separable from `unregistered` only because `store.remove_member`
+now also writes `_departed` (store.py) — a process-local record that the
+DELETE *was seen*, not a second representation of membership. It is empty
+after a restart, and `has_departed() == False` therefore means UNKNOWN, never
+"still here". That is exactly why the fallback state is `unregistered` rather
+than `active`.
 
 **Joined/left TIMES DO NOT EXIST.** `members` is a plain list on
 `SynapseSession` (schemas.py:174), appended by `add_member` (store.py:95) and
@@ -488,3 +496,48 @@ Sessions including one `left` and one `listening`, tombstones struck through,
 `merged`/`contributed`/`listened` badges distinct, session switching, and the
 empty-session case rendering all four specific empty states. Zero console
 errors.
+
+---
+
+### 8.1 As reviewed — five further changes (2026-08-06, adversarial pass)
+
+Suite 1113 green.
+
+**5. `left` split into `left` and `unregistered` (§2.3).** The blocking one.
+`∉ members` was rendered as `left` unconditionally, so a contributor pushed in
+by raw `curl` — the demo script's own Beats 1–6 — appeared on camera as having
+*left*, directly beneath a Contributors tile reading `0`. `store.remove_member`
+now records the observed DELETE (`_departed`, retracted by `add_member`) and
+only that produces `left`; everything else renders **not a member** with the
+caveat in its `title` and in the footnote. Proved against the branch before the
+fix (`state: "left"`, `contributors: 0`, `contributions: 1`) and after
+(`state: "unregistered"`).
+
+**6. The Contributors tile shows both numbers.** `contributors_in_log` was in
+the payload and rendered nowhere, which is what let a `0` sit above a populated
+roster. The sub-line now reads `registered · N in the log`.
+
+**7. `escAttr` for every attribute (§4).** The page's `esc` is
+`textContent`→`innerHTML`, and that serializer escapes `& < >` but **not
+quotes**. `Finding.id`, `Attribution.agent_session` and `shared_id` are bare
+`str` in contracts/schemas.py, written by another teammate's machine across the
+device boundary, and all three reach an attribute. Both pages now have
+`escAttr`; the driver test pushes `f-x" onmouseover="alert(1)` through the real
+renderer and asserts it comes out inert.
+
+**8. `updated_iso` is guarded on the text matching, not on the list being
+non-empty (§2.4).** Otherwise a rewrite reaching `store.set_context` by any
+path other than `_record_synthesis_feed` would date the prose on screen by an
+observation of *different* prose. Latent (both merge call sites do run the
+recorder); pinned so it stays latent.
+
+**9. Test honesty.** `assert row["last_seen_version"] == row["last_seen_version"]`
+pinned nothing and now pins the watermark. The JS fixture could drift from the
+server silently and now echoes its own key names back for comparison against a
+real `_brain_payload`. The footnote gained the 200-event `Feed` bound, so a
+`—` in the last-query cell reads as "not in the window", never "never asked".
+
+**Docs corrected:** `docs/demo-script.md` and `docs/NPU-RUNBOOK.md` still sent
+the presenter to `/debug` for the log tail, which moved to `/debug/log` in
+`78387d3`; `docs/STATE.md:74` said the same. All three now name the right
+route, and the demo script carries the raw-`curl`/`not a member` note.
