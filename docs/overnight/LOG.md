@@ -64,6 +64,33 @@ Newest at the bottom.
   unpushed commit `ee384e1` preserved to `origin/overnight/w6-stress`; my
   worktree restored to `overnight/journal`; stray processes killed, demo
   ports verified free.
+- **08:06** — W1-v2 reported: dev complete on `overnight/w1-geniex` (927 tests,
+  three clean commits: typed-503 retrieval contract, in-app seam supervisor,
+  boot preflights + `--npu --live` split). Adversarial review: 13 findings, #1
+  HIGH — `kill_port_owner` uses `lsof -ti :port`, which matches *clients* too,
+  so a seam restart would SIGTERM the service mid-demo. Fix agent died on an
+  API connection error; audit blocked by a transient classifier error.
+  **Workflow resumed from cache** (fix + audit re-run live). Interim TLDR.md
+  written and pushed to main (`0375b29`).
+- **08:16** — **W6 merged** (`d03547e`): 1032 tests (+144 net). Superb dev
+  report — every regression test revert-verified, Haiku 4K pin in the provider
+  (decisions/006), degenerate-vs-overbudget distinguished with honest fixtures.
+  Two caveats: (a) the live Haiku stress could NOT run — **the `anthropic` key
+  in secrets.jsonc is an empty string** (offline bound-verification ran
+  instead: 70/70 checks, chunking bound held with 0-headroom at the seam);
+  (b) the fix agent died before applying confirmed review findings — incl.
+  `output_config.effort` sent unconditionally by the Anthropic provider, which
+  errors on Haiku 4.5 (the demo arm). Post-merge fix agent dispatched.
+- **08:20** — **W2 merged** (`a7845c1`): **1080 tests.** The redundancy paid
+  for itself: pass-2 (the workstream's core) died mid-flight and shipped
+  nothing; the review caught "PASS-2 was never written" as blocking; the FIX
+  agent then implemented all of it — agent_session_id on query/contribute/
+  leave, one-orchestrator-N-conversations, suppression by agent_session with
+  watermark by contributor, serve_local scope fix, pack + CONTEXT.md aligned.
+  Two windows of one human are now two participants through every real hop.
+- **08:25** — W5 (join-time arrival summary) and W4a (dashboard Page 1)
+  launched — both were blocked on W2. W6 post-merge fix agent running.
+  Still in flight: W1 resume, Integration (W8+W10 reviews).
 - **06:10** — **Relaunch with real isolation** (every agent now gets its own
   harness worktree + detached-HEAD checkout, push-by-ref only):
   `w1-geniex-v2` (wf_4c6491eb, full redo from recovered design) ·
