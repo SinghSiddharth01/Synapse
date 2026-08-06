@@ -34,3 +34,8 @@ __pycache__/
 
 # MCP readiness probe scratch state
 .mcpprobe/
+
+# mkdocs build output. `mkdocs build` writes 119 files here, and a stray
+# `git add -A` after a docs build would commit a whole rendered copy of the
+# site alongside its source. GitHub Pages builds from docs/, never from this.
+site/

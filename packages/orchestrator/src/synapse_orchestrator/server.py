@@ -170,6 +170,42 @@ _NO_STATE_DIR = (
     "a session binding. Restart it with `--state-dir <dir>`."
 )
 
+# ⟨decision 008, 2026-08-06⟩ The sentence that makes a dead brain VISIBLY dead.
+#
+# Before this, a retrieval backend that was not answering produced an empty
+# 200 and the agent said "Team memory has nothing relevant to that. (Checked —
+# not skipped.)" — the single worst live outcome, because everything looks
+# fine while the memory is unreadable. The instruction not to report "no
+# relevant findings" is in the text on purpose: an agent that reads only the
+# first clause and paraphrases is the failure this is guarding against.
+_RETRIEVAL_DOWN = (
+    "Shared memory is DOWN, not empty: its model backend ({provider}) is not "
+    "answering, so the team's findings exist but cannot be searched right now. "
+    "Tell the user this is an outage — do NOT report 'no relevant findings'. "
+    "The stack self-heals within ~2 minutes; retry after that."
+)
+
+
+def _retrieval_down_text(response) -> str | None:
+    """The outage sentence for THE 503 that means "the retriever's model is
+    dead", or None for anything else.
+
+    Both halves are checked for the same reason `is_session_ended` checks
+    both: a 503 from an intermediary — a proxy, a load balancer, the LAN host
+    being restarted — is an ordinary outage and must keep falling through to
+    the generic handler, which says something true about it. Only the
+    service's own typed body earns this text.
+    """
+    if response.status_code != 503:
+        return None
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    if not isinstance(body, dict) or body.get("error") != "retrieval_unavailable":
+        return None
+    return _RETRIEVAL_DOWN.format(provider=body.get("provider") or "unknown")
+
 
 def register_tools(server: FastMCP, *, resolve_binding, service_url: str, relay,
                    distiller_factory, transport=None, state_dir=None, cwd=None,
@@ -234,6 +270,25 @@ def register_tools(server: FastMCP, *, resolve_binding, service_url: str, relay,
     base = service_url.rstrip("/")
     here = Path(cwd) if cwd is not None else Path.cwd()
 
+    # 15s for the lifecycle routes: create/join/leave/end run no model and a
+    # laptop on the same LAN answers them in milliseconds, so a longer timeout
+    # would only make a wedged host look like a slow one.
+    #
+    # `/query` is the exception and had been getting 15s by inheritance. It
+    # RANKS, which is a model call — docs/overnight/FLOW.md measures real
+    # rankings at 12.6-52.8s — so 15s cut off the majority of honest answers
+    # and delivered them as "Shared memory is unreachable right now
+    # (ReadTimeout)". That is the empty-200 failure wearing a different mask:
+    # the memory is fine, the answer exists, and the agent is told it does
+    # not. 90s clears the measured range with margin and still sits under the
+    # service's own synthesis timeout, so a genuinely dead backend surfaces as
+    # the typed 503 (decision 008) rather than as this client giving up first.
+    _LIFECYCLE_TIMEOUT_S = 15.0
+    _QUERY_TIMEOUT_S = 90.0
+
+    def _client(timeout: float = _LIFECYCLE_TIMEOUT_S):
+        return _httpx.AsyncClient(transport=transport, timeout=timeout)
+
     def _effective_binding(agent_session_id: str | None):
         """The binding the CALLING CONVERSATION speaks under — the whole of
         W2's one-orchestrator-N-clients resolution, used by every tool that
@@ -279,11 +334,6 @@ def register_tools(server: FastMCP, *, resolve_binding, service_url: str, relay,
         if fallback is None:
             return None
         return fallback.model_copy(update={"agent_session_id": agent_session_id})
-
-    def _client():
-        # 15s matches query()'s own client below. Deliberately NOT relay.py's
-        # synthesis-aware 120s: none of these routes runs a model.
-        return _httpx.AsyncClient(transport=transport, timeout=15.0)
 
     def _identity() -> str | None:
         """Who this conversation is, for the service.
@@ -568,7 +618,8 @@ def register_tools(server: FastMCP, *, resolve_binding, service_url: str, relay,
             return _NOT_JOINED
         url = f"{base}/v1/sessions/{binding.shared_id}/query"
         try:
-            async with _client() as client:
+            # The one route here that runs a model — see _QUERY_TIMEOUT_S.
+            async with _client(_QUERY_TIMEOUT_S) as client:
                 # BOTH identity fields, and they now answer different questions
                 # (decisions/001, 2026-08-06): `agent_session` is what
                 # suppression is keyed on — "is this already in the context
@@ -592,6 +643,16 @@ def register_tools(server: FastMCP, *, resolve_binding, service_url: str, relay,
                 # handler below and does NOT clear the binding.
                 if is_session_ended(resp):
                     return _ended_text(_forget_ended(binding))
+                # ALSO before raise_for_status, and for the same reason the
+                # ended-session check is (decision 008): a 503 whose body says
+                # `retrieval_unavailable` is not a generic outage, it is the
+                # one outage this agent must not paper over. Left to
+                # raise_for_status it would render "Shared memory is
+                # unreachable right now (HTTPStatusError)" — honest but
+                # unactionable, and indistinguishable from the service itself
+                # being down.
+                if (down := _retrieval_down_text(resp)) is not None:
+                    return down
                 resp.raise_for_status()
                 data = resp.json()
             # A well-formed empty result ({"findings": []}) and a response that
@@ -684,9 +745,25 @@ def register_tools(server: FastMCP, *, resolve_binding, service_url: str, relay,
         except Exception as exc:
             logger.warning("contribute: distillation failed (%s: %s)",
                            exc.__class__.__name__, exc)
-            return (f"Couldn't process that right now ({exc.__class__.__name__}) — "
-                    "your note was not recorded. Try again in a moment, or mention it "
-                    "to a teammate directly.")
+            # ⟨decision 008's sibling, post-review⟩ The write half gets the
+            # same treatment the read half got. "Couldn't process that right
+            # now" named nothing: not the seam, not that this is an OUTAGE
+            # rather than a problem with the prose, and not the ~2-minute
+            # self-heal `_RETRIEVAL_DOWN` promises on the query side. An agent
+            # reading it rephrases and retries — burning the user's turn on a
+            # rewrite that cannot help, because the model that would have read
+            # it is not answering.
+            return (
+                f"Your note was NOT recorded, and the reason is on THIS "
+                f"machine, not in what you wrote: the local model seam that "
+                f"distils prose into findings failed "
+                f"({exc.__class__.__name__}). Tell the user this is a local "
+                f"outage — do NOT rewrite the note and retry, the same seam "
+                f"would read the rewrite. If `scripts/serve_local.py` is "
+                f"running it supervises that seam and restarts it within "
+                f"~2 minutes, so retrying after that is worth one attempt; "
+                f"check `.synapse/logs/supervisor.log` if it keeps failing. "
+                f"Otherwise say the insight to your teammates directly.")
         for f in findings:
             f.provenance = Provenance.CONTRIBUTED
         if not findings:

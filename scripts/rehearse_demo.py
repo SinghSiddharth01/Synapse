@@ -2,6 +2,7 @@
 
     uv run python scripts/rehearse_demo.py            # deterministic: scripted verdicts
     uv run python scripts/rehearse_demo.py --live     # the real 8B (spends shared credits)
+    uv run python scripts/rehearse_demo.py --service-port 13899 --orch-port 13787
 
 Runs the demo script's §B beats end-to-end against real subprocesses
 (service + orchestrator over real sockets, same commands the demo uses),
@@ -16,6 +17,16 @@ SYNAPSE_SYNTHESIZER=aic100 (key from the environment or secrets.jsonc):
 HTTP codes and shapes are asserted, model-quality observations are
 recorded verbatim instead of asserted. Nothing here is a test double:
 if a beat fails in rehearsal it would have failed on stage.
+
+The ports are the rehearsal's own (8899/8787 by default, --service-port /
+--orch-port to move them), and the run REFUSES to start if either is already
+listening. Until 2026-08-06 they were module constants and this file booted
+its servers on top of whatever was already there: the second bind loses, the
+beats then talk to the FIRST process, and a rehearsal that "passed" had
+measured someone else's stack -- which is how the demo fixtures once reached
+a real Shared Session. `--adopt-running` restores the old behaviour for the
+one case that wants it (pointing the beats at a stack you booted yourself);
+it is off by default, and every branch says out loud which one it took.
 """
 
 from __future__ import annotations
@@ -27,17 +38,37 @@ import pathlib
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
 
+# Windows writes piped stdout in the locale codepage, not UTF-8. Every beat
+# line below carries U+2014 (`beat()`), the summary carries U+2026, and
+# `argparse(description=__doc__)` puts U+00A7 from line 1 into `--help`. On the
+# mainstream cp1252 box those three happen to be encodable; on cp437/cp850 --
+# the codepage a fresh `cmd.exe` on a non-Western install still lands in -- they
+# are not, and `rehearse_demo.py > rehearsal.log` dies inside the rehearsal
+# instead of reporting on it. Every sibling on this path already has this
+# guard: serve_local.py:50-53, demo_local.py:51-54, doctor.py:58-61,
+# trace_one.py:27-30, run_npu_eval.py:37-40, verify_orchestrator.py:41-44.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 FIX = ROOT / "fixtures" / "findings"
 OUT = ROOT / ".measurements"
-SVC = "http://127.0.0.1:8899"
-ORCH = "http://127.0.0.1:8787"
+DEFAULT_SERVICE_PORT = 8899
+DEFAULT_ORCH_PORT = 8787
+# Rebound from --service-port/--orch-port in main(), before anything binds or
+# connects. Left as module globals so the ~40 beat lines below keep reading
+# `f"{SVC}/v1/..."` unchanged -- the beats are the reviewed part of this file.
+SVC = f"http://127.0.0.1:{DEFAULT_SERVICE_PORT}"
+ORCH = f"http://127.0.0.1:{DEFAULT_ORCH_PORT}"
 
 # WHO creates the Shared Session in beat 1, and what for. Named constants
 # because beats 7e and 8e assert them BY VALUE after a restart+resync round
@@ -87,6 +118,66 @@ def terminate_tree(proc: subprocess.Popen, timeout: float = 10.0) -> None:
         proc.kill()
 
 
+def write_transcript(mode: str) -> None:
+    OUT.mkdir(exist_ok=True)
+    # encoding pinned: Path.write_text defaults to the locale codepage, which on
+    # Windows is cp1252 and cannot encode arbitrary topic labels echoed into
+    # beat details from service-supplied content.
+    (OUT / f"rehearsal-{mode}.log").write_text(
+        "\n".join(LOG_LINES) + "\n", encoding="utf-8")
+
+
+def port_is_listening(port: int, host: str = "127.0.0.1", timeout: float = 0.75) -> bool:
+    """True if something ALREADY accepts connections on host:port.
+
+    A connect probe rather than a trial bind, deliberately: a trial bind tells
+    you about binding, and the condition that makes this script measure a
+    stranger is that a TCP connect COMPLETES -- which is exactly what `wait_up`
+    below accepts as proof the boot worked, after which every beat is asserted
+    against a store this run does not own.
+    """
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def preflight_ports(ports: dict[str, int], adopt_running: bool,
+                    probe=port_is_listening) -> tuple[bool, list[str]]:
+    """Decide whether it is safe to boot our own servers on `ports`.
+
+    Returns `(may_proceed, lines)` rather than logging or exiting itself, so the
+    decision is testable without opening a socket: `probe` is injected.
+
+    LOUD IN EVERY BRANCH. The failure this prevents was silent -- ports free,
+    ports occupied-and-adopted, and ports occupied-and-refused all used to look
+    identical in the transcript, so a green rehearsal could not be told apart
+    from a green rehearsal of somebody else's process.
+    """
+    busy = [(name, port) for name, port in ports.items() if probe(port)]
+    listed = ", ".join(f"{name} {port}" for name, port in ports.items())
+    if adopt_running:
+        return True, ["!! --adopt-running: PORT GUARD OFF. " + (
+            "ADOPTING the process(es) already listening on "
+            + ", ".join(f"{name} {port}" for name, port in busy)
+            + " -- the beats below measure a stack this run did not boot."
+            if busy else
+            f"nothing is listening on {listed}; this run boots its own servers.")]
+    if busy:
+        return False, [
+            "!! REFUSING to rehearse: "
+            + ", ".join(f"{name} port {port} is ALREADY LISTENING"
+                        for name, port in busy),
+            "!! This script boots its own service and orchestrator. The second "
+            "bind loses, the beats below talk to whatever was already there, "
+            "and the demo fixtures get pushed into ITS Shared Session.",
+            "!! Free the port(s), move this run with --service-port/--orch-port, "
+            "or pass --adopt-running if measuring the running stack is the point.",
+        ]
+    return True, [f"port guard: {listed} -- all free, booting our own."]
+
+
 def beat(name: str, ok: bool, detail: str = "") -> bool:
     log(f"  {'PASS' if ok else 'FAIL'}  {name}" + (f" — {detail}" if detail else ""))
     return ok
@@ -117,6 +208,54 @@ def wait_up(url: str, seconds: float = 15.0) -> bool:
 
 
 # ── corpus (the demo script's builder, repo-rooted) ──────────────────────────
+
+def _inference_cloud_key() -> str | None:
+    """The Cirrascale key for --live, or None. Never printed, never logged.
+
+    Parses. The previous version ran `"api_key"\\s*:\\s*"([^"]+)"` over the raw
+    text of secrets.jsonc and took the first hit, which is wrong three ways and
+    all three are silent:
+
+      * `anthropic.api_key` matches that pattern too. A file with an empty
+        `inference_cloud.api_key` and a real Anthropic key handed the Anthropic
+        key to `INFERENCE_CLOUD_API_KEY`, and the rehearsal then reported an
+        upstream auth failure that named the wrong credential.
+      * A commented-out `// "api_key": "..."` is not a credential. Every other
+        reader in the tree strips `^\\s*//.*$` before parsing for exactly this
+        reason (scripts/local_model_server.py:462, scripts/doctor.py:260,
+        scripts/serve_local.py:100); a regex over raw text resurrects a block
+        the team deliberately disabled.
+      * It ignored the `inference_cloud` block entirely, so
+        secrets.example.jsonc:3's claim that this file reads that block was
+        false.
+
+    The precedence below is `local_model_server._credentials`' (see
+    scripts/local_model_server.py:447-470), so the two agree about which key
+    the --live path uses.
+    """
+    api1 = ROOT / "api-1.json"
+    if api1.is_file():
+        m = re.search(r'"INFERENCE_CLOUD_API_KEY"\s*:\s*"([^"]+)"',
+                      api1.read_text(encoding="utf-8"))
+        if m and m.group(1):
+            return m.group(1)
+
+    secrets = ROOT / "secrets.jsonc"
+    if secrets.is_file():
+        stripped = re.sub(r"^\s*//.*$", "", secrets.read_text(encoding="utf-8"),
+                          flags=re.MULTILINE)
+        try:
+            data = json.loads(stripped)
+        except json.JSONDecodeError:
+            data = {}
+        if isinstance(data, dict):
+            block = data.get("inference_cloud") or {}
+            key = (block.get("api_key") if isinstance(block, dict) else None) \
+                or data.get("api_key")
+            if key:
+                return str(key)
+    return None
+
 
 def load(stem: str) -> list[dict]:
     return json.loads((FIX / f"{stem}.findings.json").read_text())
@@ -164,7 +303,8 @@ OBSERVER = "observer"
 OBSERVER_SESSION = "as-observer"
 
 
-def boot_service(live: bool, phase: str = "main") -> subprocess.Popen:
+def boot_service(live: bool, port: int = DEFAULT_SERVICE_PORT,
+                 phase: str = "main") -> subprocess.Popen:
     env = dict(os.environ)
     env["REHEARSAL_PHASE"] = phase
     # NO DEBOUNCE IN THE REHEARSAL (2026-08-06, with the debounce itself).
@@ -187,18 +327,14 @@ def boot_service(live: bool, phase: str = "main") -> subprocess.Popen:
     if live:
         env["SYNAPSE_SYNTHESIZER"] = "aic100"
         if "INFERENCE_CLOUD_API_KEY" not in env:
-            for path, pattern in ((ROOT / "api-1.json", r'"INFERENCE_CLOUD_API_KEY"\s*:\s*"([^"]+)"'),
-                                  (ROOT / "secrets.jsonc", r'"api_key"\s*:\s*"([^"]+)"')):
-                if path.is_file():
-                    m = re.search(pattern, path.read_text())
-                    if m and m.group(1):
-                        env["INFERENCE_CLOUD_API_KEY"] = m.group(1)
-                        break
-            if "INFERENCE_CLOUD_API_KEY" not in env:
+            key = _inference_cloud_key()
+            if not key:
                 raise SystemExit("--live: no API key found in env, api-1.json, or secrets.jsonc")
-        cmd = ["uv", "run", "synapse-service"]
+            env["INFERENCE_CLOUD_API_KEY"] = key
+        cmd = ["uv", "run", "synapse-service", "--port", str(port)]
     else:
-        cmd = ["uv", "run", "python", "scripts/_rehearsal_service.py"]
+        cmd = ["uv", "run", "python", "scripts/_rehearsal_service.py",
+               "--port", str(port)]
     return subprocess.Popen(cmd, cwd=ROOT, env=env,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
@@ -207,10 +343,35 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--live", action="store_true",
                         help="real 8B via Cirrascale (spends shared credits)")
+    parser.add_argument("--service-port", type=int, default=DEFAULT_SERVICE_PORT,
+                        help=f"port for THIS run's service (default {DEFAULT_SERVICE_PORT})")
+    parser.add_argument("--orch-port", type=int, default=DEFAULT_ORCH_PORT,
+                        help=f"port for THIS run's orchestrator (default {DEFAULT_ORCH_PORT})")
+    parser.add_argument("--adopt-running", action="store_true",
+                        help="measure whatever is already listening on those ports "
+                             "instead of refusing to start (off by default)")
     args = parser.parse_args()
     mode = "live" if args.live else "fake"
     failures = 0
     procs: list[subprocess.Popen] = []
+
+    global SVC, ORCH
+    SVC = f"http://127.0.0.1:{args.service_port}"
+    ORCH = f"http://127.0.0.1:{args.orch_port}"
+
+    log(f"== rehearsal ({mode}) ==")
+    log(f"ports: service {args.service_port}, orchestrator {args.orch_port}")
+    may_proceed, guard_lines = preflight_ports(
+        {"service": args.service_port, "orchestrator": args.orch_port},
+        adopt_running=args.adopt_running)
+    for line in guard_lines:
+        log(line)
+    if not may_proceed:
+        # The transcript is written on the refusal path too, so a stale green
+        # rehearsal-<mode>.log cannot sit there answering for a run that never
+        # happened: STATE.md reads that file, not this stdout.
+        write_transcript(mode)
+        return 2
 
     def run_beat(name: str, ok: bool, detail: str = "") -> None:
         nonlocal failures
@@ -218,15 +379,14 @@ def main() -> int:
             failures += 1
 
     try:
-        log(f"== rehearsal ({mode}) ==")
         n1, n2, n3 = build_payloads()
         run_beat("beat 0: corpus properties", (n1, n2, n3) == (10, 14, 2),
                  f"push sizes {n1}/{n2}/{n3}, cumulative-before-push3 {n1 + n2}")
 
-        svc = boot_service(args.live)
+        svc = boot_service(args.live, args.service_port)
         procs.append(svc)
         orch = subprocess.Popen(
-            ["uv", "run", "synapse-orchestrator", "--port", "8787",
+            ["uv", "run", "synapse-orchestrator", "--port", str(args.orch_port),
              "--service-url", SVC, "--state-dir", ".synapse-rehearsal"],
             cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         procs.append(orch)
@@ -351,7 +511,7 @@ def main() -> int:
         run_beat("beat 7a: contribute while service is dead",
                  code == 200 and body.get("accepted") == 1 and body.get("sent") is False, str(body))
 
-        svc2 = boot_service(args.live, phase="recovery")
+        svc2 = boot_service(args.live, args.service_port, phase="recovery")
         procs.append(svc2)
         run_beat("beat 7b: service restarted", wait_up(f"{SVC}/debug"))
         resync = subprocess.run(
@@ -574,12 +734,7 @@ def main() -> int:
     finally:
         for p in procs:
             terminate_tree(p)
-        OUT.mkdir(exist_ok=True)
-        # encoding pinned: Path.write_text defaults to the locale codepage,
-        # which on Windows is cp1252 and cannot encode arbitrary topic labels
-        # echoed into beat details from service-supplied content.
-        (OUT / f"rehearsal-{mode}.log").write_text(
-            "\n".join(LOG_LINES) + "\n", encoding="utf-8")
+        write_transcript(mode)
         # shutil, not `rm -rf`: `rm` is not a Windows command, so the cleanup
         # raised FileNotFoundError out of the `finally` block and replaced the
         # real beat failures with a traceback.

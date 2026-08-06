@@ -59,7 +59,20 @@ def _serve_both_shapes(httpserver: HTTPServer) -> None:
     """Answer /chat/completions and /completions, each in its own response
     shape. Both are registered so the test cannot pass merely because one path
     404s — the server is willing to answer either, and which one the provider
-    chooses is the finding."""
+    chooses is the finding.
+
+    ⟨merge 2026-08-06, W1⟩ /v1/models is registered too, and is NOT one of the
+    two shapes under test. `_provider()`'s `npu` arm now probes it once at boot
+    (decision 005's preflight): a service pointed at a GenieX that is not there
+    exits 2 instead of coming up and 503ing every call for as long as it runs.
+    Without this route these tests would be asserting that a DEAD seam is
+    refused, which is a different — already covered — fact. `_paths` drops the
+    probe so every assertion below still reads as "which endpoint did the
+    synthesis call go to".
+    """
+    httpserver.expect_request("/v1/models").respond_with_handler(
+        lambda r: Response(json.dumps({"data": [{"id": "stand-in"}]}),
+                           status=200, content_type="application/json"))
     httpserver.expect_request("/v1/chat/completions").respond_with_handler(
         lambda r: Response(
             json.dumps(
@@ -92,7 +105,16 @@ def _serve_both_shapes(httpserver: HTTPServer) -> None:
 
 
 def _paths(httpserver: HTTPServer) -> list[str]:
-    return [request.path for request, _ in httpserver.log]
+    """The SYNTHESIS paths only. `/v1/models` is the boot preflight, not a
+    completion, and counting it here would make every assertion in this file
+    about the probe rather than about the endpoint the provider posts to."""
+    return [request.path for request, _ in httpserver.log
+            if request.path != "/v1/models"]
+
+
+def _completion_requests(httpserver: HTTPServer) -> list:
+    return [request for request, _ in httpserver.log
+            if request.path != "/v1/models"]
 
 
 # --- the invariant, as an endpoint -----------------------------------------------
@@ -198,7 +220,7 @@ async def test_the_npu_arm_honours_synapse_model(
     await provider.complete(messages=[], response_schema=SCHEMA)
 
     assert provider.model == other_model
-    [(request, _)] = httpserver.log
+    [request] = _completion_requests(httpserver)
     assert request.get_json()["model"] == other_model
 
 
@@ -220,7 +242,7 @@ async def test_an_unset_synapse_model_leaves_the_provider_on_its_own_default(
     await provider.complete(messages=[], response_schema=SCHEMA)
 
     assert provider.model == DEFAULT_MODEL
-    [(request, _)] = httpserver.log
+    [request] = _completion_requests(httpserver)
     assert request.get_json()["model"] == DEFAULT_MODEL
 
 
@@ -240,19 +262,48 @@ def test_the_anthropic_arm_builds_the_anthropic_provider(monkeypatch) -> None:
 
 
 @pytest.mark.parametrize(
-    "mode", ["", "fake", "FAKE", "npu ", "aic-100", "claude", "true", "1"]
+    "mode", ["", "FAKE", "npu ", "aic-100", "claude", "true", "1"]
 )
-def test_an_unrecognised_synthesizer_boots_on_the_fake_rather_than_guessing(
+def test_an_unrecognised_synthesizer_exits_rather_than_guessing(
     monkeypatch, mode: str
 ) -> None:
-    """Swept over the near-misses someone would plausibly type. The fall-through
-    must stay a fall-through: guessing "npu " meant "npu" would point synthesis
-    at a host that may not be there, and a service that refuses to boot on a
-    typo cannot be brought up on a laptop with nothing installed.
+    """Swept over the near-misses someone would plausibly type. None of them
+    may be GUESSED at — "npu " must not become "npu" and point synthesis at a
+    host that may not be there.
+
+    ⟨AMENDED at the W1 merge, 2026-08-06⟩ This test asserted that every one of
+    these fell through to FakeProvider, on the reasoning that "a service that
+    refuses to boot on a typo cannot be brought up on a laptop with nothing
+    installed". That reasoning holds for UNSET and does not survive contact
+    with a typo: the laptop-with-nothing-installed case is `SYNAPSE_SYNTHESIZER`
+    absent, which still boots (`test_unset_still_boots_on_the_fake`, and
+    `test_the_fake_fails_loudly...` below). A SET-but-wrong value is a
+    deliberate act by someone who believed they were choosing a synthesizer,
+    and silently handing them the stub is the exact silent-seam failure W1
+    exists to close — observed as `SYNAPSE_SYNTHESIZER=aic-100` running the
+    FakeProvider while the startup line read "synthesizer: aic-100". Exit 2,
+    naming the value and the valid set (decision 005's preflight section); the
+    one-key fix is to unset the variable, which the message says.
+
+    Empty string is on this list on purpose: an exported-but-empty variable is
+    a shell accident, not an intent to run the stub, and it is indistinguishable
+    from a typo from where this code stands.
     """
+    monkeypatch.setenv("SYNAPSE_SYNTHESIZER", mode)
+
+    with pytest.raises(SystemExit) as exit_info:
+        _provider()
+
+    assert exit_info.value.code == 2
+
+
+def test_fake_asked_for_by_name_is_still_the_fake(monkeypatch) -> None:
+    """`fake` is a VALID mode, not a near-miss — the other half of the test
+    above, kept separate so the parametrised sweep is unambiguously about
+    values the service does not know."""
     from synapse_providers import FakeProvider
 
-    monkeypatch.setenv("SYNAPSE_SYNTHESIZER", mode)
+    monkeypatch.setenv("SYNAPSE_SYNTHESIZER", "fake")
 
     assert isinstance(_provider(), FakeProvider)
 
@@ -264,6 +315,13 @@ async def test_the_fake_fails_loudly_rather_than_answering_with_nothing(
 
     An empty script that answered blandly would reproduce the 282fd07 symptom
     exactly — queries returning nothing, with a 200, and no error anywhere.
+
+    Narrow on purpose. `pytest.raises(Exception)` was passing on a TypeError
+    from a signature change: renaming `response_schema` on `FakeProvider.
+    complete` kept this test green while it never reached the exhaustion path
+    it exists to assert. The point of the test is that the fake fails for the
+    RIGHT reason, so the reason is what gets asserted — the type and the
+    message, not merely that something was raised.
     """
     from synapse_providers import FakeProvider
 
@@ -271,5 +329,5 @@ async def test_the_fake_fails_loudly_rather_than_answering_with_nothing(
     provider = _provider()
 
     assert isinstance(provider, FakeProvider)
-    with pytest.raises(Exception):
+    with pytest.raises(RuntimeError, match=r"scripts exhausted after 0 call\(s\)"):
         await provider.complete(messages=[], response_schema=SCHEMA)

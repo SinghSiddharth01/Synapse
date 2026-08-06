@@ -18,8 +18,9 @@ belong in the same mental model as the six tools:
   how the Edge Worker's passive path and `contribute`'s distiller both get
   Findings into the Orchestrator. It is an HTTP route, not an MCP tool, and
   is documented in full in the service/orchestrator HTTP reference — it is
-  named here only so "about ten surfaces" resolves to six tools plus these
-  two, not to four missing tools.
+  named here only so a count of the Orchestrator's agent-facing surfaces
+  comes to eight — six MCP tools, the initialize-time briefing, and this
+  route — rather than leaving two of them unaccounted for.
 
 If nothing is joined, a connecting client sees a named server (`"synapse"`)
 with an empty capability set until the first `synapse-worker join` or a
@@ -38,13 +39,14 @@ lifecycle tool runs (`server.py:117-122`).
 
 Every tool returns plain prose, never raises, and re-resolves the local
 binding fresh at the start of the call — never one captured once at
-registration time (`server.py:174-192`). That is why a `synapse-worker join`
+registration time (`server.py:179-192`). That is why a `synapse-worker join`
 or a lifecycle tool call takes effect on the very next tool invocation, in
 the same MCP session, with no orchestrator restart.
 
-`agent_session_id` — **accepted on `create_session` and `join_session`
-today; extending to `query` and `contribute` 2026-08-06.** Where present, it
-is the calling agent's own session id (Claude Code exports it as
+`agent_session_id` is **accepted on `create_session` and `join_session`
+only.** It is not a parameter of `query` or `contribute`, whose signatures
+are `query(question: str)` (`server.py:486`) and `contribute(text: str)`
+(`server.py:573`). Where it is accepted, it is the calling agent's own session id (Claude Code exports it as
 `CLAUDE_CODE_SESSION_ID`) and is matched exactly against transcript
 filenames, never against modification time — passing it is what avoids the
 ambiguity refusal below when more than one conversation of the same Agent
@@ -77,10 +79,6 @@ service takes one field first and falls back to the other
 revision as of 2026-08-06* (workstream W2); this doc intentionally does not
 assert one.
 
-**When to reach for it:** before exploring an unfamiliar subsystem, before
-concluding something is a dead end, or when debugging something a teammate
-may also be on — the description's own trigger-voice list.
-
 ### 2. `contribute`
 
 **Purpose:** push a durable insight into shared memory. Description
@@ -104,10 +102,6 @@ possibly-stale `shared_id`, so a `contribute` and a `query` issued back to
 back never disagree about which Shared Session they mean
 (`server.py:608-615`). If the target session turns out to already be ended,
 the reply says the note was **not** recorded (`server.py:624-628`).
-
-**When to reach for it:** a root cause, a dead end, or a decision and its
-reasoning — anything a teammate would benefit from and that is not already
-obvious from the code.
 
 ### 3. `create_session`
 
@@ -230,11 +224,11 @@ that can hit them:
 - **`_NO_STATE_DIR`** (`server.py:168-171`) — orchestrator started without
   `--state-dir`; only reachable in a test fixture predating the lifecycle
   tools, since `cli.main` always passes one in production.
-- **Ambiguity refusal** (`server.py:440-452`, inside `_bind`) — two or more
+- **Ambiguity refusal** (`server.py:446-452`, inside `_bind`, which begins at `:415`) — two or more
   live transcripts of the same Agent product within
   `AMBIGUITY_WINDOW_SECONDS` of each other; the tool refuses to guess and
   asks for `agent_session_id` explicitly.
-- **Unmatched `agent_session_id` refusal** (`server.py:456-463`) — an
+- **Unmatched `agent_session_id` refusal** (`server.py:455-461`) — an
   explicit `agent_session_id` matched no transcript under any registered
   Agent's root; the tool will not fall back to "most recently modified"
   because that would silently bind a different conversation than the one

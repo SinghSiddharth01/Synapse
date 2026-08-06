@@ -8,7 +8,7 @@ Claude Code session can actually use `mcp__synapse__query` and
 
     uv run python scripts/serve_local.py                 # new Shared Session
     uv run python scripts/serve_local.py --shared-id sh-abc123   # join the team's
-    uv run python scripts/serve_local.py --npu           # real GenieX, no stand-in
+    uv run python scripts/serve_local.py --npu           # real GenieX, launched and supervised
 
 Then in the project you want shared memory in:
 
@@ -32,11 +32,15 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
+import signal
+import socket
 import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -66,11 +70,63 @@ SERVICE_URL = "http://127.0.0.1:8899"
 ORCHESTRATOR_URL = "http://127.0.0.1:8787"
 STANDIN_URL = "http://127.0.0.1:18181/v1"
 NPU_URL = "http://127.0.0.1:18181/v1"   # geniex serve listens here too
+MODEL_PORT = 18181
+
+# ── The liveness rule (decision 005) ────────────────────────────────────────
+#
+# The model seam is DEAD when it has been continuously unable to answer a
+# zero-cost metadata request for longer than the longest legitimate single
+# generation on that seam. It is merely SLOW otherwise.
+#
+# GET /v1/models is the probe because every seam that can sit on this port
+# serves it — real `geniex serve` (whose only GETs are /v1/models and
+# /v1/models/{model}), the stand-in (local_model_server's do_GET), and the
+# --live proxy — it costs zero tokens and zero NPU inference, and it is the
+# exact route `wait_for` already trusts below.
+#
+# 4 consecutive failures before a death is declared: AT LEAST 45s of silence
+# (the strikes land at t+0/15/30/45 when probes return instantly) and in
+# practice ~60s, because a probe that fails by TIMING OUT burns its own 5s
+# before the next 15s sleep. The DEAD line therefore reports the span it
+# MEASURED between the first strike and the fourth, never the nominal 45 —
+# see `_declare_dead`. Detection latency from the last healthy answer is one
+# cadence longer again (~80s worst case).
+#
+# CORRECTION (post-review): the design note justified 45s as "50% margin over
+# the seam's own max_seconds_per_call = 30.0". That justification is wrong and
+# is not repeated here. `max_seconds_per_call` (config/synapse.toml) is a
+# SEGMENT-SIZING budget — prompt bytes divided by a measured prefill rate —
+# not a wall-clock bound on a seam call, and the real per-call bound on this
+# seam is OpenAICompatibleProvider's `timeout=300.0`. The honest reason 4x15s
+# separates slow from dead is narrower and still sufficient: /models is
+# metadata, runs no inference, and is answered off the accept loop, so a seam
+# that cannot produce it for a minute is not busy — it is not serving. A
+# single slow response costs one strike and is healed by the next success.
+#
+# The 5s probe timeout is what converts the OBSERVED failure — connection
+# accepted, no bytes ever sent — into strikes. Whether the process is alive
+# is deliberately irrelevant to the rule, because "process alive, server not
+# serving" IS the failure.
+PROBE_INTERVAL_S = 15
+PROBE_TIMEOUT_S = 5.0
+DEATH_STRIKES = 4
+# Attempt 1 immediately, attempt 2 after 30s, attempt 3 after 120s. A fourth
+# death inside RESTART_WINDOW_S gives up: a genuinely broken NPU on stage must
+# converge to "operator switches to a fallback in one command", never to a
+# restart loop competing with the presenter for the machine.
+RESTART_DELAYS_S = (0, 30, 120)
+RESTART_WINDOW_S = 600
+GAVE_UP_REPEAT_S = 60
+SUPERVISOR_LOG = "supervisor.log"
+
+OK, SUSPECT, DEAD, GAVE_UP = "OK", "SUSPECT", "DEAD", "GAVE_UP"
 
 processes: list[tuple[str, subprocess.Popen]] = []
 
 
-def service_env_for(*, npu: bool, model_url: str) -> dict[str, str]:
+def service_env_for(*, npu: bool, model_url: str,
+                    dual_key: str | None = None,
+                    dual_base_url: str | None = None) -> dict[str, str]:
     """The environment that decides which synthesizer the service builds.
 
     Extracted from `main` so it can be asserted. It was an inline dict, and the
@@ -86,7 +142,23 @@ def service_env_for(*, npu: bool, model_url: str) -> dict[str, str]:
     all, so aic100 against a real NPU 410s on every synthesis call and the
     host's own queries come back empty with a 200. Observed live 2026-08-06,
     and confirmed against Qualcomm's endpoint list.
+
+    `dual_key`/`dual_base_url` are the `--npu --live` split topology and are
+    the ONE case where the service and the model seam point at different
+    machines: :18181 carries the distiller only, and synthesis (and therefore
+    retrieval ranking) goes straight to Cirrascale with the same 1600/180
+    operating point ADR-0005 mandates. Both must be present together — main
+    resolves and validates them before anything is spawned — and the key
+    travels in the child's environment, never printed.
     """
+    if dual_key and dual_base_url:
+        return {
+            "SYNAPSE_SYNTHESIZER": "aic100",
+            "INFERENCE_CLOUD_BASE_URL": dual_base_url,
+            "INFERENCE_CLOUD_API_KEY": dual_key,
+            "INFERENCE_CLOUD_MAX_TOKENS": str(SYNTHESIS_MAX_TOKENS),
+            "INFERENCE_CLOUD_TIMEOUT": str(SYNTHESIS_TIMEOUT_S),
+        }
     if npu:
         return {
             "SYNAPSE_SYNTHESIZER": "npu",
@@ -143,6 +215,38 @@ def _anthropic_key() -> str | None:
         return None
     key = (data.get("anthropic") or {}).get("api_key")
     return str(key) if key else None
+
+
+def _inference_credentials() -> tuple[str | None, str | None]:
+    """-> (api_key, base_url) for the real Cirrascale instance.
+
+    Mirrors `local_model_server._credentials`: environment first, then the
+    gitignored `secrets.jsonc`'s `inference_cloud` block. Lives here rather
+    than in `AIC100Provider` for the same house reason `_anthropic_key` does —
+    scripts read secrets.jsonc, packages read the environment, so `packages/`
+    never grows knowledge of where this checkout keeps its credentials.
+
+    The key is never printed, logged or echoed: it is returned only to be put
+    into a child's environment, and the caller reports its ABSENCE, never its
+    value. A commented-out block is not a credential — comments are stripped
+    before parsing, so an instance the team has deliberately commented out
+    stays unused rather than being silently resurrected.
+    """
+    import re
+
+    key = os.environ.get("INFERENCE_CLOUD_API_KEY")
+    base_url = os.environ.get("INFERENCE_CLOUD_BASE_URL")
+    secrets = REPO / "secrets.jsonc"
+    if (not key or not base_url) and secrets.exists():
+        try:
+            data = json.loads(re.sub(r"^\s*//.*$", "", secrets.read_text(),
+                                     flags=re.MULTILINE))
+        except json.JSONDecodeError:
+            data = {}
+        block = data.get("inference_cloud") or {}
+        key = key or block.get("api_key") or data.get("api_key")
+        base_url = base_url or block.get("base_url")
+    return (str(key) if key else None, str(base_url) if base_url else None)
 
 
 def lan_ip() -> str | None:
@@ -230,9 +334,421 @@ def claim_ports(ports: list[int]) -> None:
         )
 
 
-def spawn(name: str, argv: list[str], env: dict[str, str] | None = None) -> subprocess.Popen:
+def port_is_free(port: int, host: str = "127.0.0.1") -> bool:
+    """True when nothing is listening. Used by the --npu launcher to decide
+    between starting `geniex serve` itself and adopting one a teammate already
+    started — `claim_ports` cannot answer this, because it REFUSES on a taken
+    port and here a taken port is a legitimate, documented situation."""
+    probe = socket.socket()
+    probe.settimeout(0.5)
+    try:
+        return probe.connect_ex((host, port)) != 0
+    finally:
+        probe.close()
+
+
+def port_owner_pids(port: int) -> list[int]:
+    """Whoever is LISTENING on `port`, by pid.
+
+    Required because of the exact failure this file supervises: the seam dies
+    with its HTTP server dead and its process alive, so the port stays bound
+    and nothing can rebind it. There is no crash to clear the way — something
+    has to be willing to look up the owner and kill it.
+
+    Platform-conditional by necessity: `lsof` on POSIX, `netstat -ano` on the
+    Windows-on-Snapdragon box the NPU actually lives on. Returns [] on any
+    failure — lsof missing, netstat output in an unexpected shape — because a
+    supervisor that raises while trying to recover is worse than one that
+    reports it could not find the owner and says so.
+
+    `-sTCP:LISTEN` is LOAD-BEARING, not tidiness. Plain `lsof -ti :PORT`
+    matches every socket with that port at EITHER end, so it returns the
+    CLIENTS too — and under `--npu` this process's own service child holds an
+    established connection to :18181 for the whole of a 300s generation
+    (OpenAICompatibleProvider's read timeout), precisely during the window in
+    which the seam has gone silent and the supervisor is about to kill "the
+    port owner". Without this filter the recovery kills the service it is
+    trying to keep working, and on the demo box that is indistinguishable from
+    the bug. Verified locally: with a listener plus one connected client,
+    `lsof -ti :19181` returned both pids and `lsof -ti tcp:19181
+    -sTCP:LISTEN` returned only the listener's.
+    """
+    try:
+        if os.name == "nt":
+            out = subprocess.run(["netstat", "-ano"], capture_output=True,
+                                 text=True, timeout=10).stdout
+            pids = set()
+            for line in out.splitlines():
+                parts = line.split()
+                if (len(parts) >= 5 and parts[0].upper() == "TCP"
+                        and parts[1].rsplit(":", 1)[-1] == str(port)
+                        and parts[3].upper() == "LISTENING"
+                        and parts[4].isdigit()):
+                    pids.add(int(parts[4]))
+            return sorted(pids)
+        out = subprocess.run(["lsof", "-ti", f"tcp:{port}", "-sTCP:LISTEN"],
+                             capture_output=True, text=True, timeout=10).stdout
+        return sorted({int(tok) for tok in out.split() if tok.isdigit()})
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return []
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True          # exists, owned by someone else
+    return True
+
+
+def kill_port_owner(port: int, log) -> list[int]:
+    """SIGTERM the port's owner, SIGKILL what survives 5s. Returns the pids.
+
+    Every pid is LOGGED, along with how it was found. Killing a process the
+    operator did not start is the most surprising thing this script does, and
+    it must never happen silently — if the wrong thing was on :18181 the log
+    line is the only way anyone will ever work that out.
+    """
+    pids = port_owner_pids(port)
+    finder = ("netstat -ano" if os.name == "nt"
+              else f"lsof -ti tcp:{port} -sTCP:LISTEN")
+    if not pids:
+        log(f"SUPERVISOR: nothing found holding :{port} (via {finder}) — "
+            f"respawning without killing anything.")
+        return []
+    log(f"SUPERVISOR: killing the process holding :{port} — pid(s) "
+        f"{', '.join(str(p) for p in pids)}, found via `{finder}`. The seam "
+        f"died with its port still bound, so the stale process has to go "
+        f"before anything can rebind.")
+    if os.name == "nt":
+        for pid in pids:
+            try:
+                subprocess.run(["taskkill", "/F", "/PID", str(pid)],
+                               capture_output=True, timeout=10)
+            except (OSError, subprocess.SubprocessError):
+                log(f"SUPERVISOR: taskkill failed for pid {pid}.")
+        return pids
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError as exc:
+            log(f"SUPERVISOR: SIGTERM to pid {pid} failed ({exc.__class__.__name__}).")
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and any(_pid_alive(p) for p in pids):
+        time.sleep(0.2)
+    for pid in pids:
+        if _pid_alive(pid):
+            log(f"SUPERVISOR: pid {pid} ignored SIGTERM for 5s — SIGKILL.")
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+    return pids
+
+
+def probe_seam(models_url: str, timeout: float = PROBE_TIMEOUT_S) -> str | None:
+    """None when the seam is ALIVE; a short reason string for one STRIKE.
+
+    HTTP 200 with any body is alive. Everything else is a strike: connection
+    refused, connection reset, a read timeout (the hung-socket case — the
+    connection is accepted and no bytes ever arrive, which is precisely the
+    observed idle-death signature), and any non-200.
+    """
+    try:
+        with urllib.request.urlopen(models_url, timeout=timeout) as response:
+            response.read()
+            status = getattr(response, "status", None) or response.getcode()
+            return None if status == 200 else f"HTTP {status}"
+    except urllib.error.HTTPError as exc:
+        return f"HTTP {exc.code}"
+    except urllib.error.URLError as exc:
+        reason = exc.reason
+        if isinstance(reason, (TimeoutError, socket.timeout)):
+            return f"no response within {timeout:g}s (socket accepted, nothing sent)"
+        return f"{type(reason).__name__ if isinstance(reason, BaseException) else 'URLError'}: {reason}"
+    except (TimeoutError, socket.timeout):
+        return f"no response within {timeout:g}s (socket accepted, nothing sent)"
+    except OSError as exc:
+        return f"{exc.__class__.__name__}: {exc}"
+
+
+class SeamSupervisor:
+    """Probes the model seam and restarts it, in serve_local's own process.
+
+    Lives here rather than in a wrapper script or an OS service manager
+    (decision 005) because a supervisor that isn't running supervises nothing,
+    and the failure it guards against is exactly the kind discovered live by
+    whoever is at the laptop. This is the one command every teammate already
+    runs; it already spawns, health-checks, logs and reaps everything else;
+    and its steady state was a `time.sleep(3600)` loop.
+
+    Nothing is persisted: a serve_local restart deliberately resets the
+    ledger, because a human intervened.
+
+    `now` and `probe` are injected so the tests can drive 45 seconds of
+    silence in microseconds. `restart(previous_child, log)` is responsible for
+    clearing the port and returns the new child (or None if it could not start
+    one); it is handed this supervisor's `log` so everything it does — which
+    includes killing a process by pid — lands in the same two sinks.
+    """
+
+    def __init__(self, *, models_url: str, seam_name: str, restart,
+                 child: subprocess.Popen | None = None,
+                 log_path: Path | None = None, probe=None, now=time.monotonic,
+                 fallbacks: str = "") -> None:
+        self.models_url = models_url
+        self.seam_name = seam_name
+        self._restart = restart
+        self.child = child
+        self.log_path = log_path
+        self._probe = probe or (lambda: probe_seam(models_url))
+        self._now = now
+        self._fallbacks = fallbacks or (
+            "`uv run python scripts/serve_local.py` (the stand-in, no NPU "
+            "needed), or `uv run python scripts/serve_local.py --npu "
+            "--distiller claude-cli` to keep distilling without this seam")
+
+        self.status = OK
+        self.strikes = 0
+        self.last_ok = now()
+        self.restart_times: deque[float] = deque()
+        self._restart_at: float | None = None
+        self._first_strike_at: float | None = None
+        self._awaiting_restore: int | None = None
+        self._restart_error: str | None = None
+        self._last_gave_up_banner = 0.0
+
+    # ── logging ────────────────────────────────────────────────────────────
+    def log(self, line: str) -> None:
+        """Two sinks, the identical line in both: the operator's terminal —
+        the same place the boot banner printed — and .synapse/logs/
+        supervisor.log for the postmortem nobody can run from a scrollback
+        that has already been closed."""
+        stamped = f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}Z] {line}"
+        print(stamped, flush=True)
+        if self.log_path is not None:
+            try:
+                self.log_path.parent.mkdir(parents=True, exist_ok=True)
+                with self.log_path.open("a", encoding="utf-8") as handle:
+                    handle.write(stamped + "\n")
+            except OSError:
+                pass          # a supervisor must not die of a full disk
+
+    # ── the loop ───────────────────────────────────────────────────────────
+    def tick(self) -> None:
+        now = self._now()
+
+        if self.status == GAVE_UP:
+            # STILL PROBED after giving up. Only the RESTARTING stopped: a cap
+            # on restart attempts is not a decision to stop looking. Whatever
+            # the operator did with the fallback commands — restarted GenieX by
+            # hand, swapped in the stand-in on the same port — the terminal
+            # must say the seam is answering again, because otherwise the last
+            # word on screen is a banner claiming an outage that is over, and
+            # the next person to read it walks the fallback path for nothing.
+            if self._probe() is None:
+                self.log(
+                    f"SUPERVISOR: model seam is ANSWERING again after GIVING "
+                    f"UP — down {int(now - self.last_ok)}s. This script did "
+                    f"not fix it and is no longer restarting anything; "
+                    f"whatever you just did, that was it. Supervision "
+                    f"resumes from here.")
+                self.restart_times.clear()      # the operator intervened
+                self._awaiting_restore = None
+                self._restart_error = None
+                self._alive(now)
+                return
+            # Reprinted on a timer on purpose: the operator who walks back to
+            # the laptop after the outage must not have to scroll to find out
+            # why nothing works.
+            if now - self._last_gave_up_banner >= GAVE_UP_REPEAT_S:
+                self._banner_gave_up()
+                self._last_gave_up_banner = now
+            return
+
+        # A child that EXITED is dead with NO strikes: there is nothing to be
+        # slow about in a process that is gone, and making the operator wait a
+        # minute to be told so would be theatre. This is the only immediate
+        # death; the interesting one — process alive, server silent — has to
+        # come the long way round, through the probe, precisely because
+        # nothing about the process gives it away.
+        #
+        # Checked BEFORE the backoff branch: a child that has exited during
+        # the 120s delay is not news the supervisor should sit on, and the
+        # branch below would otherwise return without looking.
+        if (self._restart_at is None and self.child is not None
+                and self.child.poll() is not None):
+            self.strikes = 0
+            self._declare_dead(
+                now, f"the {self.seam_name} process exited "
+                     f"(rc={self.child.returncode})", immediate=True)
+            return
+
+        # KEEP PROBING WHILE THE BACKOFF DELAY IS SERVED, and cancel the
+        # pending restart if the seam comes back on its own. Returning early
+        # here — the shape this had until review — meant a seam that recovered
+        # during a 120s delay was restarted anyway: a HEALTHY seam torn down,
+        # 30-60s of self-inflicted outage, and a restart counted against the
+        # window so the NEXT real death got a shorter leash. The delay exists
+        # to avoid hammering a seam that is failing, not to stop looking at it.
+        if self._restart_at is not None:
+            if self._probe() is None:
+                self.log(
+                    f"SUPERVISOR: model seam came back on its own during the "
+                    f"backoff delay — restart {len(self.restart_times)} "
+                    f"CANCELLED, nothing was killed. It stays on the ledger: "
+                    f"a seam that dies and self-heals repeatedly is still a "
+                    f"dying seam.")
+                self._restart_at = None
+                self._alive(now)
+                return
+            if now < self._restart_at:
+                return                     # still serving the backoff delay
+            self._restart_at = None
+            self._perform_restart()
+            return
+
+        reason = self._probe()
+        if reason is None:
+            self._alive(now)
+        else:
+            self._strike(now, reason)
+
+    def _alive(self, now: float) -> None:
+        if self._awaiting_restore is not None:
+            down = int(now - self.last_ok)
+            if self._restart_error is None:
+                self.log(f"SUPERVISOR: model seam RESTORED after restart "
+                         f"{self._awaiting_restore} — down {down}s total.")
+            else:
+                # Credit where it is NOT due. The restart raised — it never
+                # ran — so something else brought the seam back, and a line
+                # reading "RESTORED after restart 1" would tell the operator
+                # this script recovered a box it did not touch. That is the
+                # exact false reassurance the whole workstream exists to
+                # remove, one level up.
+                self.log(f"SUPERVISOR: model seam RESTORED — down {down}s "
+                         f"total — but NOT by this script: restart "
+                         f"{self._awaiting_restore} itself failed "
+                         f"({self._restart_error}). Something else brought "
+                         f"the seam back; treat this box as unsupervised "
+                         f"until that error is fixed.")
+            self._awaiting_restore = None
+            self._restart_error = None
+        elif self.strikes:
+            self.log(f"SUPERVISOR: model seam OK again after "
+                     f"{self.strikes} failed probe(s) — no restart was needed.")
+        self.strikes = 0
+        self._first_strike_at = None
+        self.status = OK
+        self.last_ok = now
+
+    def _strike(self, now: float, reason: str) -> None:
+        self.strikes += 1
+        if self.strikes == 1:
+            # First strike only. Logging all four would train the operator to
+            # ignore the line, and the fourth one already says everything.
+            self.status = SUSPECT
+            self._first_strike_at = now
+            self.log(f"SUPERVISOR: model seam SUSPECT — probe failed "
+                     f"(1/{DEATH_STRIKES}): {reason}")
+        if self.strikes >= DEATH_STRIKES:
+            self._declare_dead(now, reason)
+
+    def _declare_dead(self, now: float, reason: str, *,
+                      immediate: bool = False) -> None:
+        self.status = DEAD
+        self.strikes = 0
+        while self.restart_times and now - self.restart_times[0] > RESTART_WINDOW_S:
+            self.restart_times.popleft()
+        attempt = len(self.restart_times) + 1
+        down = int(now - self.last_ok)
+        if attempt > len(RESTART_DELAYS_S):
+            self.status = GAVE_UP
+            self._banner_gave_up()
+            self._last_gave_up_banner = now
+            return
+        delay = RESTART_DELAYS_S[attempt - 1]
+        # MEASURED, not derived. `(DEATH_STRIKES - 1) * PROBE_INTERVAL_S` = 45s
+        # is only what the strikes span when probes return instantly; a probe
+        # that fails by timing out spends its own PROBE_TIMEOUT_S first, so the
+        # real span on a hung socket is ~60s. The operator quotes this number
+        # when deciding whether the box is failing more often than it used to,
+        # so it has to be the elapsed time this supervisor actually observed —
+        # a constant would be wrong every single time it mattered.
+        span = int(now - self._first_strike_at) if self._first_strike_at else 0
+        cause = (reason if immediate else
+                 f"{DEATH_STRIKES} consecutive probe failures over "
+                 f"{span}s "
+                 f"(last OK {down}s ago; last reason: {reason})")
+        self.log(
+            f"SUPERVISOR: model seam DEAD — {cause}. "
+            f"Restarting {self.seam_name} (attempt {attempt}/"
+            f"{len(RESTART_DELAYS_S)} in this "
+            f"{RESTART_WINDOW_S // 60}-min window, delay {delay}s).")
+        self.restart_times.append(now)
+        self._restart_at = now + delay
+        if delay == 0:
+            self._restart_at = None
+            self._perform_restart()
+
+    def _perform_restart(self) -> None:
+        attempt = len(self.restart_times)
+        self._restart_error = None
+        try:
+            self.child = self._restart(self.child, self.log)
+        except SystemExit as exc:
+            # `wait_for` raises SystemExit when a child dies during startup.
+            # Swallowed here on purpose: the supervisor's whole job is to
+            # outlive a seam that will not come up, and the next probe will
+            # count the failure honestly.
+            # NOT recorded as a failed restart: the replacement WAS spawned,
+            # it merely had not answered by the deadline. If it answers a tick
+            # later, this script did restore the seam and the plain RESTORED
+            # line is true. Only an exception from the restarter itself —
+            # below — means no restart happened at all.
+            self.log(f"SUPERVISOR: restart {attempt} did not come up ({exc}).")
+        except Exception as exc:                                # noqa: BLE001
+            self._restart_error = f"{exc.__class__.__name__}: {exc}"
+            self.log(f"SUPERVISOR: restart {attempt} raised "
+                     f"{exc.__class__.__name__}: {exc}")
+        # The judge is the next probe, not the restart call. RESTORED is
+        # printed there even when the outage fell between two queries and
+        # nobody noticed — a silent self-heal is forbidden, because it hides a
+        # dying box until it dies on stage.
+        self._awaiting_restore = attempt
+
+    def _banner_gave_up(self) -> None:
+        self.log(
+            f"SUPERVISOR: GIVING UP — {len(RESTART_DELAYS_S)} restarts in "
+            f"{RESTART_WINDOW_S // 60} minutes did not hold. The seam stays "
+            f"DOWN and every query will say so (503 retrieval_unavailable), "
+            f"which is the honest outcome. Fallbacks: {self._fallbacks}.")
+
+
+def spawn(name: str, argv: list[str], env: dict[str, str] | None = None,
+          append: bool = False) -> subprocess.Popen:
+    """Start a child with its stdout+stderr in `.synapse/logs/<name>.log`.
+
+    `append` is what a RESTART passes, and it is not a detail. A fresh
+    serve_local run truncates (a log from yesterday's run explaining today's
+    silence is worse than none). But a supervisor restart that truncated would
+    destroy the only artefact anyone has of WHY the seam died: the dying
+    process's last words — `FATAL: hexagon context lost` and its like — are in
+    this file and nowhere else, and the replacement's first line would land on
+    top of them within a second of the crash. Post-mortem beats tidiness on
+    the one box nobody can attach a debugger to.
+    """
     (STATE / "logs").mkdir(parents=True, exist_ok=True)
-    log = (STATE / "logs" / f"{name}.log").open("w")
+    path = STATE / "logs" / f"{name}.log"
+    log = path.open("a" if append else "w")
+    if append:
+        log.write(f"\n===== restarted by the supervisor at "
+                  f"{datetime.now(timezone.utc).isoformat(timespec='seconds')} "
+                  f"— everything above is the PREVIOUS {name} =====\n")
+        log.flush()
     process = subprocess.Popen(argv, cwd=REPO, env={**os.environ, **(env or {})},
                                stdout=log, stderr=subprocess.STDOUT)
     processes.append((name, process))
@@ -248,6 +764,106 @@ def stop_all() -> None:
             process.wait(timeout=5)
         except subprocess.TimeoutExpired:
             process.kill()
+
+
+def _terminate_child(child: subprocess.Popen | None, name: str, log) -> None:
+    if child is None or child.poll() is not None:
+        return
+    log(f"SUPERVISOR: stopping the previous {name} child (pid {child.pid}).")
+    child.terminate()
+    try:
+        child.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        log(f"SUPERVISOR: pid {child.pid} ignored terminate for 5s — killing it.")
+        child.kill()
+
+
+def standin_restarter(model_url: str, argv_model: list[str]):
+    """Restart the stand-in / --live proxy: stop it, respawn the IDENTICAL
+    argv. Identical matters — a restart that quietly dropped `--mode proxy`
+    would leave a `--live` run replaying the canned corpus while its banner
+    still said LIVE, which is the same class of silent lie this whole
+    workstream exists to close."""
+    def restart(previous: subprocess.Popen | None, log):
+        _terminate_child(previous, "model", log)
+        child = spawn("model", argv_model, append=True)
+        wait_for(f"{model_url}/models", child, "model", 25)
+        return child
+    return restart
+
+
+def geniex_restarter(model_url: str):
+    """Restart `geniex serve`, killing the port owner first.
+
+    `kill_port_owner` runs even when the previous child was ours and has just
+    been terminated: after ADOPT-UNOWNED there is no child to terminate and
+    the stale listener is the whole problem, and in the owned case the call is
+    a cheap no-op that also catches a child that forked something we do not
+    know about. After the first restart the unowned case has converged to the
+    owned one.
+    """
+    def restart(previous: subprocess.Popen | None, log):
+        _terminate_child(previous, "geniex", log)
+        kill_port_owner(MODEL_PORT, log)
+        geniex = shutil.which("geniex")
+        if geniex is None:
+            log("SUPERVISOR: `geniex` is not on PATH, so this script cannot "
+                "relaunch it. The seam stays DOWN.")
+            return None
+        # append=True: geniex.log holds the dying process's last words, and
+        # they are the only evidence of the idle death anyone will ever have.
+        child = spawn("geniex", [geniex, "serve"], append=True)
+        wait_for(f"{model_url}/models", child, "geniex", 25)
+        return child
+    return restart
+
+
+def start_or_adopt_geniex(model_url: str) -> subprocess.Popen | None:
+    """Under --npu, serve_local becomes GenieX's launcher.
+
+    Two entries, because both are real. If :18181 is free this script starts
+    `geniex serve` itself and owns it. If something is already answering there
+    — the flow docs/NPU-RUNBOOK.md documents today, a teammate who started it
+    by hand — it is ADOPTED: supervised by probe only, and on a declared death
+    killed by port owner and replaced with an owned child.
+
+    Adoption is not optional politeness. The failure being supervised leaves a
+    live process holding the port, so there is no crash to clear it: only
+    something willing to kill by port can recover, and refusing to adopt would
+    mean refusing to boot on the exact machine that needs this most.
+    """
+    if port_is_free(MODEL_PORT):
+        geniex = shutil.which("geniex")
+        if geniex is None:
+            raise SystemExit(
+                f"--npu given, nothing is serving on :{MODEL_PORT}, and the "
+                f"`geniex` binary is not on PATH — so there is nothing to "
+                f"start and nothing to adopt.\n"
+                f"Install GenieX and `geniex pull` a model, then either run "
+                f"`geniex serve` yourself or re-run this script (it will "
+                f"launch and supervise it for you). See docs/NPU-RUNBOOK.md.")
+        child = spawn("geniex", [geniex, "serve"])
+        if not wait_for(f"{model_url}/models", child, "geniex", 25):
+            raise SystemExit(
+                f"`geniex serve` was started but never answered "
+                f"{model_url}/models within 25s — see "
+                f"{STATE / 'logs' / 'geniex.log'}.")
+        print(f"model      GenieX LAUNCHED by this script on {model_url} and "
+              f"supervised: probed every {PROBE_INTERVAL_S}s, restarted if it "
+              f"stops answering", flush=True)
+        return child
+
+    if not wait_for(f"{model_url}/models", None, "npu", seconds=3):
+        raise SystemExit(
+            f"something is holding :{MODEL_PORT} but it is not answering "
+            f"{model_url}/models. If that is a GenieX that has already gone "
+            f"idle-dead, kill it and re-run — this script will launch and "
+            f"supervise its own. If it is something else entirely, that port "
+            f"is the model seam and it needs to be free.")
+    print(f"model      ADOPTED what is already on {model_url} — supervised by "
+          f"probe. If it stops answering, this script kills whatever holds "
+          f":{MODEL_PORT} and relaunches `geniex serve` itself.", flush=True)
+    return None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -272,7 +888,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="proxy the model seam to the real instance in "
                              "secrets.jsonc, so retrieval is actually RANKED by a "
                              "model and `contribute` can distil arbitrary prose. "
-                             "Costs real requests (~20/hour/key).")
+                             "Costs real requests (~20/hour/key). WITH --npu this "
+                             "means the split production topology instead: distil "
+                             "on the local NPU, synthesize on the real 70B.")
     parser.add_argument("--distiller-model", default="Llama-3.1-8B",
                         help="--live: the small model standing where the NPU sits")
     parser.add_argument("--synthesizer-model", default="Llama-3.3-70B",
@@ -301,8 +919,11 @@ def main(argv: list[str] | None = None) -> int:
                              "the ranking — but `contribute` cannot distil and will "
                              "say so. For anyone with no NPU and no key.")
     parser.add_argument("--npu", action="store_true",
-                        help="a real model is already serving on :18181 (geniex serve) — "
-                             "do not start the stand-in")
+                        help="use the real model seam on :18181 instead of the "
+                             "stand-in. Starts `geniex serve` itself if the port "
+                             "is free, adopts one already running otherwise, and "
+                             "supervises either way — probing every 15s and "
+                             "restarting the seam if it stops answering.")
     args = parser.parse_args(argv)
 
     # Fail rather than ignore. `--claude-model haiku --distiller npu` is someone
@@ -315,11 +936,69 @@ def main(argv: list[str] | None = None) -> int:
             "--claude-model only applies to --distiller anthropic or claude-cli.\n"
             f"You asked for the NPU arm and model {args.claude_model!r}; pick one.")
 
+    # --npu --live used to be a SILENT DROP: `--live` was consulted only in
+    # the non-`--npu` branch, so the pair started plain GenieX and said
+    # nothing, and whoever asked for the live 70B got the NPU synthesizing
+    # and no way to tell from the banner.
+    #
+    # The pair's honest meaning is the real production topology — distil on
+    # the NPU, synthesize on the actual 70B — and it needs ONE machine, not
+    # two. So it runs the split config: GenieX keeps :18181 for the distiller
+    # (no stand-in is spawned) and the SERVICE is pointed straight at
+    # Cirrascale. Resolved BEFORE anything is spawned, because a missing key
+    # discovered after three processes are up is a mess to unwind.
+    #
+    # Side benefit worth knowing: in this mode retrieval is ranked by the real
+    # 70B, and AIC100Provider's key rotation applies — unlike the `--live`
+    # proxy path, which holds one key with no rotation (FLOW.md §1.5).
+    dual = args.npu and args.live
+    dual_key = dual_base_url = None
+    if dual and args.service_url:
+        # The DUAL half of `--npu --live` is a SERVICE configuration: it is
+        # the service that gets SYNAPSE_SYNTHESIZER=aic100 and the Cirrascale
+        # credentials. `--service-url` means no service is started here at
+        # all, so there is nothing to configure — the whole `--live` half
+        # would be resolved, validated and then dropped on the floor while the
+        # banner still announced "synthesis LIVE on <host>". That is the exact
+        # silent-drop this flag pair was fixed to stop doing, one combination
+        # further along, and it is worse than the original because the
+        # credentials really were read.
+        raise SystemExit(
+            "--npu --live --service-url cannot all be true at once.\n"
+            "`--npu --live` means: distil on YOUR NPU, synthesize on the real "
+            "70B — but synthesis is the SERVICE's job, and --service-url says "
+            "someone else is running the service. Whether their host "
+            "synthesizes on the cloud is their configuration, not yours.\n"
+            "Pick one:\n"
+            "  drop --live          — join their service, distil on your NPU "
+            "(this is the normal teammate-with-an-NPU shape)\n"
+            "  drop --service-url   — host the service yourself and run the "
+            "real split topology")
+    if dual:
+        dual_key, dual_base_url = _inference_credentials()
+        missing = ([] if dual_key else ["an API key (INFERENCE_CLOUD_API_KEY, "
+                                        "or `inference_cloud.api_key` in secrets.jsonc)"]
+                   ) + ([] if dual_base_url else
+                        ["a base URL (INFERENCE_CLOUD_BASE_URL, or "
+                         "`inference_cloud.base_url` in secrets.jsonc)"])
+        if missing:
+            raise SystemExit(
+                "--npu --live means: distil on the local NPU, synthesize on "
+                "the real 70B. That needs " + " and ".join(missing) + ", and "
+                "it is not set.\n"
+                "Either add it, or pick one of the two halves:\n"
+                "  --npu    alone — the NPU synthesizes too (no cloud budget "
+                "spent)\n"
+                "  --live   alone — both seams proxy through the stand-in to "
+                "the cloud (no NPU needed)")
+
     needed = [8787] + ([] if args.service_url else [8899]) + \
              ([] if (args.listen or args.npu) else [18181])
     claim_ports(needed)
 
     model_url = NPU_URL if args.npu else STANDIN_URL
+    supervisor: SeamSupervisor | None = None
+    supervisor_log = STATE / "logs" / SUPERVISOR_LOG
 
     if args.listen:
         # Nothing is started here on purpose. Reading needs no model: the
@@ -332,10 +1011,20 @@ def main(argv: list[str] | None = None) -> int:
               "`contribute` will decline, because distilling your prose is the "
               "one thing that needs a model on YOUR machine.", flush=True)
     elif args.npu:
-        if not wait_for(f"{model_url}/models", None, "npu", seconds=3):
-            raise SystemExit("--npu given but nothing is serving on :18181. "
-                             "Start `geniex serve` first, or drop --npu.")
-        print(f"model      using what is already on {model_url}", flush=True)
+        model = start_or_adopt_geniex(model_url)
+        if dual:
+            host = dual_base_url.split("//", 1)[-1].split("/", 1)[0]
+            print(f"model      DUAL — distil on GenieX {model_url} "
+                  f"(supervised), synthesis LIVE on {host} "
+                  f"(~20 req/hour/key)", flush=True)
+            print("           retrieval is ranked by the real 70B in this "
+                  "mode, with key rotation. The cloud half is NOT supervised: "
+                  "it is not restartable from here, and its failures are "
+                  "already visible (503 / synthesized: false).", flush=True)
+        supervisor = SeamSupervisor(
+            models_url=f"{model_url}/models", seam_name="geniex",
+            restart=geniex_restarter(model_url), child=model,
+            log_path=supervisor_log)
     else:
         argv_model = [sys.executable, "scripts/local_model_server.py"]
         if args.live:
@@ -355,6 +1044,14 @@ def main(argv: list[str] | None = None) -> int:
             print(f"model      stand-in on {model_url} (replays this repo's corpus; "
                   f"not a model, not the NPU — retrieval ranking is identity)",
                   flush=True)
+        # Supervised too, and not only for symmetry: the stand-in and the
+        # --live proxy are what every teammate WITHOUT an NPU runs, so they
+        # are the seam most of the demo actually leans on. A test that only
+        # ever exercised the GenieX arm would leave the common path unproven.
+        supervisor = SeamSupervisor(
+            models_url=f"{model_url}/models", seam_name="model stand-in",
+            restart=standin_restarter(model_url, argv_model), child=model,
+            log_path=supervisor_log)
 
     if args.service_url:
         service_url = args.service_url.rstrip("/")
@@ -369,7 +1066,9 @@ def main(argv: list[str] | None = None) -> int:
         service = None
     else:
         service_url = SERVICE_URL
-        service_env = service_env_for(npu=args.npu, model_url=model_url)
+        service_env = service_env_for(npu=args.npu, model_url=model_url,
+                                      dual_key=dual_key,
+                                      dual_base_url=dual_base_url)
         service = spawn("service", [str(BIN / "synapse-service"),
                                     "--host", args.host], service_env)
         if not wait_for(f"{service_url}/debug", service, "service"):
@@ -571,11 +1270,42 @@ def main(argv: list[str] | None = None) -> int:
               "per laptop, or their findings get stamped as yours.", flush=True)
 
     print(flush=True)
+    if supervisor is not None:
+        print(f"  Supervising the model seam: GET {model_url}/models every "
+              f"{PROBE_INTERVAL_S}s, {DEATH_STRIKES} consecutive failures "
+              f"(~{(DEATH_STRIKES - 1) * PROBE_INTERVAL_S}-"
+              f"{int((DEATH_STRIKES - 1) * (PROBE_INTERVAL_S + PROBE_TIMEOUT_S))}s, "
+              f"a failing probe costs its own {PROBE_TIMEOUT_S:g}s) = dead, "
+              f"then up to {len(RESTART_DELAYS_S)} restarts per "
+              f"{RESTART_WINDOW_S // 60} minutes.", flush=True)
+        print(f"  Every transition prints here and appends to {supervisor_log}.",
+              flush=True)
+        if args.live and not args.npu:
+            # Say what is NOT covered. In --live the thing on :18181 is the
+            # local proxy, and its /models is answered from a static payload
+            # without touching Cirrascale (local_model_server.do_GET) — so
+            # this probe proves the proxy is up and says nothing whatsoever
+            # about the cloud behind it. A banner reading "supervising the
+            # model seam" over a run whose real model is remote and unwatched
+            # is the reassurance-without-coverage this workstream exists to
+            # delete.
+            print("  NOTE: that probe covers the LOCAL proxy only. Its "
+                  "/models answers from a static payload and never calls "
+                  "the cloud, so a Cirrascale outage is invisible to the "
+                  "supervisor — it surfaces as a 503 on query instead "
+                  "(decision 008), which is the honest signal for something "
+                  "no restart here could fix.", flush=True)
     print("  Ctrl-C to stop.", flush=True)
 
+    # What used to be `time.sleep(3600)` — dead space in the one process every
+    # teammate already runs, and now the supervision loop (decision 005). The
+    # sleep comes FIRST: `wait_for` above already proved the seam answers, so
+    # probing it again immediately would only cost a round trip.
     try:
         while True:
-            time.sleep(3600)
+            time.sleep(PROBE_INTERVAL_S if supervisor is not None else 3600)
+            if supervisor is not None:
+                supervisor.tick()
     except KeyboardInterrupt:
         pass
     return 0
