@@ -66,18 +66,28 @@ MERGE_MIN_INTERVAL_S = float(os.environ.get("SYNAPSE_MERGE_MIN_INTERVAL_S", 60))
 # numbers. Until then the governor degrades gracefully instead of 429ing,
 # which is the same "landed, memory unchanged" symptom by another road.
 #
-# WHAT THIS GOVERNOR DOES NOT SEE, stated because the names above overstate it
-# (2026-08-06 review): retrieval shares the SAME provider object, hence the same
-# key and the same hourly ceiling, and `/query` is never charged to `_spend`.
-# So a team that runs 20 queries and no pushes exhausts the key's request
-# budget while `_affordable()` still answers True, and the next merge 429s
-# inside the provider. That is a real gap and it is deliberately still open:
-# metering retrieval here would let query traffic DEFER synthesis, which is a
-# product decision (whose latency gives way to whose?) and not a bug fix. The
-# constants keep their SYNTHESIS_ prefix to say exactly what they cover. The
-# honest fix is one metered wrapper around the single provider before it is
-# split in two -- with a shared ledger and per-component policy -- and it
-# belongs with service-side persistence, post-demo.
+# ⟨CLOSED 2026-08-06, W3b, decisions/002⟩ This block used to say the governor
+# could not see retrieval, and that leaving it that way was deliberate. It is
+# no longer either. The gap was: retrieval shares the SAME provider object,
+# hence the same key and the same hourly ceiling, and `/query` was never
+# charged, so a team that ran 20 queries and no pushes exhausted the key's
+# request budget while `_affordable()` still answered True and the next merge
+# 429'd inside the provider -- reproducing, from a second cause, the exact
+# "findings landed, memory unchanged" symptom this governor exists to prevent.
+#
+# The reason for leaving it open was that metering retrieval lets query traffic
+# DEFER synthesis, and choosing whose latency gives way is a product decision.
+# That decision is now made, and it is made this way because the alternative
+# was never "synthesis keeps its budget" -- one key does not care which
+# component drained it. The choice was only ever between deferring synthesis
+# with a logged reason and 429ing it without one. A deferred merge says so on
+# the wire (`deferred: true`), keeps every finding queryable, and folds them in
+# next round; a 429 inside AIC100Provider is invisible from here.
+#
+# So `_spend` is now the KEY's ledger, not synthesis's: every entry carries
+# which component spent it. The names keep their SYNTHESIS_ prefix because the
+# numbers are still what the synthesis key allows -- what changed is that
+# everything spending that key is counted against them.
 SYNTHESIS_TOKENS_PER_HOUR = 25_000
 SYNTHESIS_REQUESTS_PER_HOUR = 20
 SYNTHESIS_KEYS = int(os.environ.get("SYNAPSE_SYNTHESIS_KEYS", 1))
@@ -85,6 +95,14 @@ SYNTHESIS_KEYS = int(os.environ.get("SYNAPSE_SYNTHESIS_KEYS", 1))
 # What one round is assumed to cost before we have measured one. Replaced by
 # real usage as soon as a merge reports it -- see `_record_spend`.
 ASSUMED_MERGE_TOKENS = 4_000
+
+# The same figure for a retrieval round, and much smaller because the call is:
+# working memory (~500 words / ~850 tok) + purpose + the query + at most TOP_K
+# one-line candidates (~40 tok each), out to a short list of integer indices.
+# ~1,500 is the arithmetic, not a guess. Used only when the provider reported
+# no usage -- which for AIC100Provider means the call raised, and the tokens
+# went out anyway.
+ASSUMED_QUERY_TOKENS = 1_500
 
 
 def _missing(body: dict, *required: str) -> JSONResponse | None:
@@ -198,10 +216,20 @@ def build_app(provider: ModelProvider, *, debug: bool = True,
     interval_s = (MERGE_MIN_INTERVAL_S if merge_min_interval_s is None
                   else merge_min_interval_s)
 
-    # (monotonic ts, tokens) per completed synthesis round, last hour. App
-    # scope rather than per session: the ceiling belongs to the KEY, and two
-    # busy sessions share one.
-    _spend: list[tuple[float, int]] = []
+    # (monotonic ts, tokens, component) per model round that actually reached
+    # the provider, last hour. App scope rather than per session: the ceiling
+    # belongs to the KEY, and two busy sessions share one.
+    #
+    # ⟨2026-08-06, W3b⟩ The third element is what closed the metering hole.
+    # `synthesis_provider` and `retrieval_provider` are two RecordingProvider
+    # façades over ONE provider object (below), so they share one key and one
+    # hourly ceiling; a ledger that recorded only merges was describing a
+    # budget nobody was spending from. Tagging rather than splitting into two
+    # lists because the TOKEN and REQUEST ceilings are properties of the key
+    # and must be summed across everything, while merge PRICING must still
+    # look only at merges -- a run of cheap queries must not convince
+    # `_affordable` that the next 70B merge is cheap.
+    _spend: list[tuple[float, int, str]] = []
 
     def _record_spend() -> None:
         """Charge the round that just ran, at its real cost when the provider
@@ -233,31 +261,66 @@ def build_app(provider: ModelProvider, *, debug: bool = True,
         tokens = ASSUMED_MERGE_TOKENS
         if usage is not None:
             tokens = max(1, usage.input_tokens + usage.output_tokens)
-        _spend.append((time.monotonic(), tokens))
+        _spend.append((time.monotonic(), tokens, "synthesis"))
+
+    def _record_query_spend(usage) -> None:
+        """Charge a retrieval round to the SAME key ledger (W3b).
+
+        `/query` runs a real model call -- `query_findings` -> `retrieval.py`'s
+        `provider.complete` -- against the same object, the same key and the
+        same hourly ceiling synthesis uses. Before this, that spend was
+        invisible to `_affordable()`: twenty queries and no pushes exhausted
+        the key's 20 requests/hour while the governor still authorised the next
+        merge, which then 429'd inside AIC100Provider where the only mitigation
+        is key rotation that a one-key pool cannot perform.
+
+        `usage is None` means the call raised before reporting anything. It is
+        still charged, at ASSUMED_QUERY_TOKENS, for the same reason
+        `_record_spend` charges a failed merge: the request went out. That this
+        can defer synthesis during a retrieval outage is not a cost worth
+        avoiding -- the provider is SHARED, so a retrieval that cannot complete
+        is a merge that could not have completed either.
+        """
+        tokens = ASSUMED_QUERY_TOKENS
+        if usage is not None:
+            tokens = max(1, usage.input_tokens + usage.output_tokens)
+        _spend.append((time.monotonic(), tokens, "retrieval"))
 
     def _affordable() -> tuple[bool, str]:
         """Whether one more synthesis round fits the hour's remaining budget.
 
-        Charges the NEXT round at the most expensive recent one rather than an
-        average: merge cost grows with the candidate listing, so an average
+        Charges the NEXT round at the most expensive recent MERGE rather than
+        an average: merge cost grows with the candidate listing, so an average
         lags the trend and the governor would keep authorising rounds the key
-        can no longer pay for. Requests are checked at 2 per round because
-        AIC100Provider retries once internally, and a failing round -- the
-        expensive kind -- always takes that retry.
+        can no longer pay for. Retrieval rounds are excluded from that pricing
+        on purpose -- they are several times cheaper, and letting a run of
+        queries drag `next_cost` down would price the next 70B merge as if it
+        were a ranking call. They are NOT excluded from the ceilings: those
+        belong to the key, and the key does not care who spent it.
+
+        Requests are checked at 2 per round because AIC100Provider retries once
+        internally, and a failing round -- the expensive kind -- always takes
+        that retry. True of retrieval too: it passes a `response_schema`, which
+        is the branch that retries.
         """
         cutoff = time.monotonic() - 3600
         while _spend and _spend[0][0] < cutoff:
             _spend.pop(0)
-        tokens_spent = sum(t for _, t in _spend)
-        next_cost = max([t for _, t in _spend[-5:]] or [ASSUMED_MERGE_TOKENS])
+        tokens_spent = sum(t for _, t, _c in _spend)
+        merges = [t for _, t, c in _spend if c == "synthesis"]
+        next_cost = max(merges[-5:] or [ASSUMED_MERGE_TOKENS])
         token_budget = SYNTHESIS_TOKENS_PER_HOUR * SYNTHESIS_KEYS
         request_budget = SYNTHESIS_REQUESTS_PER_HOUR * SYNTHESIS_KEYS
         if tokens_spent + next_cost > token_budget:
+            spenders = Counter(c for _, _t, c in _spend)
             return False, (f"token budget: {tokens_spent}+{next_cost} would exceed "
-                           f"{token_budget}/hour across {SYNTHESIS_KEYS} key(s)")
+                           f"{token_budget}/hour across {SYNTHESIS_KEYS} key(s) "
+                           f"({', '.join(f'{n} {c}' for c, n in sorted(spenders.items()))})")
         if (len(_spend) + 1) * 2 > request_budget:
+            spenders = Counter(c for _, _t, c in _spend)
             return False, (f"request budget: {len(_spend)} round(s) this hour against "
-                           f"{request_budget}/hour, 2 requests each worst case")
+                           f"{request_budget}/hour, 2 requests each worst case "
+                           f"({', '.join(f'{n} {c}' for c, n in sorted(spenders.items()))})")
         return True, ""
 
     def _session_or_404(sid: str):
@@ -738,6 +801,12 @@ def build_app(provider: ModelProvider, *, debug: bool = True,
                 query=body["query"],
                 asking_agent_session=asking_session,
                 asking_contributor=contributor,
+                # THE METERING SEAM (W3b). Fires inside `query_findings`, on
+                # the success AND the failure path, so the charge lands even
+                # when this handler is about to return a 503 -- a retrieval
+                # that burned the key and then raised is the single most
+                # expensive round there is, and the one most worth counting.
+                on_usage=_record_query_spend,
             )
         except RetrievalUnavailable as exc:
             # 503, not 502: this service is healthy and its DEPENDENCY is not.
