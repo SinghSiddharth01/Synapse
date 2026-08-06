@@ -16,8 +16,22 @@ dependency on each other; both already depend on contracts.
 
 File presence is the only "is a session active" signal — there is no separate
 flag. One file, one binding: `CONTEXT.md`'s documented limitation of one active
-Agent Session per Agent product per machine is enforced by only ever writing to
-a single known path, not by anything more elaborate.
+Agent Session per Agent product per machine WAS enforced by only ever writing to
+a single known path. Since 2026-08-06 (W2) that limitation is lifted: the worker
+writes one file per Agent SESSION under `bindings/<agent>/<session>.json` and
+keeps refreshing the single-file `bindings/<agent>.json` as a compatibility
+mirror, so a reader that has not been upgraded still sees exactly the
+most-recently-joined binding it saw before. The record itself did not have to
+change for that — a binding names its own `agent_session_id` and always has.
+
+`scope` is the one field the split did need. It answers "who does this binding
+speak for": a `session`-scoped binding (every binding a real `join` writes) is
+one conversation's, and a reader comparing its own session id against it should
+refuse on a mismatch; a `machine`-scoped binding is a stand-in written before
+any conversation exists (`scripts/serve_local.py`), meaning "this machine is
+joined — any conversation here speaks for it, under its own real session id".
+Absent in every file written before this field existed, which is why the default
+is `session`: the stricter of the two, so an old file never silently widens.
 """
 
 from __future__ import annotations
@@ -27,6 +41,7 @@ import logging
 import os
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel
 
@@ -44,6 +59,7 @@ class SessionBinding(BaseModel):
     agent: str
     transcript_path: str
     pinned_at: datetime
+    scope: Literal["session", "machine"] = "session"
 
     def to_local_binding(self) -> LocalBinding:
         return LocalBinding(

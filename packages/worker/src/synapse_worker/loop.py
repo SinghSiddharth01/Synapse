@@ -31,12 +31,12 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from synapse_contracts import AgentEvent, LocalBinding, Segment, read_binding
+from synapse_contracts import AgentEvent, LocalBinding, Segment
 from synapse_distiller import Distiller
 from synapse_distiller.guards import PromptDropError
 
 from synapse_worker.compaction import compact
-from synapse_worker.discovery import binding_path_for_agent
+from synapse_worker.discovery import has_per_session_bindings, resolve_agent_binding
 from synapse_worker.discovery import AGENT_REGISTRY
 from synapse_worker.follower import TranscriptFollower
 from synapse_worker.producer import Producer
@@ -212,6 +212,15 @@ class WorkerLoop:
         transcript content) and at the top of `shutdown()` — anywhere this
         loop is about to consult or act on "the current binding".
 
+        Since W2 this asks for THIS loop's own Agent SESSION first
+        (`bindings/<agent>/<agent_session_id>.json`) and only falls back to
+        the product-level "most recently pinned" answer when this session has
+        no binding of its own — the pre-W2 state, and the state of a `run`
+        that was never joined at all. Without the session-first lookup, two
+        windows on one machine would re-join each other: window B's join would
+        move window A's Producer, because both were reading the same single
+        file.
+
         Deliberately narrow: only a REAL on-disk join binding for THIS
         loop's own Agent product (`binding_path_for_agent(state_dir,
         self.binding.agent)`) can move the Producer's target, and only when
@@ -223,7 +232,16 @@ class WorkerLoop:
         same shape of file fresh on every POST
         (`_resolve_binding_for_agent`).
         """
-        joined = read_binding(binding_path_for_agent(self.state_dir, self.binding.agent))
+        agent = self.binding.agent
+        joined = resolve_agent_binding(self.state_dir, agent, self.binding.agent_session_id)
+        if joined is None and not has_per_session_bindings(self.state_dir, agent):
+            # Nothing has joined under the per-session layout for this product,
+            # so the legacy file is the only binding on this machine and it is
+            # this conversation's by default — a tree written before W2, or one
+            # whose join has not happened yet. The moment ANY per-session
+            # binding exists, "no binding for my session" means exactly that:
+            # somebody else's join is not a re-join of mine.
+            joined = resolve_agent_binding(self.state_dir, agent)
         if joined is not None and joined.shared_id != self.producer.shared_id:
             logger.info(
                 "Live re-join detected (%r -> %r); syncing the write-ahead "
