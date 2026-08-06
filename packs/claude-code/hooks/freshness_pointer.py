@@ -125,8 +125,8 @@ from __future__ import annotations
 
 import json
 import os
-import select
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -260,6 +260,49 @@ def _load_binding(state_dir: Path) -> dict | None:
     return data
 
 
+def _read_stdin_bounded() -> str:
+    """At most `_MAX_STDIN_BYTES` of stdin, at most
+    `_STDIN_READ_TIMEOUT_SECONDS` of waiting, on every platform.
+
+    The reader runs on a daemon thread so a stdin that is piped but never
+    written to or closed cannot extend this hook's critical-path budget:
+    `join` returns after the timeout with whatever arrived (nothing), and
+    a daemon thread never delays interpreter exit. Returns "" for both
+    "nothing arrived in budget" and "read failed", which the caller treats
+    identically -- as "can't tell", not as "silence".
+
+    `os.read` on the raw descriptor, NOT `sys.stdin.buffer.read()`: the
+    buffered reader takes its own lock for the duration of the call, and a
+    daemon thread still blocked on an unclosed pipe holds that lock through
+    interpreter finalization, which then deadlocks trying to close the same
+    object -- the process hangs instead of exiting, exactly what
+    test_fail_open_when_stdin_is_piped_but_never_written_or_closed pins.
+    A raw descriptor read holds no Python-level lock, so finalization is
+    free to proceed and the abandoned thread dies with the process.
+    """
+    box: list[bytes] = []
+
+    def _reader() -> None:
+        chunks: list[bytes] = []
+        try:
+            fd = sys.stdin.fileno()
+            total = 0
+            while total < _MAX_STDIN_BYTES:
+                chunk = os.read(fd, min(4096, _MAX_STDIN_BYTES - total))
+                if not chunk:
+                    break  # EOF
+                chunks.append(chunk)
+                total += len(chunk)
+        except (OSError, ValueError, AttributeError):
+            pass
+        box.append(b"".join(chunks))
+
+    thread = threading.Thread(target=_reader, daemon=True)
+    thread.start()
+    thread.join(_STDIN_READ_TIMEOUT_SECONDS)
+    return (box[0] if box else b"").decode("utf-8", errors="replace")
+
+
 def _read_stdin_session_id() -> str | None:
     """The `session_id` Claude Code writes into a `UserPromptSubmit` hook's
     own stdin payload — the SAME id `sources/claude_code.py` reads off each
@@ -274,31 +317,30 @@ def _read_stdin_session_id() -> str | None:
     (`sys.stdin.isatty()`, exactly INSTALL.md's direct-run verification
     command, which pipes nothing), a stdin that is piped but never written
     to or closed within `_STDIN_READ_TIMEOUT_SECONDS`, or a payload that
-    isn't parseable JSON carrying a string `session_id`. Bounded by
-    `select` rather than a bare `sys.stdin.read()` for the same reason
-    `_TIMEOUT_SECONDS` bounds the HTTP call: a hook on the critical path of
-    every prompt must never trust an external write to ever arrive.
+    isn't parseable JSON carrying a string `session_id`. The read is
+    bounded for the same reason `_TIMEOUT_SECONDS` bounds the HTTP call: a
+    hook on the critical path of every prompt must never trust an external
+    write to ever arrive.
+
+    PLATFORM (fix 2026-08-05). The bound was originally `select.select()`
+    on `sys.stdin.fileno()`. On Windows `select()` accepts SOCKETS ONLY --
+    a pipe fd raises `OSError: [WinError 10093]` -- which this function's
+    own `except OSError` then swallowed into `return None`, so on Windows
+    the gate in `run()` (`stdin_session_id is not None and ...`) could
+    never fire and EVERY unjoined Claude Code window got a notice meant
+    for the joined one, while also consuming that window's pending notice
+    (state is keyed by the BINDING's agent_session_id). Caught by
+    test_silent_and_no_network_call_when_the_stdin_session_id_does_not_
+    match_the_joined_agent_session, which passed on POSIX and failed here.
+    A daemon thread doing an ordinary blocking read, joined with a
+    timeout, is bounded identically and is portable: if the write never
+    arrives the thread simply never finishes, `join` returns on schedule,
+    and the process exits without waiting on it.
     """
     try:
         if sys.stdin.isatty():
             return None
-        fd = sys.stdin.fileno()
-        chunks: list[bytes] = []
-        total = 0
-        deadline = time.monotonic() + _STDIN_READ_TIMEOUT_SECONDS
-        while total < _MAX_STDIN_BYTES:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            ready, _, _ = select.select([fd], [], [], remaining)
-            if not ready:
-                break  # nothing arrived within budget -- give up, don't gate
-            chunk = os.read(fd, min(4096, _MAX_STDIN_BYTES - total))
-            if not chunk:
-                break  # EOF
-            chunks.append(chunk)
-            total += len(chunk)
-        raw = b"".join(chunks).decode("utf-8", errors="replace")
+        raw = _read_stdin_bounded()
     except (OSError, ValueError):
         return None
     if not raw:
