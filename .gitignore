@@ -31,3 +31,6 @@ __pycache__/
 
 # Playwright MCP scratch output (screenshots, snapshots)
 .playwright-mcp/
+
+# MCP readiness probe scratch state
+.mcpprobe/

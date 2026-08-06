@@ -1,5 +1,0 @@
-  [19:01:17] text synthesis            prompt=   985ch      0ms
-  [19:01:17] text rank/identity        prompt=   668ch      0ms
-  [19:01:17] chat distil/seg-005a      prompt=  3883ch      0ms
-  [19:01:17] text synthesis            prompt=  1234ch      0ms
-  [19:01:17] text rank/identity        prompt=   668ch      0ms
