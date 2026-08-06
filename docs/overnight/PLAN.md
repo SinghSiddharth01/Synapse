@@ -50,6 +50,33 @@ suppression behaviour while keeping the rejoin fix. Documented in
 
 ---
 
+## ✅ Already fixed by the team tonight — do not redo
+
+Five commits landed after the dump was written. They cover most of what W6 was
+for. Revised scope is folded into each workstream below; recorded here so no
+agent re-derives a fix that already shipped.
+
+| commit | what it closed |
+|---|---|
+| `7c42e96` | **The chunking bug.** Chunking could only split *between* events and admitted the first unconditionally, so one assistant message longer than the budget produced an unfittable Segment, failed twice, and the whole turn was dropped — silently. `_split_oversized()` now cuts at the nearest preceding newline. Also: the retry was resending byte-identical text to a temperature-0 model, which cannot decode differently — attempt 2 now appends a corrective instruction. |
+| `7418a63` | **The context-out-of-bounds bug you described.** `max_tokens` 900 against a `response_reserve` of 500 meant a full segment came to 4496 against a 4096 ceiling; near the ceiling the model degenerates into repetition before truncating, so it read as "unparseable" rather than "too big". `config.effective_max_tokens` now clamps rather than raising, so existing configs still boot. Also raised the producer flush timeout 30s → 120s; every batch had been paying a full timeout and landing only on the WAL retry. |
+| `c077a51` | A GenieX 400 for `context_length_exceeded` **carries partial findings in the body**; `raise_for_status()` was discarding them, so the JSON-repair path could never run on the one case it was written for. Now salvaged. `finish_reason == length` logged distinctly from malformed. |
+| `282fd07` | Hosting with `--npu` gave the service a synthesizer that **could never work** — `AIC100Provider` needs `/completions`, GenieX serves only `/chat/completions`, so every synthesis was a 410. Deterministic, not flaky, and invisible because the stand-in path works. |
+| `f5794b8` | ADR 0005 — synthesis budget derived, merge rate governed. |
+
+**Three open items those commits explicitly name, now adopted into this plan:**
+
+1. **`retrieval.py`'s bare `except Exception: return []`** — named in `282fd07` as
+   *"what made this silent rather than loud"*, deliberately not fixed there
+   because it changes the query contract. This one line is why a dead
+   synthesizer looked like an empty result set. **It is also exactly what will
+   mask a dead GenieX**, so it moves into W1 rather than waiting.
+2. **Round-robin is dead code at both layers** (ADR 0005).
+3. **~10 keys needed to hold 60s latency** (ADR 0005) — a capacity fact for the
+   demo, not a code change. Goes to `HUMAN-TODO.md`.
+
+---
+
 ## Workstreams
 
 Ordered by demo risk, not by size. Each is independently mergeable.
@@ -58,6 +85,20 @@ Ordered by demo risk, not by size. Each is independently mergeable.
 
 **Symptom:** after X minutes idle, the process is alive but the HTTP server stops
 serving; the URL goes unreachable.
+
+⟨EXPANDED 2026-08-06 — `282fd07` handed W1 its missing half.⟩
+
+**The observability half comes first.** `282fd07` names
+`retrieval.py`'s bare `except Exception: return []` as *"what made this silent
+rather than loud"* — a dead synthesizer became an empty findings list and a 200.
+That same swallow will hide a dead GenieX behind "no results", which is the
+worst possible demo failure: everything looks fine and the brain is simply
+empty. Fixing the supervisor without fixing this means the supervisor might work
+and nobody could tell.
+
+So: distinguish *"the model call failed"* from *"nothing matched"* at that seam.
+`282fd07` deferred it because it changes the query contract — that is a real
+cost, so it goes in `decisions/008` with the contract change written out.
 
 **Deliverable:** the app survives it without human intervention.
 - Health probe on the model seam, with a liveness definition that distinguishes
@@ -139,10 +180,26 @@ shape.
 
 ### W3 — Worker rate limiting + provider queueing
 
+⟨NARROWED 2026-08-06 — the service-side half already shipped.⟩
+
+ADR 0005 records that **merge rate is already governed** service-side
+(`MERGE_MIN_INTERVAL_S`, plus a synthesis token/request governor). That is not
+what you asked for. Yours is the **worker → provider** side: *"not keep
+accumulating requests, and also not spawn infinite sessions in parallel"*. Those
+are different seams and the shipped one does not cover it.
+
 **Deliverable:** the worker bounds what it sends to a provider.
 - Rate limit inbound work rather than accumulating an unbounded backlog.
 - Bounded concurrency — no unbounded parallel provider calls.
 - Shed or defer beyond the bound, visibly, rather than queueing forever.
+- **Close the metering hole the audit already found:** `/query` shares one
+  provider object and one hourly key ceiling with synthesis but is never charged
+  to `_spend`, so 20 queries and no pushes exhaust the key while `_affordable()`
+  still returns `True`. That reproduces the exact "findings landed, memory
+  unchanged" symptom the governor exists to make visible.
+- **Round-robin is dead code at both layers** (ADR 0005) — either wire it or
+  delete it; leaving dead capacity code next to a rate limiter is how the next
+  person concludes there is more headroom than there is.
 
 **Paired investigation** — you asked three questions; these are answered in
 writing as `docs/overnight/FLOW.md`, with file:line citations, not prose:
@@ -234,20 +291,36 @@ new mechanism — I will extend rather than duplicate.
 
 ### W6 — Stress testing: chunking and context bounds
 
-**Deliverable:** tests that would have caught the context-growth bug, and would
-catch the next one.
-- Large inputs through the chunking path, asserting bounds hold.
-- Context window growth is bounded and asserted, not merely observed.
-- **Haiku capped at 4K context**, matching the other models — explicitly, not by
-  default.
-- AI-100 backend stressed with large blobs.
-- Haiku used as the local test provider so this is runnable here.
+⟨RETARGETED 2026-08-06 — the bugs are fixed; the **tests** are the gap.⟩
 
-**Depends on:** W3's investigation output (`FLOW.md`) for the real current limits.
+`7c42e96`, `7418a63` and `c077a51` fixed the chunking and context-overflow
+defects. Writing more fixes would produce contradictory behaviour. What is
+actually missing is regression cover, and one hard limit you asked for:
 
-**Blockage risk:** low — this is exactly the kind of work that parallelises.
+1. **Do the fixes have tests?** Audit first. `282fd07` admits `_provider()` *"had
+   no test coverage at all, which is how a synthesizer that could not work
+   against the NPU shipped"* — so absence of cover is a live pattern here, not a
+   hypothetical. Every fix without a test gets one.
+2. **Haiku pinned to 4K** — untouched by any commit, still open. Enforced in the
+   provider with a config override, per `decisions/006`.
+3. **Stress the seams with large blobs**, using Haiku locally as you asked, and
+   the AI-100 arm. Assert bounds *hold* rather than observing that they did.
+4. **Property-style bound assertions** rather than one-off fixtures. ADR 0005
+   records that the truncation-guard test *"fabricated a fixture the host never
+   sends"* — a test that cannot fail is worse than no test, and that is the
+   failure mode to design against here.
+5. The degenerate-repetition case specifically: near the ceiling the model
+   repeats before it truncates, so "unparseable" and "over budget" look
+   identical. Cover both, distinctly.
 
-**Models:** Opus (tests) · Fable (deciding what "out of bounds" means per seam).
+**Depends on:** W3's `FLOW.md` for the *effective* current limits — which the
+new `effective_max_tokens` clamp changes, so the investigation must read
+post-`7418a63` config, not the values in the dump.
+
+**Blockage risk:** low.
+
+**Models:** Opus (tests) · Fable (deciding what "out of bounds" means per seam,
+and auditing which fixes lack cover).
 
 ---
 
@@ -364,6 +437,26 @@ commit. A wiki structurally prevents that.
 renders as a real site. If a wiki is genuinely wanted for discoverability,
 *generate* it from `/docs` in CI so the repo stays the single source of truth —
 never hand-edit it. Recorded as `decisions/007-docs-in-repo-not-wiki.md`.
+
+**Toolchain: MkDocs + Material + mkdocstrings.** You asked for the standard
+Python way to pull code-level docs out of docstrings, with high-level docs
+alongside. The three real candidates:
+
+| tool | verdict |
+|---|---|
+| **MkDocs + Material + mkdocstrings** | **chosen.** Markdown-native, so every existing `/docs` file works unchanged. `mkdocstrings` renders Python docstrings into an API reference. `mkdocs gh-deploy` publishes to Pages in one command. Material is the look most Python projects now use. |
+| Sphinx + autodoc | the traditional answer, and the wrong one here. reStructuredText-first, so our entire Markdown corpus needs MyST plus config to work at all — real cost, no gain. |
+| pdoc | zero-config and genuinely nice for pure API docs, but no home for the hand-written high-level material, which is most of what this repo has. |
+
+Worth saying: **this repo's docstrings will make an unusually good API reference.**
+They already explain *why*, name rejected alternatives, and carry dates — that is
+the thing most autodoc output lacks. `anthropic_provider.py`'s "four structural
+breaks" or `ended.py`'s "status AND body, or it is not an ended session" render
+as real documentation rather than restated signatures.
+
+Ships as: `mkdocs.yml`, a nav that reflects the real structure, an API section
+generated from the packages, and a CI job that builds on PR and deploys from
+`main`. Recorded as `decisions/009-mkdocs-material-for-pages.md`.
 
 **Pipeline:**
 1. **Audit agent** — inventory every doc; flag stale, contradicted-by-code, or
