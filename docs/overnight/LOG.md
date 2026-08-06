@@ -148,6 +148,22 @@ Newest at the bottom.
   made exhausted FakeProvider scripts raise, which exposed two of W5's own
   tests as passing on a swallowed failure — the same shape may lurk in suites
   written before 008.
+- **09:47** — **W4a merged** (`a789db5`, 1299): `/debug` is the brain page
+  (participants per conversation, WM + revisions, latest-into-memory), old
+  page verbatim at `/debug/log`, decisions/003. Missing data named as
+  missing, never fabricated.
+- **09:52** — **W3b merged** (`6b22767`, 1335 at tip): worker→provider
+  limiter (4/tick · 1 concurrent · 64 deferred, backpressure not shedding,
+  visible four ways, persistent backlog), `/query` charged to the governor,
+  key-pool headroom warning, decisions/002. Its review found a double-charge
+  on unparseable rankings and a shutdown that discarded the backlog — fixed
+  pre-merge. Round-robin kept: the premise "dead code" was wrong (it is the
+  only POST helper the AIC100 arm calls); the truly misleading part — a key
+  ceiling nothing validates — now warns at boot with the arithmetic.
+- **09:55** — **FINAL GATE: 1335 passed + rehearse_demo ALL BEATS PASS on
+  the real default ports.** Host verified clean (no processes, all three
+  ports free). TLDR finalized. Night over: 888 → 1335, thirteen merges,
+  zero red, zero force pushes.
 - **06:10** — **Relaunch with real isolation** (every agent now gets its own
   harness worktree + detached-HEAD checkout, push-by-ref only):
   `w1-geniex-v2` (wf_4c6491eb, full redo from recovered design) ·

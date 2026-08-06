@@ -1,7 +1,8 @@
 # Overnight state — per workstream
 
-Rewritten to current truth at every transition. Times PDT, 2026-08-06.
-Last rewrite: **09:50**. One workstream still running (W3b).
+**FINAL — 09:55 PDT, 2026-08-06. The run is complete; nothing is running.**
+Closing gate: full suite **1335 passed** + `rehearse_demo.py` ALL BEATS PASS on
+the real default ports; host clean.
 
 | ws | what | status | merged at | suite | notes |
 |---|---|---|---|---|---|
@@ -19,7 +20,7 @@ Last rewrite: **09:50**. One workstream still running (W3b).
 | F1 | few-shot echo contamination | ✅ | `3c132bf` | 1214 | root cause: claude-cli prompt flatten; parse-time guard + marked blocks |
 | W5 | arrival summary at join | ✅ | `64a422f` | 1265 | decisions/004; beat fires on BOTH join paths |
 | W4a | dashboard Page 1 (brain page) | ✅ | `a789db5` | 1299 | decisions/003; `/debug` = brain, old page at `/debug/log`; nothing fabricated |
-| W3b | worker rate limiter + /query metering | **🔄 running** (wf_4f1ccc2d) | — | — | decisions/002 pending |
+| W3b | worker rate limiter + /query metering | ✅ | `6b22767` | 1335 | decisions/002; review's double-charge + backlog-discard findings fixed pre-merge |
 | W4b | dashboard Pages 2+3 | not reached | — | — | explicitly expendable; parked by runway, not by failure |
 
 **Main:** `2e57f6f` · suite **1299 green** at the last workstream merge.
