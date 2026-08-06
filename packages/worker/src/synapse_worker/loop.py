@@ -20,6 +20,13 @@ The pending buffer is persisted with the offset because a turn normally spans
 several ticks. Saving the offset without it would advance past events that were
 never turned into findings — silent loss, which is the one outcome worth
 engineering against.
+
+⟨2026-08-06, W3b⟩ The DEFERRED-SEGMENT queue is persisted for exactly the same
+reason and in the same place. `SeamLimiter` (limiter.py) caps how many segments
+reach the provider per tick; the overflow has already been drained out of the
+segmenter and the follower's offset has already moved past its bytes, so a
+deferred segment that lived only in memory would be silent loss of precisely
+the kind this ordering exists to forbid.
 """
 
 from __future__ import annotations
@@ -39,6 +46,7 @@ from synapse_worker.compaction import compact
 from synapse_worker.discovery import has_per_session_bindings, resolve_agent_binding
 from synapse_worker.discovery import AGENT_REGISTRY
 from synapse_worker.follower import TranscriptFollower
+from synapse_worker.limiter import SeamLimiter
 from synapse_worker.producer import Producer
 from synapse_worker.segmenter import Segmenter
 from synapse_worker.stats import StatsBuffer
@@ -61,11 +69,22 @@ class TickResult:
     skipped_no_change: bool = False
     flushed_incomplete: bool = False
     skipped_triage: int = 0
+    # The seam limiter's two visible outputs (limiter.py, decisions/002).
+    # `deferred` is how many segments are waiting for a later tick's provider
+    # budget; `backpressured` says this tick declined to read new transcript
+    # bytes because that queue is at its bound. Both are reported rather than
+    # silently absorbed — a limiter you cannot see is indistinguishable from a
+    # pipeline that stopped.
+    deferred: int = 0
+    backpressured: bool = False
     errors: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
         if self.skipped_no_change:
-            return "no change"
+            # Still say so when work is waiting: "no change" on the transcript
+            # while N segments sit undistilled is the exact reading an operator
+            # must not be given.
+            return "no change" if not self.deferred else f"no change · {self.deferred} deferred"
         bits = [
             f"{self.new_lines} lines",
             f"{self.new_events} events",
@@ -82,6 +101,10 @@ class TickResult:
             bits.append(f"{self.held} held (other session)")
         if self.pending_events:
             bits.append(f"{self.pending_events} events held (turn open)")
+        if self.deferred:
+            bits.append(f"{self.deferred} deferred (provider rate)")
+        if self.backpressured:
+            bits.append("BACKPRESSURE: not reading new input")
         if self.flushed_incomplete:
             bits.append("idle-flushed")
         return " · ".join(bits)
@@ -104,6 +127,7 @@ class WorkerLoop:
         triage_enabled: bool = True,
         stats: StatsBuffer | None = None,
         session_identified: bool = True,
+        limiter: SeamLimiter | None = None,
     ) -> None:
         self.transcript = Path(transcript)
         self.distiller = distiller
@@ -163,9 +187,19 @@ class WorkerLoop:
         self.idle_flush_seconds = idle_flush_seconds
         self.triage_enabled = triage_enabled
         self.triage_log = TriageLog(self.state_dir)
+        # Default bounds when nothing passed one -- a directly-constructed loop
+        # (every test, and any embedder) is bounded too. `cli._build` passes the
+        # configured one. See limiter.py for the numbers and why.
+        self.limiter = limiter if limiter is not None else SeamLimiter()
 
         self._pending_path = self.state_dir / "pending-events.json"
+        # Segments drained but not yet distilled, oldest first. On disk for the
+        # same reason `pending-events.json` is: their bytes are already behind
+        # the follower's offset, so losing them is losing conversation.
+        self._deferred_path = self.state_dir / "deferred-segments.json"
+        self._deferred: list[Segment] = []
         self._restore_pending()
+        self._restore_deferred()
         self._last_change = datetime.now(timezone.utc)
 
     def _restore_pending(self) -> None:
@@ -181,12 +215,42 @@ class WorkerLoop:
             self.segmenter.add(events)
             logger.info("Restored %d pending events from the previous run", len(events))
 
+    def _restore_deferred(self) -> None:
+        """Pick the rate limiter's backlog back up after a restart.
+
+        Same tolerance as `_restore_pending`: a corrupt file is a warning and
+        an empty start, never a crash loop. The cost of the empty start is the
+        segments in it — which is why the write below is atomic.
+        """
+        if not self._deferred_path.is_file():
+            return
+        try:
+            raw = json.loads(self._deferred_path.read_text(encoding="utf-8"))
+            segments = [Segment.model_validate(item) for item in raw]
+        except (json.JSONDecodeError, ValueError) as exc:
+            logger.warning("Could not restore deferred segments (%s); starting empty", exc)
+            return
+        if segments:
+            self._deferred = segments
+            logger.info(
+                "Restored %d segment(s) deferred by the provider rate limit "
+                "in the previous run", len(segments),
+            )
+
     def _persist_state(self) -> None:
-        """Offset and pending buffer together — see the module docstring."""
+        """Offset, pending buffer and deferred queue together — see the module
+        docstring. All three describe one position in the transcript, and
+        saving any subset of them advances past work nothing will redo."""
         payload = [e.model_dump(mode="json") for e in self.segmenter._pending]
         tmp = self._pending_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(payload), encoding="utf-8")
         tmp.replace(self._pending_path)
+
+        deferred = [s.model_dump(mode="json") for s in self._deferred]
+        tmp = self._deferred_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(deferred), encoding="utf-8")
+        tmp.replace(self._deferred_path)
+
         self.follower.save()
 
     def attach_at_end(self) -> None:
@@ -345,10 +409,45 @@ class WorkerLoop:
         # `self.producer`'s notion of "current".
         self._sync_binding_from_disk()
 
-        if not self.follower.has_new_data(self.transcript):
+        # THE BACKLOG BOUND, checked before anything is read. At or above it
+        # this tick takes on no new input at all: the unread transcript bytes
+        # stay on disk behind the follower's offset, which is the whole reason
+        # deferring here is safe where shedding would not be (decisions/002).
+        # Deliberately BEFORE `has_new_data`, not after — the point is not to
+        # notice growth and ignore it, it is not to consume it.
+        reading_input = self.limiter.accepting_input(len(self._deferred))
+        if not reading_input:
+            result.backpressured = True
+            logger.warning(
+                "Provider-seam BACKPRESSURE: %d segment(s) already deferred, at "
+                "the bound of %d. Not reading new transcript bytes this tick. "
+                "Nothing is dropped — the unread bytes stay on disk behind the "
+                "follower's offset and are picked up as soon as there is room. "
+                "Raise [worker] max_calls_per_tick / max_deferred_segments, or "
+                "accept the lag.",
+                len(self._deferred), self.limiter.max_deferred_segments,
+            )
+            if self.stats:
+                self.stats.event(
+                    "limiter",
+                    f"backpressure: {len(self._deferred)} deferred at the bound "
+                    f"of {self.limiter.max_deferred_segments}; not reading new input",
+                    deferred=len(self._deferred),
+                    bound=self.limiter.max_deferred_segments,
+                    backpressured=True,
+                )
+
+        if reading_input and not self.follower.has_new_data(self.transcript):
             idle = (datetime.now(timezone.utc) - self._last_change).total_seconds()
             if self.segmenter.pending_events and idle >= self.idle_flush_seconds:
                 result.flushed_incomplete = True
+            elif self._deferred:
+                # Nothing new to read, but the limiter is still holding work.
+                # Fall through to the distil pass rather than reporting "no
+                # change" — a backlog that only drains when the transcript
+                # happens to grow is a backlog that never drains at the end of
+                # a conversation, which is exactly when it matters.
+                reading_input = False
             else:
                 result.skipped_no_change = True
                 result.pending_events = self.segmenter.pending_events
@@ -370,20 +469,53 @@ class WorkerLoop:
                     self.stats.tick(asdict(result))
                     self.stats.event("tick", result.summary())
                 return result
-        else:
+        elif reading_input:
             self._last_change = datetime.now(timezone.utc)
 
-        lines = self.follower.read_new_lines(self.transcript)
-        result.new_lines = len(lines)
+        if reading_input:
+            lines = self.follower.read_new_lines(self.transcript)
+            result.new_lines = len(lines)
 
-        events: list[AgentEvent] = []
-        for line in lines:
-            events.extend(self.source.parse_line(line))
-        result.new_events = len(events)
-        self.segmenter.add(events)
+            events: list[AgentEvent] = []
+            for line in lines:
+                events.extend(self.source.parse_line(line))
+            result.new_events = len(events)
+            self.segmenter.add(events)
 
-        segments = self.segmenter.drain(flush_incomplete=result.flushed_incomplete)
+            self._deferred.extend(
+                self.segmenter.drain(flush_incomplete=result.flushed_incomplete))
+
+        # THE RATE BOUND. Everything drained joins the deferred queue; the
+        # limiter says how much of it may reach the provider this tick. FIFO,
+        # so a segment's turn comes and is never jumped — see
+        # `SeamLimiter.admit`. `result.segments` therefore counts what was
+        # ADMITTED, which is what actually cost a model call.
+        segments, self._deferred = self.limiter.admit(self._deferred)
         result.segments = len(segments)
+        result.deferred = len(self._deferred)
+        if result.deferred:
+            # VISIBLE, in both places at once: the operator's log and the
+            # dashboard's feed. A rate limiter whose only evidence is that
+            # things got slower is a rate limiter nobody can distinguish from
+            # a broken provider (decisions/002).
+            logger.info(
+                "Provider rate limit: %d segment(s) admitted this tick "
+                "(max %d), %d deferred to a later tick. Deferred, NOT dropped "
+                "— they are on disk in %s and keep their place in line.",
+                result.segments, self.limiter.max_calls_per_tick,
+                result.deferred, self._deferred_path.name,
+            )
+            if self.stats:
+                self.stats.event(
+                    "limiter",
+                    f"{result.segments} admitted (max "
+                    f"{self.limiter.max_calls_per_tick}/tick), "
+                    f"{result.deferred} deferred",
+                    admitted=result.segments,
+                    deferred=result.deferred,
+                    bound=self.limiter.max_calls_per_tick,
+                    backpressured=result.backpressured,
+                )
 
         for segment in segments:
             # Triage FIRST, on the Segment exactly as segmented -- before
@@ -419,7 +551,13 @@ class WorkerLoop:
             if self.stats:
                 self.stats.distil_started(segment.id, len(segment.events))
             try:
-                findings, distil_stats = await self.distiller.distil(segment)
+                # THE CONCURRENCY BOUND. Every worker->provider call in this
+                # module goes through the limiter, so "one call at a time" is
+                # a checked property rather than a consequence of this `for`
+                # loop happening to await in sequence — which is what an
+                # `asyncio.gather` refactor here would silently repeal.
+                findings, distil_stats = await self.limiter.call(
+                    lambda s=segment: self.distiller.distil(s))
             except PromptDropError as exc:
                 # The model stopped conditioning on its prompt. Every finding it
                 # would produce is invented, so drop the segment rather than
@@ -500,7 +638,19 @@ class WorkerLoop:
         # after the last tick and before shutdown flushes.
         self._sync_binding_from_disk()
         result = TickResult(flushed_incomplete=True)
-        segments = self.segmenter.drain(flush_incomplete=True)
+        # The rate limiter's backlog goes FIRST and IN FULL. `max_calls_per_tick`
+        # paces a loop that will get another tick; shutdown will not, and the
+        # method's whole contract is "nothing stranded". The CONCURRENCY bound
+        # still applies below — that one is about the provider, not the clock.
+        # Whatever is still deferred (because a distillation raised) is
+        # re-persisted at the end and picked up by the next run.
+        deferred, self._deferred = self._deferred, []
+        if deferred:
+            logger.info(
+                "Shutdown is draining %d segment(s) the provider rate limit "
+                "had deferred", len(deferred),
+            )
+        segments = deferred + self.segmenter.drain(flush_incomplete=True)
         result.segments = len(segments)
         for segment in segments:
             # Same ordering as tick(): triage the Segment as segmented,
@@ -514,7 +664,8 @@ class WorkerLoop:
                     continue
             segment = self._compact(segment)
             try:
-                findings, stats = await self.distiller.distil(segment)
+                findings, stats = await self.limiter.call(
+                    lambda s=segment: self.distiller.distil(s))
                 if not stats.skipped_empty:
                     self.producer.record(findings)
                     result.findings += len(findings)

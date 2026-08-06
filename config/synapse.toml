@@ -128,6 +128,35 @@ upstream_url = "http://127.0.0.1:8787/producer/findings"
 # scratch that is hours of NPU time for context nobody asked for.
 attach_at_end = true
 
+# --- the WORKER -> PROVIDER seam (synapse_worker.limiter) --------------------
+# NOT the service's merge governor (ADR 0005) — that one bounds how often the
+# SERVICE calls the synthesis model. These three bound what THIS worker asks of
+# the distiller's provider. Before 2026-08-06 nothing did: one tick distilled
+# every drained segment back to back (FLOW.md §1.3 item 8).
+
+# The RATE. At most this many segments reach the provider per tick; the rest are
+# DEFERRED, never dropped, and reported in the tick summary. One distillation is
+# ~10s on the NPU against a 30s poll interval, so ~3 is what a tick's own period
+# pays for; 4 leaves headroom to catch up after a quiet stretch.
+#   env: SYNAPSE_MAX_CALLS_PER_TICK
+max_calls_per_tick = 4
+
+# The CONCURRENCY CEILING, enforced by a semaphore every worker->provider call
+# holds. 1 because the shipped distiller arm is one local NPU serving one
+# request at a time ([provider] base_url below); the cloud arms
+# (SYNAPSE_DISTILLER=anthropic / claude-cli) genuinely do serve concurrent
+# calls, which is why this is a number and not a constant.
+#   env: SYNAPSE_MAX_CONCURRENT_CALLS
+max_concurrent_calls = 1
+
+# The VISIBLE BOUND on the backlog. At or above this many deferred segments the
+# loop stops reading new transcript bytes — backpressure, not shedding. The
+# unread bytes stay on disk behind the follower's offset and are picked up as
+# soon as there is room, so nothing is lost by waiting. 64 is ~8 minutes of
+# backlog at 4/tick / 30s.
+#   env: SYNAPSE_MAX_DEFERRED_SEGMENTS
+max_deferred_segments = 64
+
 [provider]
 base_url = "http://127.0.0.1:18181/v1"
 max_tokens = 900

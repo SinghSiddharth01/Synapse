@@ -63,6 +63,7 @@ from synapse_worker.discovery import (
     resolve_agent_binding,
     resolve_transcript,
 )
+from synapse_worker.limiter import SeamLimiter
 from synapse_worker.loop import WorkerLoop
 from synapse_worker.producer import FileSink, HttpSink, Producer, read_last_bound_shared_id
 from synapse_worker.stats import StatsBuffer
@@ -310,6 +311,15 @@ def _build(args: argparse.Namespace, debug_port: int = 0):
         budget_tokens=config.segment_budget,
         idle_flush_seconds=worker_cfg.idle_flush_seconds,
         stats=stats,
+        # The WORKER -> PROVIDER bounds, from [worker] in config/synapse.toml.
+        # Passed rather than defaulted so `synapse-worker run` is governed by
+        # the config file an operator can actually edit -- the loop's own
+        # default exists for direct construction, not for the product.
+        limiter=SeamLimiter(
+            max_calls_per_tick=worker_cfg.max_calls_per_tick,
+            max_concurrent_calls=worker_cfg.max_concurrent_calls,
+            max_deferred_segments=worker_cfg.max_deferred_segments,
+        ),
         # binding.agent is authoritative regardless of which branch above set
         # it -- a pinned binding's own `.agent`, the detected `agent` from
         # heuristic resolution, or DEFAULT_AGENT for an explicit --transcript
