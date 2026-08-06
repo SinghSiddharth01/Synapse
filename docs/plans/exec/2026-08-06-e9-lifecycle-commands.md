@@ -1030,6 +1030,329 @@ git commit -am "docs: synapse up replaces the four-terminal ritual"
 
 ---
 
+### Task 8 — `synapse health`: is the system in a good condition?
+
+`status` answers "are our processes running". That is not the same question as
+"does this work", and tonight proved the gap twice: a model stand-in that was
+**up and answering** in replay mode while I reported its output as real 70B
+synthesis, and a `contribute` that returned "nothing durable extracted" while
+every process was green. Liveness is not health.
+
+**THE SPLIT THAT SHAPES THIS COMMAND.** Two categories of check, and they must
+never be blurred:
+
+| | Examples | We can | Health must |
+|---|---|---|---|
+| **managed** | model stand-in, service, orchestrator, worker | start, stop, restart | offer to fix it |
+| **external** | `geniex serve`, Cirrascale, Anthropic auth, the rate-limit budget | only observe | say what to do, and never pretend |
+
+`restart` (Task 9) touches managed components only. An `--fix` that killed
+someone's `geniex serve`, or that "fixed" an expired API key, would be lying
+about what it controls.
+
+**Files:**
+- Create: `packages/lifecycle/src/synapse_lifecycle/health.py`
+- Modify: `src/synapse_lifecycle/cli.py` (the `health` subcommand)
+- Test: `packages/lifecycle/tests/test_health.py`
+
+**Interfaces produced:**
+
+```python
+@dataclass(frozen=True)
+class Check:
+    name: str                      # "model" | "geniex" | "service" | "orchestrator"
+                                   # | "worker" | "synthesizer" | "distiller-canary"
+    managed: bool                  # can `restart`/`--fix` do anything about it?
+    state: str                     # "ok" | "degraded" | "down" | "unknown" | "skipped"
+    detail: str                    # what was observed, in one line
+    remedy: str | None             # the exact command, or None when ok
+    latency_ms: int | None
+
+def run_checks(args, *, deep: bool = False) -> list[Check]: ...
+def exit_code(checks: list[Check]) -> int: ...   # 0 ok · 1 degraded · 2 down
+```
+
+The checks, and what each one actually asks:
+
+1. **`model`** — something answers `:18181/v1/models`, **and which something**.
+   Reports the MODE, not just liveness: `stand-in (replay)`, `stand-in (proxy →
+   <host>)`, or `geniex`. This is the check that would have caught my false
+   report tonight; "model: up" would not have.
+2. **`geniex`** — NPU arm only, else `skipped`. The bundle is listed, and its
+   type is `llm` not `vlm`: a model typed `vlm` discards text prompts and
+   returns fluent invented answers (`distiller/guards.py`'s opening paragraph —
+   a measured failure, not a hypothetical). Remedy names
+   `geniex model set-type <model> llm`.
+3. **`service`** — answers, and reports session count and fold size, so "up but
+   empty" is visible as itself rather than as a retrieval bug.
+4. **`orchestrator`** — `/mcp` answers, **and** a binding exists. Not joined is
+   `degraded`, not `down`: the process is fine and the tools will politely say
+   so, but no agent can use them.
+5. **`worker`** — PID alive **and making progress**. A worker whose transcript
+   was deleted or rotated sits there ticking forever with nothing to do; alive
+   is not working. Reads `:8790/debug/stats.json` for the last tick time when a
+   debug port is up, and reports `degraded` past a threshold.
+6. **`synthesizer`** — the backend provider reachable **and authenticated**. The
+   silent failure mode this closes: an expired or wrong-instance key looks
+   exactly like "synthesis just isn't merging anything". A keyless `GET /models`
+   is enough and costs no inference — that single request is what would have
+   saved the hour tonight where the `.com` host was rejecting our key.
+7. **`distiller-canary`** — `--deep` only, because it costs one real model
+   call. Runs `guards.check_canary` through whichever distiller arm is
+   configured. This is the deepest question available: everything can be up,
+   authenticated and fast while the distiller emits schema-plausible findings
+   invented from nothing.
+
+- [ ] **Step 1: write the failing tests**
+
+```python
+# packages/lifecycle/tests/test_health.py
+from synapse_lifecycle.health import Check, exit_code, run_checks
+
+
+def test_a_model_seam_in_replay_mode_is_not_reported_as_simply_up(monkeypatch, args):
+    """The failure this check exists for. On 2026-08-05 the stand-in came back
+    up in replay after a restart, and a whole round of results was reported as
+    real 70B output. Every liveness probe was green throughout."""
+    monkeypatch.setattr("synapse_lifecycle.health._model_mode",
+                        lambda *a, **k: ("replay", "local-stand-in"))
+    check = [c for c in run_checks(args) if c.name == "model"][0]
+    assert check.state == "degraded"
+    assert "replay" in check.detail
+    assert "no output from this is a real model result" in check.detail
+
+
+def test_a_proxying_stand_in_names_the_host_it_proxies_to(monkeypatch, args):
+    monkeypatch.setattr("synapse_lifecycle.health._model_mode",
+                        lambda *a, **k: ("proxy", "aisuite-indonesia.cirrascale.com"))
+    check = [c for c in run_checks(args) if c.name == "model"][0]
+    assert check.state == "ok"
+    assert "aisuite-indonesia" in check.detail
+
+
+def test_a_vlm_typed_bundle_is_down_not_ok(monkeypatch, args_npu):
+    """guards.py's opening paragraph: a vlm-typed model loads, reports NPU
+    residency, streams at 14 tok/s and answers a different question every
+    time. Every check except this one says healthy."""
+    monkeypatch.setattr("synapse_lifecycle.health._geniex_models",
+                        lambda *a, **k: [{"id": "gemma-4", "type": "vlm"}])
+    check = [c for c in run_checks(args_npu) if c.name == "geniex"][0]
+    assert check.state == "down"
+    assert "set-type" in check.remedy
+
+
+def test_geniex_is_skipped_rather_than_failed_when_not_on_the_npu_arm(args):
+    check = [c for c in run_checks(args) if c.name == "geniex"][0]
+    assert check.state == "skipped"
+    assert check.remedy is None
+
+
+def test_an_unauthenticated_backend_is_reported_as_auth_not_as_unreachable(
+    monkeypatch, args
+):
+    """An expired key and a downed host need different remedies, and the
+    difference is invisible in the symptom: synthesis simply stops merging."""
+    monkeypatch.setattr("synapse_lifecycle.health._probe_models",
+                        lambda url, key: (500, "Invalid API key, no user found"))
+    check = [c for c in run_checks(args) if c.name == "synthesizer"][0]
+    assert check.state == "down"
+    assert "key" in check.detail.lower()
+    assert "unreachable" not in check.detail.lower()
+
+
+def test_a_worker_that_is_alive_but_has_stopped_ticking_is_degraded(monkeypatch, args):
+    """Alive is not working: a worker whose transcript was rotated away ticks
+    forever with nothing to follow."""
+    monkeypatch.setattr("synapse_lifecycle.health._worker_last_tick_age",
+                        lambda *a, **k: 900.0)
+    check = [c for c in run_checks(args) if c.name == "worker"][0]
+    assert check.state == "degraded"
+    assert "900" in check.detail or "15 min" in check.detail
+
+
+def test_an_orchestrator_with_no_binding_is_degraded_not_down(monkeypatch, args):
+    """The process is fine and the tools answer honestly; there is just nothing
+    for an agent to use yet. Calling that `down` would send someone to restart
+    a healthy process."""
+    monkeypatch.setattr("synapse_lifecycle.health._binding_exists", lambda *a: False)
+    check = [c for c in run_checks(args) if c.name == "orchestrator"][0]
+    assert check.state == "degraded"
+    assert "join" in check.remedy
+
+
+def test_every_failing_check_carries_a_command_to_run(monkeypatch, args):
+    """A health check that reports a problem without naming the fix makes the
+    reader go hunting through docs at the worst possible moment."""
+    monkeypatch.setattr("synapse_lifecycle.health._model_mode", lambda *a, **k: (None, None))
+    for check in run_checks(args):
+        if check.state in ("down", "degraded"):
+            assert check.remedy, f"{check.name} reported {check.state} with no remedy"
+
+
+def test_external_checks_never_claim_to_be_fixable(args):
+    """`--fix` restarts managed components. Offering to fix an expired API key
+    or someone else's `geniex serve` would be a lie about what we control."""
+    for check in run_checks(args):
+        if check.name in ("geniex", "synthesizer"):
+            assert check.managed is False
+
+
+def test_the_canary_only_runs_when_deep_is_asked_for(args):
+    """It costs a real model call, and on the shared Cirrascale key that is 1
+    of ~20 per hour."""
+    assert [c for c in run_checks(args) if c.name == "distiller-canary"][0].state == "skipped"
+
+
+def test_exit_codes_are_scriptable(args):
+    ok = [Check("a", True, "ok", "", None, 1)]
+    degraded = ok + [Check("b", True, "degraded", "", "synapse restart b", 1)]
+    down = degraded + [Check("c", True, "down", "", "synapse up c", 1)]
+    assert exit_code(ok) == 0
+    assert exit_code(degraded) == 1
+    assert exit_code(down) == 2
+    assert exit_code([Check("s", False, "skipped", "", None, None)]) == 0
+```
+
+- [ ] **Step 2: run them and watch them fail.**
+Run: `uv run pytest packages/lifecycle/tests/test_health.py -q`
+Expected: `No module named 'synapse_lifecycle.health'`.
+
+- [ ] **Step 3: implement `health.py`.** Every probe wrapped so one unreachable
+thing cannot abort the report — a health command that crashes on the first
+problem is useless precisely when something is wrong. `_model_mode` reads
+`GET /v1/models` and distinguishes the stand-in from GenieX by the reported id
+(`local-stand-in` vs a bundle name), and reads the stand-in's own
+`/debug/mode` (added in the same step, three lines) to tell replay from proxy.
+
+- [ ] **Step 4: tests pass.** Run: `uv run pytest packages/lifecycle/tests -q`
+
+- [ ] **Step 5: the output.** One line per check, aligned, worst first, with
+the remedy indented under anything not ok:
+
+```
+  synthesizer      DOWN      Invalid API key, no user found (aisuite.cirrascale.com)
+                             → the .com host rejects the team key; use the Indonesian
+                               instance (secrets.jsonc inference_cloud.base_url)
+  model            degraded  stand-in, REPLAY mode — no output from this is a real
+                             model result
+                             → synapse restart model --live
+  worker           degraded  alive but last tick was 15 min ago
+                             → synapse restart worker
+  orchestrator     ok        :8787 joined to sh-bbe76a56
+  service          ok        :8899 · 1 session · 8 findings visible
+  geniex           skipped   not the configured arm (distiller=claude-cli)
+  distiller-canary skipped   --deep to run it (costs one model call)
+
+  1 down, 2 degraded — exit 2
+```
+
+- [ ] **Step 6: verify by hand against the running stack**, then break each
+thing on purpose: `synapse down model` → `model DOWN`; point
+`INFERENCE_CLOUD_BASE_URL` at the `.com` host → `synthesizer DOWN` naming the
+key; `pkill -f synapse-worker` → `worker`. Each must name the fix.
+
+- [ ] **Step 7: commit**
+
+```bash
+git add packages/lifecycle
+git commit -m "feat(lifecycle): synapse health — liveness is not health, and external is not fixable"
+```
+
+---
+
+### Task 9 — targeted verbs: `up`, `down`, `restart` on named components
+
+Public-facing naming, and one shape rather than a verb per component. A
+component argument scales; `up-worker`, `restart-worker`, `restart-both` do
+not.
+
+```
+synapse up [COMPONENT...]        # default: everything the config needs
+synapse down [COMPONENT...]
+synapse restart [COMPONENT...]   # down then up, those components only
+synapse status
+synapse health [--deep]
+synapse logs COMPONENT [-f]
+```
+
+So `synapse restart worker`, `synapse restart orchestrator worker`,
+`synapse up worker`, `synapse restart` for everything. Familiar to anyone who
+has used `systemctl` or `docker compose`, and it needs no new verbs when a
+fifth component appears.
+
+**Files:** modify `src/synapse_lifecycle/cli.py`; test in `tests/test_cli.py`.
+
+- [ ] **Step 1: write the failing tests**
+
+```python
+def test_restart_touches_only_the_named_component(spawned, tmp_path, monkeypatch):
+    """`restart worker` must not take the service down with it — that would
+    discard the whole team's findings to fix one process."""
+    ...
+    cli.main(["restart", "worker", "--state-dir", str(tmp_path)])
+    started = " ".join(" ".join(c["argv"]) for c in spawned)
+    assert "synapse-worker" in started
+    assert "synapse-service" not in started
+
+
+def test_restarting_the_service_warns_that_it_discards_shared_memory(
+    tmp_path, monkeypatch, capsys
+):
+    """The store is in memory. Restarting the service is not a repair, it is a
+    reset — and on a hosted service it resets everyone, not just you."""
+    ...
+    cli.main(["restart", "service", "--state-dir", str(tmp_path), "--yes"])
+    out = capsys.readouterr().out
+    assert "discards" in out and "in memory" in out
+
+
+def test_restarting_the_service_without_yes_refuses(tmp_path, monkeypatch, capsys):
+    assert cli.main(["restart", "service", "--state-dir", str(tmp_path)]) == 2
+    assert "--yes" in capsys.readouterr().out
+
+
+def test_an_unknown_component_name_lists_the_real_ones(tmp_path, capsys):
+    assert cli.main(["restart", "wroker", "--state-dir", str(tmp_path)]) == 2
+    assert "model, service, orchestrator, worker" in capsys.readouterr().out
+
+
+def test_health_fix_restarts_only_managed_components_that_are_down(
+    spawned, tmp_path, monkeypatch, capsys
+):
+    """The whole point of the managed/external split. `--fix` may restart our
+    worker; it may not touch someone's geniex or an expired key."""
+    from synapse_lifecycle.health import Check
+    monkeypatch.setattr(cli, "run_checks", lambda *a, **k: [
+        Check("worker", True, "down", "", "synapse restart worker", None),
+        Check("geniex", False, "down", "", "geniex serve", None),
+    ])
+    cli.main(["health", "--fix", "--state-dir", str(tmp_path)])
+    started = " ".join(" ".join(c["argv"]) for c in spawned)
+    assert "synapse-worker" in started
+    assert "geniex" not in started
+    assert "cannot fix" in capsys.readouterr().out
+```
+
+- [ ] **Step 2: run and watch fail.**
+
+- [ ] **Step 3: implement** the positional `COMPONENT...` on `up`/`down`/
+`restart`, `cmd_restart` (down then up, restricted to the named set),
+`--yes` gating on the service, `synapse logs`, and `health --fix`.
+
+- [ ] **Step 4: tests pass**, then the full suite: `uv run pytest -q`.
+
+- [ ] **Step 5: verify by hand:** `synapse restart orchestrator` while an MCP
+client is connected — the client reconnects, the briefing is recomposed, and
+`synapse status` shows one orchestrator, not two.
+
+- [ ] **Step 6: commit**
+
+```bash
+git commit -am "feat(lifecycle): up/down/restart take component names, health --fix restarts only what we own"
+```
+
+---
+
 ## Scope and estimate
 
 | Task | Agentic estimate | Risk |
@@ -1041,12 +1364,19 @@ git commit -am "docs: synapse up replaces the four-terminal ritual"
 | 5 · slash commands | 10 min | low |
 | 6 · hook line | 15 min | low, but it is a hook: must exit 0 on every path |
 | 7 · docs | 10 min | low |
-| **Total** | **~1h50** | plus a review pass |
+| 8 · `health` | 30 min | low — all probes, no state changes |
+| 9 · component verbs + `--fix` | 25 min | medium — `restart service` is destructive |
+| **Total** | **~2h45** | plus a review pass |
 
-Tasks 1–3 are the deliverable. **If time runs short before the demo, stop
-after Task 3** — `up`/`down`/`status` alone removes the four-terminal ritual,
-and 4–6 are polish. Task 4 is the only one that modifies a path the demo
-depends on; if the demo is close, defer it.
+**Recommended order given the demo is 2026-08-07: 1 → 2 → 3 → 8 → 9, then
+4–7 afterwards.** Task 8 (`health`) jumps the queue over `--idle-stop`, the
+slash commands and the docs because it is the one task that pays off ON demo
+morning: `synapse health` becomes the pre-flight gate, and its exit code makes
+`rehearse_demo.py` refuse to run against a half-configured stack. Task 4 is the
+only task that modifies a path the demo depends on — defer it.
+
+If time runs short, stop after Task 3: `up`/`down`/`status` alone retires the
+four-terminal ritual.
 
 ## What this deliberately does not do
 
@@ -1059,6 +1389,13 @@ depends on; if the demo is close, defer it.
 - **No change to which model runs.** `npu` remains the default on every path.
 - **No killing of processes we did not start.** A `foreign` port is reported,
   never resolved.
+- **No fixing of things we do not own.** `health --fix` restarts managed
+  components. It never touches `geniex serve`, never edits a key, never
+  restarts a teammate's hosted service — it prints what it cannot fix and why.
+- **No health endpoint on the orchestrator.** Health has to work when the
+  orchestrator is the thing that is down, so it lives in the CLI. An HTTP
+  surface can come later, for dashboards, and would be additional rather than
+  instead.
 
 ## Verification the whole plan is done
 
@@ -1069,5 +1406,14 @@ depends on; if the demo is close, defer it.
 - [ ] `synapse down` leaves nothing on 8787, 8899 or 18181.
 - [ ] `synapse up` twice in a row starts exactly one orchestrator.
 - [ ] With something else on 8787, `synapse up` exits 2 and starts nothing.
+- [ ] `synapse health` reports ok across the board on a correctly configured
+  stack, and exits 0.
+- [ ] Break each check on purpose — stop the model, point the synthesizer at a
+  host that rejects the key, kill the worker, unset the binding — and confirm
+  each is named individually with a command that fixes it.
+- [ ] `synapse health --fix` restarts a downed worker and refuses, out loud, to
+  fix `geniex` or an auth failure.
+- [ ] `synapse restart worker` leaves the service and its findings untouched.
+- [ ] `synapse restart service` refuses without `--yes` and says why.
 - [ ] Full suite green (`uv run pytest -q`), and the count has gone up by the
-  number of tests this plan adds — roughly 25.
+  number of tests this plan adds — roughly 45.

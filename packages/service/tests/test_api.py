@@ -34,9 +34,14 @@ class _RecordingProvider(FakeProvider):
         return await super().complete(messages, response_schema)
 
 
-def _finding_json(fid: str, agent_session: str = "as-1", text: str | None = None) -> dict:
+def _finding_json(fid: str, agent_session: str = "as-1", text: str | None = None,
+                  contributor: str = "aditya") -> dict:
+    """⟨2026-08-06⟩ `contributor` became a parameter when suppression re-keyed
+    onto it. `agent_session` stays -- findings still carry it, and the tests
+    that vary it are now varying a field nothing suppresses on, which is the
+    point."""
     return {"id": fid, "type": "learning", "text": text or f"insight {fid}",
-            "attributions": [{"contributor": "aditya", "agent_session": agent_session,
+            "attributions": [{"contributor": contributor, "agent_session": agent_session,
                               "agent": "claude-code"}],
             "ts": "2026-08-04T12:00:00Z", "refs": [],
             "provenance": "distilled", "status": "kept",
@@ -132,21 +137,25 @@ async def test_watermark_applies_the_same_suppression_rule_as_query():
     round ran), it's just that none of what changed is new information
     to as-me specifically. That is the intended split, not a bug: a
     caller that wants "how much is new FOR ME" reads by_type/conflicts;
-    new_since answers "did anything happen at all"."""
+    new_since answers "did anything happen at all".
+
+    ⟨RE-KEYED 2026-08-06⟩ The asker was `agent_session=as-me`; it is
+    `contributor=me` now. Same split, same assertions, keyed on the identity
+    that survives closing a conversation."""
     provider = FakeProvider(scripts=[MERGE_NOOP])
     async with _client(provider) as client:
         sid = (await client.post("/v1/sessions", json={"purpose": "p", "created_by": "s"})
                ).json()["shared_id"]
-        findings = [_finding_json(f"f-{i}", agent_session="as-me") for i in range(3)]
+        findings = [_finding_json(f"f-{i}", contributor="me") for i in range(3)]
         r = await client.post(f"/v1/sessions/{sid}/findings", json={"findings": findings})
         assert r.json()["accepted"] == 3
 
-        r = await client.get(f"/v1/sessions/{sid}/watermark", params={"agent_session": "as-me"})
+        r = await client.get(f"/v1/sessions/{sid}/watermark", params={"contributor": "me"})
         body = r.json()
         assert body["by_type"] == {}                      # all three are the asker's own
         assert body["new_since"] == 1                      # but the memory DID move (global)
 
-        r = await client.get(f"/v1/sessions/{sid}/watermark", params={"agent_session": "as-other"})
+        r = await client.get(f"/v1/sessions/{sid}/watermark", params={"contributor": "other"})
         body = r.json()
         assert body["by_type"] == {"learning": 3}          # a teammate sees all three
         assert body["new_since"] == 1
@@ -169,16 +178,16 @@ async def test_watermark_conflicts_count_only_conflicts_touching_a_visible_findi
     async with _client(provider) as client:
         sid = (await client.post("/v1/sessions", json={"purpose": "p", "created_by": "s"})
                ).json()["shared_id"]
-        findings = [_finding_json("f-1", agent_session="as-me"),
-                   _finding_json("f-2", agent_session="as-me"),
-                   _finding_json("f-3", agent_session="as-teammate")]
+        findings = [_finding_json("f-1", contributor="me"),
+                   _finding_json("f-2", contributor="me"),
+                   _finding_json("f-3", contributor="teammate")]
         r = await client.post(f"/v1/sessions/{sid}/findings", json={"findings": findings})
         assert r.json()["accepted"] == 3
 
-        r = await client.get(f"/v1/sessions/{sid}/watermark", params={"agent_session": "as-me"})
+        r = await client.get(f"/v1/sessions/{sid}/watermark", params={"contributor": "me"})
         assert r.json()["conflicts"] == 1                 # only the mine-vs-teammate one
 
-        r = await client.get(f"/v1/sessions/{sid}/watermark", params={"agent_session": "as-unrelated"})
+        r = await client.get(f"/v1/sessions/{sid}/watermark", params={"contributor": "unrelated"})
         assert r.json()["conflicts"] == 2                 # both sides visible to a third party
 
 
@@ -528,13 +537,13 @@ async def test_a_finding_only_the_asker_produced_never_reaches_the_candidate_set
     async with _client(provider) as client:
         sid = (await client.post("/v1/sessions", json={"purpose": "p", "created_by": "s"})
                ).json()["shared_id"]
-        others = [_finding_json(f"f-them-{i:02d}", agent_session="as-them")
+        others = [_finding_json(f"f-them-{i:02d}", contributor="them")
                   for i in range(19)]
         await client.post(f"/v1/sessions/{sid}/findings", json={"findings": [
-            _finding_json("f-mine", agent_session="as-me"), *others]})
+            _finding_json("f-mine", contributor="me"), *others]})
 
         r = await client.post(f"/v1/sessions/{sid}/query",
-                              json={"query": "insight", "agent_session": "as-me"})
+                              json={"query": "insight", "contributor": "me"})
 
     prompt = provider.prompts[-1]
     assert "insight f-mine" not in prompt          # never offered to the model
@@ -573,18 +582,18 @@ async def test_the_askers_own_findings_do_not_starve_teammate_recall_at_the_rout
     async with _client(provider) as client:
         sid = (await client.post("/v1/sessions", json={"purpose": "p", "created_by": "s"})
                ).json()["shared_id"]
-        mine = [_finding_json(f"f-me-{i:02d}", agent_session="as-me",
+        mine = [_finding_json(f"f-me-{i:02d}", contributor="me",
                               text=f"mine-marker-{i:02d} the pool exhausts under "
                                    "sustained allocation pressure")
                 for i in range(60)]
-        theirs = [_finding_json(f"f-them-{i:02d}", agent_session="as-them",
+        theirs = [_finding_json(f"f-them-{i:02d}", contributor="them",
                                 text=f"them-marker-{i:02d} the pool exhausts under "
                                      "sustained allocation pressure")
                   for i in range(20)]
         await client.post(f"/v1/sessions/{sid}/findings", json={"findings": mine + theirs})
 
         await client.post(f"/v1/sessions/{sid}/query",
-                          json={"query": "pool exhaustion", "agent_session": "as-me"})
+                          json={"query": "pool exhaustion", "contributor": "me"})
 
     prompt = provider.prompts[-1]
     # Every candidate slot goes to a teammate: the asker's own 60 never
@@ -675,10 +684,10 @@ async def test_a_topic_of_only_the_askers_own_findings_contributes_nothing():
         sid = (await client.post("/v1/sessions", json={"purpose": "p", "created_by": "s"})
                ).json()["shared_id"]
         await client.post(f"/v1/sessions/{sid}/findings", json={"findings": [
-            _finding_json("f-mine", agent_session="as-me")]})
+            _finding_json("f-mine", contributor="me")]})
 
         body = (await client.get(f"/v1/sessions/{sid}/watermark",
-                                 params={"agent_session": "as-me"})).json()
+                                 params={"contributor": "me"})).json()
 
     assert body["topics"] == []
 

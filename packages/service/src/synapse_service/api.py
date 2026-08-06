@@ -1,5 +1,11 @@
 # packages/service/src/synapse_service/api.py
-"""The ingest + retrieval surface (Plan C.3/C.5/C.6). One store, one provider."""
+"""The ingest + retrieval surface (Plan C.3/C.5/C.6). One store, one provider.
+
+Also the lifecycle surface since 2026-08-06 (`POST /v1/sessions/{sid}/end`,
+`DELETE /v1/sessions/{sid}/members/{contributor}`). Whether a session is still
+open is enforced in ONE place here -- `_unavailable` -- and not repeated per
+route; see its docstring.
+"""
 
 from __future__ import annotations
 
@@ -43,6 +49,28 @@ def _missing(body: dict, *required: str) -> JSONResponse | None:
     return None
 
 
+def _asking_contributor(source: Mapping[str, str]) -> str:
+    """Who is asking. `contributor` if it is there, `agent_session` if it is
+    not -- one reader for the query body and the watermark query string.
+
+    ADDITIVE ON PURPOSE (2026-08-06). Suppression and the watermark are now
+    keyed on the Contributor (retrieval.py, store.last_seen), but the field
+    name on the wire cannot simply change: `orchestrator/server.py:141` and
+    `briefing.py:80` are separate processes on other people's laptops, and a
+    hard rename would make every un-upgraded client anonymous -- which does
+    not error, it silently switches their suppression off and resets their
+    watermark. Reading both means an old client keeps exactly the behaviour it
+    has today while a new one gets the re-key, and the two can be deployed in
+    either order.
+
+    The `or` chain treats an empty string as absent, which is what makes a
+    client that sends `contributor: ""` for an agent it could not identify
+    fall back to its Agent Session id rather than being lumped in with every
+    other anonymous asker.
+    """
+    return source.get("contributor") or source.get("agent_session") or ""
+
+
 def build_app(provider: ModelProvider, *, debug: bool = True) -> Starlette:
     """`debug=True` (the default, preserving every existing call site's
     behavior) mounts `/debug` on this same listener and wraps the provider in
@@ -81,6 +109,36 @@ def build_app(provider: ModelProvider, *, debug: bool = True) -> Starlette:
 
     def _session_or_404(sid: str):
         return store.get_session(sid)
+
+    def _unavailable(sid: str) -> JSONResponse | None:
+        """THE liveness gate. 404 if this session never existed, 409
+        `{"error": "session_ended"}` if it has been closed, None if it is
+        live -- every route that serves the memory or extends it goes through
+        this one function (2026-08-06, session lifecycle spec).
+
+        One helper rather than an `if store.get_context(sid).status is ...`
+        repeated in four handlers, because the failure mode of the inline
+        version is a FIFTH route added later that quietly omits it: writes to
+        a session the team has closed would be accepted with a 200 and
+        disappear into a log nothing reads. The uniform shape is also what
+        lets the orchestrator recognise "ended" once (status + error body)
+        instead of per route.
+
+        404 is checked first: an unknown session is not an ended one, and
+        reporting `session_ended` for a typo'd id would send a client down the
+        "clear the binding, it's over" path for a session that is fine.
+
+        Deliberately NOT applied to `add_member`, `POST /end` or
+        `DELETE /members/{c}`. Ending twice must stay idempotent rather than
+        409, and a member of a session that closed underneath them must still
+        be able to leave it -- that DELETE is exactly how a client cleans up
+        after seeing the 409 here.
+        """
+        if store.get_session(sid) is None:
+            return JSONResponse({"error": f"unknown session {sid}"}, status_code=404)
+        if store.get_context(sid).status is SessionStatus.ENDED:
+            return JSONResponse({"error": "session_ended"}, status_code=409)
+        return None
 
     def _record_synthesis_feed(sid: str, log_before: int) -> None:
         """Diff the log around the `merge()` call just made, rather than
@@ -128,10 +186,66 @@ def build_app(provider: ModelProvider, *, debug: bool = True) -> Starlette:
         store.add_member(sid, body["contributor"])
         return JSONResponse({"members": store.get_session(sid).members})
 
-    async def push_findings(request: Request) -> JSONResponse:
+    async def end_session(request: Request) -> JSONResponse:
+        """Close a Shared Session for everyone. CREATOR ONLY.
+
+        Layer 2 of the three the spec puts around this call (the harness
+        permission prompt is layer 1, and "refuse while other members are
+        present" is layer 3, in the orchestrator where the member list is
+        already rendered to a human). This layer is in the SERVICE and not in
+        the client on purpose: it is the only one an agent cannot talk its way
+        past, and closing a session is the one operation that can destroy the
+        team's memory for everyone at once.
+
+        Ending an already-ended session is a 200, not a 409. The fold keeps
+        the first `SessionEnded`, so a retried POST -- the ordinary outcome of
+        a dropped response on a call nobody wants to leave ambiguous -- is
+        inert and reports the ORIGINAL closer.
+        """
+        sid = request.path_params["sid"]
+        session = _session_or_404(sid)
+        if session is None:
+            return JSONResponse({"error": f"unknown session {sid}"}, status_code=404)
+        try:
+            body = await request.json()
+        except ValueError:
+            # An absent or unparseable body reaches `_missing` as {} and comes
+            # back a 422. Without this it is an unhandled 500, and _missing's
+            # own docstring says why that is the wrong answer: E4's Relay
+            # retries 5xx forever against a request that can never succeed.
+            body = {}
+        if (err := _missing(body, "ended_by")) is not None:
+            return err
+        ended_by = body["ended_by"]
+        if ended_by != session.created_by:
+            # Names the creator rather than saying "forbidden": the caller is
+            # an agent relaying this to a human who now knows who to ask.
+            return JSONResponse(
+                {"error": f"only {session.created_by} can end this session"},
+                status_code=403)
+        attributed_to = store.end_session(sid, ended_by)
+        return JSONResponse({"shared_id": sid, "status": SessionStatus.ENDED.value,
+                             "ended_by": attributed_to})
+
+    async def leave_session(request: Request) -> JSONResponse:
+        """Detach ONE member. The session stays open for everyone else and
+        their findings stay in the log, attributed to them (store.remove_member).
+
+        Not gated on status: leaving a session that closed underneath you is
+        exactly how a client cleans up after a 409, so a guard here would trap
+        members inside a dead session. Idempotent for a contributor who is not
+        a member, because a retried DELETE must not be an error.
+        """
         sid = request.path_params["sid"]
         if _session_or_404(sid) is None:
             return JSONResponse({"error": f"unknown session {sid}"}, status_code=404)
+        store.remove_member(sid, request.path_params["contributor"])
+        return JSONResponse({"members": store.get_session(sid).members})
+
+    async def push_findings(request: Request) -> JSONResponse:
+        sid = request.path_params["sid"]
+        if (gate := _unavailable(sid)) is not None:
+            return gate
         body = await request.json()
         try:
             findings = [Finding.model_validate(f) for f in body.get("findings", [])]
@@ -185,8 +299,8 @@ def build_app(provider: ModelProvider, *, debug: bool = True) -> Starlette:
         store as one batch, then calling this once, is how a resync
         converges to the same state as the original incremental stream."""
         sid = request.path_params["sid"]
-        if _session_or_404(sid) is None:
-            return JSONResponse({"error": f"unknown session {sid}"}, status_code=404)
+        if (gate := _unavailable(sid)) is not None:
+            return gate
         version_before = store.get_context(sid).memory_version
         log_before = len(store.log_entries(sid))
         await synthesizer.merge(store, sid, [])
@@ -197,9 +311,9 @@ def build_app(provider: ModelProvider, *, debug: bool = True) -> Starlette:
 
     async def watermark(request: Request) -> JSONResponse:
         sid = request.path_params["sid"]
-        if _session_or_404(sid) is None:
-            return JSONResponse({"error": f"unknown session {sid}"}, status_code=404)
-        agent_session = request.query_params.get("agent_session", "")
+        if (gate := _unavailable(sid)) is not None:
+            return gate
+        contributor = _asking_contributor(request.query_params)
         ctx = store.get_context(sid)
 
         # Round-2 adjudication on watermark suppression, split deliberately
@@ -223,7 +337,7 @@ def build_app(provider: ModelProvider, *, debug: bool = True) -> Starlette:
         # content-scoped). E4's briefing composer renders both, and is
         # expected to phrase them as separate signals, not force them to
         # agree.
-        visible = visible_to(store.retrievable(sid), agent_session)
+        visible = visible_to(store.retrievable(sid), contributor)
         by_type = Counter(f.type.value for f in visible)
 
         # A Conflict counts if at least one side is visible to this asker:
@@ -248,7 +362,7 @@ def build_app(provider: ModelProvider, *, debug: bool = True) -> Starlette:
 
         return JSONResponse({
             "version": ctx.memory_version,
-            "new_since": ctx.memory_version - store.last_seen(sid, agent_session),
+            "new_since": ctx.memory_version - store.last_seen(sid, contributor),
             "by_type": dict(by_type),
             "conflicts": conflicts,
             "topics": [{"id": t.topic_id, "size": t.size, "label": t.label}
@@ -259,12 +373,12 @@ def build_app(provider: ModelProvider, *, debug: bool = True) -> Starlette:
 
     async def query(request: Request) -> JSONResponse:
         sid = request.path_params["sid"]
-        if _session_or_404(sid) is None:
-            return JSONResponse({"error": f"unknown session {sid}"}, status_code=404)
+        if (gate := _unavailable(sid)) is not None:
+            return gate
         body = await request.json()
         if (err := _missing(body, "query")) is not None:
             return err
-        agent_session = body.get("agent_session", "")
+        contributor = _asking_contributor(body)
 
         # Invariant 3 at the lanes seam. `visible_to` stays the ONE definition
         # of the rule (retrieval.py); here it computes what must be EXCLUDED
@@ -276,7 +390,7 @@ def build_app(provider: ModelProvider, *, debug: bool = True) -> Starlette:
         # with no model and no prompt cost. What must be bounded is the
         # PROMPT, not the loop.
         visible = store.retrievable(sid)
-        allowed = visible_to(visible, agent_session)
+        allowed = visible_to(visible, contributor)
 
         suppressed = frozenset(f.id for f in visible) - {f.id for f in allowed}
         if len(allowed) <= TOP_K:
@@ -321,9 +435,9 @@ def build_app(provider: ModelProvider, *, debug: bool = True) -> Starlette:
             context=store.get_context(sid),
             candidates=candidates,
             query=body["query"],
-            asking_agent_session=agent_session,
+            asking_contributor=contributor,
         )
-        store.mark_seen(sid, agent_session)
+        store.mark_seen(sid, contributor)
         if feed is not None:
             # Counts alone could not answer "what did the asker actually get
             # back?", which is the only thing an operator watching a query
@@ -334,10 +448,13 @@ def build_app(provider: ModelProvider, *, debug: bool = True) -> Starlette:
                 "query",
                 f"{sid}: '{body['query'][:60]}' -> {len(candidates)} candidates, "
                 f"{len(ranked)} ranked"
-                + (f", {withheld} suppressed for {agent_session or 'anonymous'}"
+                + (f", {withheld} suppressed for {contributor or 'anonymous'}"
                    if withheld else ""),
                 session=sid,
-                asked_by=agent_session or "anonymous",
+                # The feed key stays `asked_by` -- the debug page's JS reads
+                # `d.asked_by` (debug.py:549) and this is a Contributor now,
+                # which is what an operator wanted to read there anyway.
+                asked_by=contributor or "anonymous",
                 candidates=len(candidates),
                 ranked=len(ranked),
                 suppressed=withheld,
@@ -352,6 +469,9 @@ def build_app(provider: ModelProvider, *, debug: bool = True) -> Starlette:
     routes = [
         Route("/v1/sessions", create_session, methods=["POST"]),
         Route("/v1/sessions/{sid}/members", add_member, methods=["POST"]),
+        Route("/v1/sessions/{sid}/members/{contributor}", leave_session,
+              methods=["DELETE"]),
+        Route("/v1/sessions/{sid}/end", end_session, methods=["POST"]),
         Route("/v1/sessions/{sid}/findings", push_findings, methods=["POST"]),
         Route("/v1/sessions/{sid}/synthesize", synthesize, methods=["POST"]),
         Route("/v1/sessions/{sid}/watermark", watermark, methods=["GET"]),
