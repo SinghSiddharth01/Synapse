@@ -88,6 +88,50 @@ DEFAULT_MODEL = "claude-opus-5"
 # provider this package otherwise talks to) -- see the module docstring.
 DEFAULT_MAX_TOKENS = 16000
 
+# Haiku's cap is OURS, not the endpoint's. claude-haiku-4-5 serves a 200K
+# context and will happily return up to 64K output tokens; 4096 is a spend and
+# shape decision, and saying so here is the point -- a number that looks like a
+# platform limit stops being questioned, and this one should be.
+#
+# Why 4096 specifically: Haiku is the arm someone reaches for to run the loop
+# cheaply and often, and a distil response is a small findings object. 16000 is
+# sized for Opus 5, where max_tokens caps thinking PLUS text and thinking is on
+# by default; Haiku has no such thinking overhead to cover, so the same ceiling
+# is ~4x more room than the task can use and 4x the exposure when a small model
+# degenerates into a repetition loop -- the failure this repo already
+# distinguishes by name (distiller.classify_drop). A cap is the only thing that
+# bounds a loop's cost, so it should be near what the task needs.
+#
+# Matched on a SUBSTRING rather than an exact id: the arm is selected by
+# SYNAPSE_ANTHROPIC_MODEL, a free-text env var, and both `claude-haiku-4-5` and
+# `claude-haiku-4-5-20251001` are in use in this repo (scripts/serve_local.py).
+# An exact-match table would silently fall back to 16000 for whichever spelling
+# it did not list -- failing OPEN on the number that costs money.
+HAIKU_MAX_TOKENS = 4096
+_MODEL_MAX_TOKENS: tuple[tuple[str, int], ...] = (("haiku", HAIKU_MAX_TOKENS),)
+
+# The operator override. Named to match INFERENCE_CLOUD_MAX_TOKENS on
+# AIC100Provider, which exists for exactly this reason and records it: the
+# service and the worker both construct their provider with NO arguments
+# (`worker/cli.py`, `orchestrator/cli.py`, `service/cli.py`), so a constructor
+# default is reachable only from Python and cannot be changed on a running
+# deployment. Config that cannot reach the code is not config.
+MAX_TOKENS_ENV = "SYNAPSE_ANTHROPIC_MAX_TOKENS"
+
+
+def default_max_tokens_for(model: str) -> int:
+    """The per-model output cap, before any explicit argument or env override.
+
+    Falls back to DEFAULT_MAX_TOKENS for anything unlisted, so adding a model
+    is never a prerequisite for using one.
+    """
+    lowered = model.lower()
+    for fragment, cap in _MODEL_MAX_TOKENS:
+        if fragment in lowered:
+            return cap
+    return DEFAULT_MAX_TOKENS
+
+
 # Correction #3. A distiller doing faithful compression is not a hard
 # reasoning task; "low" keeps the (always-on, by default) thinking shallow
 # rather than paying for depth nothing here needs.
@@ -166,7 +210,7 @@ class AnthropicProvider(ModelProvider):
         *,
         model: str | None = None,
         api_key: str | None = None,
-        max_tokens: int = DEFAULT_MAX_TOKENS,
+        max_tokens: int | None = None,
         effort: str = DEFAULT_EFFORT,
         timeout: float | None = None,
         client: Any | None = None,
@@ -193,6 +237,24 @@ class AnthropicProvider(ModelProvider):
             self._client = AsyncAnthropic(**kwargs)
 
         self._model = model or os.environ.get("SYNAPSE_ANTHROPIC_MODEL", DEFAULT_MODEL)
+        # Resolution order, and the reason for it:
+        #   env  >  explicit argument  >  per-model pin  >  DEFAULT_MAX_TOKENS
+        #
+        # `max_tokens=None` (the default) means "decide from the model" rather
+        # than "use 16000" -- which is what lets a Haiku arm get 4096 through
+        # the three call sites that pass no arguments at all.
+        #
+        # Env beating an explicit argument is deliberate and matches
+        # AIC100Provider's `int(os.environ.get(...) or max_tokens)`. The whole
+        # purpose of the variable is to change the number on a deployment
+        # whose code you are not editing; a hard-coded argument winning over it
+        # would leave exactly the call sites that most need overriding
+        # unreachable. It is also the same precedence SYNAPSE_ANTHROPIC_MODEL
+        # already has one line above.
+        resolved = max_tokens if max_tokens is not None else default_max_tokens_for(
+            self._model
+        )
+        override = os.environ.get(MAX_TOKENS_ENV)
         # PUBLIC (2026-08-06): `SynthesisBudget.for_provider` reads `max_tokens`
         # off whichever provider is wired into synthesis, so a provider that
         # hides its cap behind a private name is silently budgeted at
@@ -200,8 +262,11 @@ class AnthropicProvider(ModelProvider):
         # the 500-word memory this provider can easily afford asked for as
         # 270. Named like AIC100Provider's and OpenAICompatibleProvider's for
         # exactly that reason: the budget reads one attribute across all of
-        # them or it reads none of them reliably.
-        self.max_tokens = max_tokens
+        # them or it reads none of them reliably. It is also why the Haiku pin
+        # belongs HERE rather than in config/synapse.toml: synthesis reads this
+        # attribute and never reads a capability record, so a config-only cap
+        # would be inert on the arm it was written for (decisions/006).
+        self.max_tokens = int(override) if override else resolved
         self._effort = effort
 
     @property

@@ -70,6 +70,47 @@ NPU_URL = "http://127.0.0.1:18181/v1"   # geniex serve listens here too
 processes: list[tuple[str, subprocess.Popen]] = []
 
 
+def service_env_for(*, npu: bool, model_url: str) -> dict[str, str]:
+    """The environment that decides which synthesizer the service builds.
+
+    Extracted from `main` so it can be asserted. It was an inline dict, and the
+    half of 282fd07 that chooses `npu` over `aic100` from `--npu` therefore had
+    no test at all — grep for `serve_local` across `packages/` and `tests/`
+    returned exactly one hit, and it was a docstring reference. Pure by
+    construction: no environment reads, no I/O, so a test is a single call.
+
+    The synthesizer has to speak whatever is actually listening on `model_url`.
+    The stand-in serves BOTH /chat/completions and /completions (see
+    local_model_server.py's docstring), so aic100 -- which needs /completions --
+    works against it. `geniex serve` does NOT: it has no /completions route at
+    all, so aic100 against a real NPU 410s on every synthesis call and the
+    host's own queries come back empty with a 200. Observed live 2026-08-06,
+    and confirmed against Qualcomm's endpoint list.
+    """
+    if npu:
+        return {
+            "SYNAPSE_SYNTHESIZER": "npu",
+            "SYNAPSE_BASE_URL": model_url,
+        }
+    return {
+        "SYNAPSE_SYNTHESIZER": "aic100",
+        "INFERENCE_CLOUD_BASE_URL": model_url,
+        "INFERENCE_CLOUD_API_KEY": "local-stand-in",
+        "INFERENCE_CLOUD_MODEL": "local-stand-in",
+        # Derived, not chosen — see synapse_service.synthesis.SynthesisBudget
+        # and the [capability."Llama-3.3-70B"] record in config/synapse.toml.
+        # AIC100Provider's own 800/60s defaults are what broke synthesis on
+        # 2026-08-06: a 500-word working memory is ~850 tokens, so the memory
+        # alone overran the cap and every round came back truncated while
+        # findings kept landing. 1600 buys back the intended 500-word memory
+        # with ~700 tokens of verdict room; 180s keeps the longer generation
+        # clear of the read timeout (two rounds measured at 48.5s and 51.7s
+        # against the old 60s default).
+        "INFERENCE_CLOUD_MAX_TOKENS": str(SYNTHESIS_MAX_TOKENS),
+        "INFERENCE_CLOUD_TIMEOUT": str(SYNTHESIS_TIMEOUT_S),
+    }
+
+
 def _anthropic_key() -> str | None:
     """The Anthropic key, from the environment or `secrets.jsonc`.
 
@@ -328,34 +369,7 @@ def main(argv: list[str] | None = None) -> int:
         service = None
     else:
         service_url = SERVICE_URL
-        # The synthesizer has to speak whatever is actually listening on
-        # model_url. The stand-in serves BOTH /chat/completions and
-        # /completions (see local_model_server.py's docstring), so aic100 --
-        # which needs /completions -- works against it. `geniex serve` does
-        # NOT: it has no /completions route at all, so aic100 against a real
-        # NPU 410s on every synthesis call and the host's own queries come
-        # back empty with a 200. Observed live 2026-08-06, and confirmed
-        # against Qualcomm's endpoint list.
-        service_env = {
-            "SYNAPSE_SYNTHESIZER": "npu",
-            "SYNAPSE_BASE_URL": model_url,
-        } if args.npu else {
-            "SYNAPSE_SYNTHESIZER": "aic100",
-            "INFERENCE_CLOUD_BASE_URL": model_url,
-            "INFERENCE_CLOUD_API_KEY": "local-stand-in",
-            "INFERENCE_CLOUD_MODEL": "local-stand-in",
-            # Derived, not chosen — see synapse_service.synthesis.SynthesisBudget
-            # and the [capability."Llama-3.3-70B"] record in config/synapse.toml.
-            # AIC100Provider's own 800/60s defaults are what broke synthesis on
-            # 2026-08-06: a 500-word working memory is ~850 tokens, so the memory
-            # alone overran the cap and every round came back truncated while
-            # findings kept landing. 1600 buys back the intended 500-word memory
-            # with ~700 tokens of verdict room; 180s keeps the longer generation
-            # clear of the read timeout (two rounds measured at 48.5s and 51.7s
-            # against the old 60s default).
-            "INFERENCE_CLOUD_MAX_TOKENS": str(SYNTHESIS_MAX_TOKENS),
-            "INFERENCE_CLOUD_TIMEOUT": str(SYNTHESIS_TIMEOUT_S),
-        }
+        service_env = service_env_for(npu=args.npu, model_url=model_url)
         service = spawn("service", [str(BIN / "synapse-service"),
                                     "--host", args.host], service_env)
         if not wait_for(f"{service_url}/debug", service, "service"):
@@ -423,10 +437,23 @@ def main(argv: list[str] | None = None) -> int:
     scratch = STATE / "scratch-transcript.jsonl"
     scratch.parent.mkdir(parents=True, exist_ok=True)
     scratch.touch(exist_ok=True)
+    # `scope="machine"` is load-bearing, not decoration (W2, 2026-08-06). This
+    # script runs BEFORE any conversation exists, so it cannot know a real
+    # Agent Session id and `as-<contributor>` is a LABEL, never an id anything
+    # can match. Every real Claude Code window reports its own `session_id`, so
+    # the freshness hook's exact-match gate could never fire against this file
+    # and the pointer was structurally silent on the one path docs/JOIN.md
+    # documents — verified by running the shipped hook as a subprocess: with a
+    # stdin session_id it emitted nothing at all, and only the TTY/no-id case
+    # spoke. `scope="machine"` is what says "this MACHINE is joined; any
+    # conversation here speaks for it, under its own real session id", which
+    # both the hook (`_resolve_binding`) and the orchestrator
+    # (`_effective_binding`) act on.
     write_binding(STATE / "bindings" / "claude-code.json", SessionBinding(
         agent_session_id=f"as-{args.contributor}",
         shared_id=shared_id, contributor=args.contributor, agent="claude-code",
-        transcript_path=str(scratch), pinned_at=datetime.now(timezone.utc)))
+        transcript_path=str(scratch), pinned_at=datetime.now(timezone.utc),
+        scope="machine"))
 
     orchestrator_env = {"SYNAPSE_BASE_URL": model_url,
                         "SYNAPSE_DISTILLER": args.distiller}

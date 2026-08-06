@@ -15,7 +15,16 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from synapse_providers.anthropic_provider import AnthropicProvider, _tighten_schema
+import pytest
+
+from synapse_providers.anthropic_provider import (
+    DEFAULT_MAX_TOKENS,
+    HAIKU_MAX_TOKENS,
+    MAX_TOKENS_ENV,
+    AnthropicProvider,
+    _tighten_schema,
+    default_max_tokens_for,
+)
 
 SCHEMA = {
     "type": "object",
@@ -335,3 +344,178 @@ async def test_latency_and_provider_id_are_populated() -> None:
 
     assert result.latency_ms >= 0
     assert result.provider_id == "anthropic"
+
+
+# --- the Haiku output-cap pin (decisions/006) ------------------------------------
+#
+# 16000 is sized for Opus 5, where max_tokens caps thinking PLUS text and
+# thinking is on by default. Haiku carries no such thinking overhead, so the
+# same ceiling is several times more room than a findings object can use — and
+# several times the exposure when a small model degenerates into a repetition
+# loop, the failure `distiller.classify_drop` exists to name. A cap is the only
+# thing that bounds a loop's cost.
+#
+# The pin lives in the PROVIDER, not in config/synapse.toml, because synthesis
+# reads `provider.max_tokens` (`SynthesisBudget.for_provider`) and never reads a
+# capability record — a config-only cap would be inert on the arm it was written
+# for. Full reasoning and the undo path: docs/overnight/decisions/006.
+
+
+@pytest.fixture(autouse=True)
+def _no_anthropic_env(monkeypatch):
+    """Both variables this provider reads, cleared. `SYNAPSE_ANTHROPIC_MODEL`
+    matters as much as the max-tokens one: an exported Haiku model in the
+    runner's environment would silently turn the Opus-default assertions in
+    this file into Haiku assertions, and they would keep passing while
+    asserting the wrong thing."""
+    monkeypatch.delenv("SYNAPSE_ANTHROPIC_MODEL", raising=False)
+    monkeypatch.delenv(MAX_TOKENS_ENV, raising=False)
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "claude-haiku-4-5",
+        "claude-haiku-4-5-20251001",
+        "claude-haiku-5",
+        "CLAUDE-HAIKU-4-5",
+    ],
+)
+async def test_every_haiku_spelling_gets_the_pinned_cap(model: str) -> None:
+    """Swept, and this is the whole reason the table matches a substring.
+
+    The arm is chosen by SYNAPSE_ANTHROPIC_MODEL — free text — and this repo
+    already carries two spellings (scripts/serve_local.py's help text says
+    `claude-haiku-4-5-20251001`; the API alias is `claude-haiku-4-5`). An
+    exact-match table would fall back to 16000 for whichever spelling it did
+    not list, which is failing OPEN on the number that costs money. A dated
+    successor id is swept for the same reason.
+    """
+    provider, client = _provider(_text_response("ok"), model=model)
+
+    await provider.complete(messages=[{"role": "user", "content": "hi"}])
+
+    assert provider.max_tokens == HAIKU_MAX_TOKENS == 4096
+    assert client.messages.last_kwargs["max_tokens"] == HAIKU_MAX_TOKENS
+
+
+async def test_the_pin_applies_when_the_model_comes_from_the_environment(
+    monkeypatch,
+) -> None:
+    """THE path that matters. All three call sites — worker, orchestrator,
+    service — construct `AnthropicProvider()` with NO arguments and select the
+    model purely through SYNAPSE_ANTHROPIC_MODEL, so a pin that only fired for
+    an explicit `model=` argument would never fire in production."""
+    monkeypatch.setenv("SYNAPSE_ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
+
+    provider, client = _provider(_text_response("ok"))
+    await provider.complete(messages=[{"role": "user", "content": "hi"}])
+
+    assert provider.max_tokens == HAIKU_MAX_TOKENS
+    assert client.messages.last_kwargs["max_tokens"] == HAIKU_MAX_TOKENS
+
+
+@pytest.mark.parametrize(
+    "model",
+    ["claude-opus-5", "claude-sonnet-5", "claude-opus-4-8", "some-unlisted-model"],
+)
+async def test_no_other_model_is_lowered_by_the_pin(model: str) -> None:
+    """The false-positive direction, and the guard on the substring match.
+
+    A per-model cap that quietly applied to everything would be a blanket
+    lowering — it would cut Opus 5 to a quarter of the room its always-on
+    thinking needs, and the JSON would come back truncated mid-object. An
+    unlisted model must keep the generous default rather than inherit the
+    tightest entry in the table.
+    """
+    provider, client = _provider(_text_response("ok"), model=model)
+
+    await provider.complete(messages=[{"role": "user", "content": "hi"}])
+
+    assert provider.max_tokens == DEFAULT_MAX_TOKENS == 16000
+    assert client.messages.last_kwargs["max_tokens"] == DEFAULT_MAX_TOKENS
+
+
+def test_the_pin_is_a_real_reduction_not_a_restatement() -> None:
+    """The ADR-0005 trap for this change: if HAIKU_MAX_TOKENS were ever edited
+    to equal DEFAULT_MAX_TOKENS, every test above would still pass while the
+    pin did nothing at all."""
+    assert HAIKU_MAX_TOKENS < DEFAULT_MAX_TOKENS
+    assert default_max_tokens_for("claude-haiku-4-5") != default_max_tokens_for(
+        "claude-opus-5"
+    )
+
+
+def test_the_pinned_cap_is_ours_and_not_the_endpoints() -> None:
+    """Recorded as an assertion because a docstring alone gets skimmed.
+
+    `claude-haiku-4-5` serves a 200K context and will return up to 64K output
+    tokens — 4096 is a spend and shape decision of ours. A number that looks
+    like a platform limit stops being questioned, and this is the one an
+    operator is most likely to want to move.
+    """
+    assert HAIKU_MAX_TOKENS < 64000, (
+        "if this ever equals Haiku's real output ceiling the pin has become a "
+        "restatement of the endpoint rather than a decision — see decisions/006"
+    )
+
+
+# --- the config override ---------------------------------------------------------
+
+
+@pytest.mark.parametrize("model", ["claude-haiku-4-5", "claude-opus-5"])
+async def test_the_env_override_wins_on_every_arm(monkeypatch, model: str) -> None:
+    """`SYNAPSE_ANTHROPIC_MAX_TOKENS`, named to match AIC100Provider's
+    INFERENCE_CLOUD_MAX_TOKENS, which exists for exactly this reason and records
+    it: the worker, the orchestrator, and the service all construct this
+    provider with no arguments, so a constructor default is reachable only from
+    Python and cannot be changed on a running deployment.
+
+    Asserted on both arms, because an override that only worked where the pin
+    applies would leave the default arm unadjustable — the very situation the
+    variable exists to end.
+    """
+    monkeypatch.setenv(MAX_TOKENS_ENV, "2048")
+
+    provider, client = _provider(_text_response("ok"), model=model)
+    await provider.complete(messages=[{"role": "user", "content": "hi"}])
+
+    assert provider.max_tokens == 2048
+    assert client.messages.last_kwargs["max_tokens"] == 2048
+
+
+async def test_the_override_can_raise_the_cap_as_well_as_lower_it(monkeypatch) -> None:
+    """A pin nobody can loosen is a ceiling, not a default. If a Haiku run
+    genuinely needs more room, the override has to be able to grant it —
+    otherwise the only way past 4096 is a code change and a redeploy."""
+    monkeypatch.setenv(MAX_TOKENS_ENV, "32000")
+
+    provider, _ = _provider(_text_response("ok"), model="claude-haiku-4-5")
+
+    assert provider.max_tokens == 32000
+    assert provider.max_tokens > HAIKU_MAX_TOKENS
+
+
+async def test_an_explicit_argument_still_beats_the_per_model_pin() -> None:
+    """The pin is a DEFAULT, not a clamp. The NPU arm and ClaudeCliProvider are
+    both handed an explicit number by their caller; this provider must behave
+    the same way when asked."""
+    provider, client = _provider(
+        _text_response("ok"), model="claude-haiku-4-5", max_tokens=9001
+    )
+
+    await provider.complete(messages=[{"role": "user", "content": "hi"}])
+
+    assert provider.max_tokens == 9001
+    assert client.messages.last_kwargs["max_tokens"] == 9001
+
+
+async def test_an_empty_override_is_not_read_as_a_cap_of_zero(monkeypatch) -> None:
+    """An exported-but-empty variable is an ordinary shell accident, and
+    `int("")` raises. Falling through to the resolved default is the only safe
+    reading — a cap of 0 would make every response empty."""
+    monkeypatch.setenv(MAX_TOKENS_ENV, "")
+
+    provider, _ = _provider(_text_response("ok"), model="claude-haiku-4-5")
+
+    assert provider.max_tokens == HAIKU_MAX_TOKENS

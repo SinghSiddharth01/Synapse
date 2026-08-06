@@ -31,12 +31,12 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from synapse_contracts import AgentEvent, LocalBinding, Segment, read_binding
+from synapse_contracts import AgentEvent, LocalBinding, Segment
 from synapse_distiller import Distiller
 from synapse_distiller.guards import PromptDropError
 
 from synapse_worker.compaction import compact
-from synapse_worker.discovery import binding_path_for_agent
+from synapse_worker.discovery import has_per_session_bindings, resolve_agent_binding
 from synapse_worker.discovery import AGENT_REGISTRY
 from synapse_worker.follower import TranscriptFollower
 from synapse_worker.producer import Producer
@@ -103,6 +103,7 @@ class WorkerLoop:
         idle_flush_seconds: float = 120.0,
         triage_enabled: bool = True,
         stats: StatsBuffer | None = None,
+        session_identified: bool = True,
     ) -> None:
         self.transcript = Path(transcript)
         self.distiller = distiller
@@ -137,6 +138,15 @@ class WorkerLoop:
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.stats = stats
         self.agent = agent
+        # Does `binding.agent_session_id` name a REAL Agent Session — one a
+        # `join` could have written a per-session binding for — or is it a
+        # stand-in? True for every resolved run (`join`-pinned or detected),
+        # and for direct construction, which is what tests do with a real id.
+        # False only for `run --transcript <path>`, where `cli._build` has
+        # nothing but the file's stem to put there and the stem is not a
+        # session id for every agent (a Codex rollout is
+        # `rollout-<ts>-<uuid>.jsonl`). See `_sync_binding_from_disk`.
+        self.session_identified = session_identified
 
         self.follower = TranscriptFollower(self.state_dir / "follow-state.json")
         # Dispatched through AGENT_REGISTRY rather than hard-coded, so a
@@ -212,9 +222,21 @@ class WorkerLoop:
         transcript content) and at the top of `shutdown()` — anywhere this
         loop is about to consult or act on "the current binding".
 
+        Since W2 this asks for THIS loop's own Agent SESSION first
+        (`bindings/<agent>/<agent_session_id>.json`) and only falls back to
+        the product-level "most recently pinned" answer when this session has
+        no binding of its own AND either nothing else has one either (the
+        pre-W2 state, and the state of a `run` that was never joined at all)
+        or this loop has no verified identity to compare with
+        (`session_identified=False`, i.e. `run --transcript`). Without the
+        session-first lookup, two windows on one machine would re-join each
+        other: window B's join would move window A's Producer, because both
+        were reading the same single file.
+
         Deliberately narrow: only a REAL on-disk join binding for THIS
-        loop's own Agent product (`binding_path_for_agent(state_dir,
-        self.binding.agent)`) can move the Producer's target, and only when
+        loop's own Agent product AND, where one exists, its own Agent Session
+        (`resolve_agent_binding(state_dir, self.binding.agent,
+        self.binding.agent_session_id)`) can move the Producer's target, and only when
         its `shared_id` actually differs from what's currently bound — an
         absent file (never joined, or `--transcript`/`--shared-id` used
         directly) leaves the constructed binding untouched, exactly as
@@ -223,7 +245,33 @@ class WorkerLoop:
         same shape of file fresh on every POST
         (`_resolve_binding_for_agent`).
         """
-        joined = read_binding(binding_path_for_agent(self.state_dir, self.binding.agent))
+        agent = self.binding.agent
+        joined = resolve_agent_binding(self.state_dir, agent, self.binding.agent_session_id)
+        if joined is None and (
+            not self.session_identified
+            or not has_per_session_bindings(self.state_dir, agent)
+        ):
+            # Two states where "no binding for my session" is NOT "somebody
+            # else's join", and the pre-W2 product-level answer is the honest
+            # one:
+            #
+            # - Nothing has joined under the per-session layout for this
+            #   product, so the legacy file is the only binding on this machine
+            #   and it is this conversation's by default — a tree written
+            #   before W2, or one whose join has not happened yet.
+            # - This loop does not know which conversation it is at all
+            #   (`run --transcript`, `session_identified=False`): its
+            #   `agent_session_id` is a filename stem nothing verified, so it
+            #   can never match a real per-session binding and, without this
+            #   arm, trap #8's live re-join would be MISSED for the whole class
+            #   of runs started that way — narrowly, only once some OTHER
+            #   window had a per-session binding on disk, which is why it
+            #   survived the pass-1 tests (2026-08-06 review, reproduced).
+            #
+            # In every other case a per-session binding exists for somebody and
+            # is not mine, which means exactly that: another window's join is
+            # not a re-join of mine.
+            joined = resolve_agent_binding(self.state_dir, agent)
         if joined is not None and joined.shared_id != self.producer.shared_id:
             logger.info(
                 "Live re-join detected (%r -> %r); syncing the write-ahead "

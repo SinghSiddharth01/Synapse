@@ -230,16 +230,20 @@ resync independently after a host restart.
 **Cause.** Suppression (invariant 3) hides a finding from an asker only when
 every attribution on it is the asker's own — the mechanism lives in
 `visible_to` (`packages/service/src/synapse_service/retrieval.py:41-75`).
-**Which identity field the comparison keys on is under revision as of
-2026-08-06** — check `CONTEXT.md` and `docs/adr/0002` for the current state
-before relying on this in a specific way; do not assume either "Contributor"
-or "Agent Session" scoping from an older doc without cross-checking the
-code. What's stable regardless of the key: a finding with zero attributions
-is never suppressed (the empty-list guard exists on purpose,
-`retrieval.py:64-68`), and a request in the old wire shape (`agent_session`
-only, no `contributor`) is still handled — `api._legacy_agent_session` — so
-an un-upgraded client's suppression behaviour doesn't silently change
-depending on when the service and orchestrator each redeploy.
+**Which identity field the comparison keys on was under revision through
+2026-08-06 and is now settled** (`docs/overnight/decisions/001`, and the
+CONTEXT.md note it landed with): suppression keys on the **Agent Session**,
+the watermark on the **Contributor**. Two windows of one human are two
+participants — each sees the other's findings, neither sees its own — while
+`last_seen` is still per person, so a new conversation does not replay the
+memory. Do not assume single-key scoping from an older doc without
+cross-checking the code. What's stable regardless of the key: a finding with
+zero attributions is never suppressed (the empty-list guard exists on
+purpose), and a request in the old wire shape (`agent_session` only, no
+`contributor`) is handled by the primary path rather than a special case,
+since that field is the key again — so an un-upgraded client's suppression
+behaviour doesn't silently change depending on when the service and
+orchestrator each redeploy.
 
 **Fix.** If findings you expect to see are missing or findings you expect
 suppressed are showing, check which identity (`contributor` vs
