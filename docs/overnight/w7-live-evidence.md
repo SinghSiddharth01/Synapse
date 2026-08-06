@@ -129,17 +129,46 @@ was the same shape: 48.0s total, 35.9s of it the distiller call.
 
 > Joined Shared Session sh-d5397a07 as sid, and bound claude-code conversation 79e2ca77-71d4-46cd-8088-1e9288928971 (…/79e2ca77-….jsonl) to it. Findings from this conversation now go to sh-d5397a07. Call `query` before investigating anything — the team may already know it.
 
-**query as A** — the attribution beat. First two lines only; the other seven are
-in §5 because of what they are:
+**query as A** — the attribution beat. The whole response, verbatim, all nine
+lines in the order returned. Quoting only the first two (an earlier draft of this
+file did) hid the split that is the night's actual finding, and left one line
+unaccounted for in every count below:
 
 > What the team already knows about this — each line is one teammate's finding, and who found it:
 > - [decision] Use the local command-line distiller as a workaround on this machine instead of the primary distiller. — sid
 > - [learning] Authentication credential field can be present but contain an empty string, causing silent authentication failures when the credential provider does not validate the field and defers to the SDK, which reports a generic error. — sid
+> - [decision] Message queue was moved to a durable broker so messages are not lost under load. — sid
+> - [learning] An alternative distiller implementation that shells out to a local command-line tool requires no separate credential configuration. — sid
+> - [open_question] The impact of the added network round trip on overall page latency has not been measured. — sid
+> - [dead_end] Caching rendered templates in each worker's local memory fails across multiple workers: copies drift after deploys, and users get stale pages depending on which worker serves them. — sid
+> - [learning] The durable broker's throughput is roughly one-third that of the in-memory queue, because each message waits for a disk write before being acknowledged. — sid
+> - [decision] Template cache was moved to a shared store that every worker reads from, replacing per-worker in-memory caching. — sid
+> - [learning] Accessing the template cache from a shared store adds a network round trip to every render. — sid
+>
+> If one of these explains the problem in front of you, tell the user now and credit whoever found it, rather than re-deriving it. Then verify only what your particular situation could change, and say what you are checking and why.
 
-Those two are genuine: they are what the contributed paragraph actually said,
-distilled and de-identified (note the pack's no-identifiers rule doing its job —
-"the credential provider", not "secrets.jsonc"). Attribution is correct and
-present on every line.
+Nine lines, and they are **not** nine of a kind. Classified — the numbering is
+this document's, the response carried no labels:
+
+| # | Type | Provenance in truth |
+|---|---|---|
+| 1 | `decision` | **Genuine** — the contributed paragraph's disposition |
+| 2 | `learning` | **Genuine** — the empty-string credential, de-identified |
+| 3 | `decision` | Pack echo — few-shot 1 (F1) |
+| 4 | `learning` | **Genuine** — why the claude-cli arm needs no credential |
+| 5 | `open_question` | Pack echo — few-shot 2 (F1) |
+| 6 | `dead_end` | Pack echo — few-shot 2 (F1) |
+| 7 | `learning` | Pack echo — few-shot 1 (F1) |
+| 8 | `decision` | Pack echo — few-shot 2 (F1) |
+| 9 | `learning` | Pack echo — few-shot 2 (F1) |
+
+**Three genuine, six echoes.** That is the arithmetic §5's F1 rests on, and it is
+now stated in one place instead of implied across two. The three genuine ones are
+what the contributed paragraph actually said, distilled and de-identified (note
+the pack's no-identifiers rule doing its job — "the credential provider", not
+"secrets.jsonc"). Attribution is correct and present on every line, echo or not
+— which is precisely why F1 matters. The type counts match the watermark's
+`by_type` in §7 exactly: `decision: 3, learning: 4, dead_end: 1, open_question: 1`.
 
 **query as B** — the suppression beat, and the one that proves attribution is
 per-*conversation* and not per-person:
@@ -381,7 +410,18 @@ Does not prove:
 
 ## 7. Raw payloads worth keeping
 
-Watermark as the rejoining conversation's briefing sees it (run 2, step 8):
+The watermark read with C's id as the asking conversation (run 2, step 8).
+**Read the ordering carefully, because an earlier draft of this caption claimed
+more than the payload supports.** This GET is issued at step 8 — *before* C joins
+(step 10) and *before* the briefing is read (step 11). So it is a corroborating
+proxy read against an id not yet bound to the session, not the input the step-11
+briefing was composed from. Its numbers do agree with that briefing (9 findings,
+`new_since: 0`), which is the reason it is worth keeping; it is evidence *for*
+the briefing, not the briefing's own source. The driver carries the same
+overstatement in its own recorded note (`scripts/_w7_drive.py:299`, "what the
+rejoining conversation's briefing is composed from") and that line is
+deliberately **left unedited**, so the committed script stays byte-identical to
+the one that produced these payloads.
 
 ```json
 {"version": 1, "new_since": 0,
@@ -450,3 +490,51 @@ The throwaway `~/.claude/projects/-private-var-folders-…-synapse-w7-drive-*`
 slug directories from both runs were removed by the driver's `finally` block and
 verified gone. No secrets were read, copied, printed or committed:
 `secrets.jsonc` was never brought into this worktree.
+
+---
+
+## 10. Verification pass (after the fact)
+
+This file was reviewed against the code and against the driver's own recorded
+transcripts (`/tmp/w7_drive.json`, `/tmp/w7_drive2.json`) by a second pass that
+did **not** re-run the arc — re-running is the orchestrator's call, not the
+reviewer's. Two defects were found, both in *this document*, neither in the
+stack, and both are fixed above:
+
+1. **An accounting gap in §3.** The old text quoted 2 of the 9 returned findings
+   and said "the other seven are in §5", while §5 accounts for six and its own
+   closing line implies three genuine. Six echoes + three genuine = nine
+   reconciles, but the third genuine finding was never quoted or classified
+   anywhere. §3 now quotes all nine verbatim from the recorded run-2 payload and
+   classifies each.
+2. **A mislabelled payload in §7.** The first block was captioned as what the
+   rejoining conversation's briefing sees. Per `scripts/_w7_drive.py:294-299`
+   that GET is issued at step 8, before the rejoin (step 10) and before the
+   briefing read (step 11). The caption now says what it actually is.
+
+Independently re-checked and **confirmed**, no change needed: the rejoin is a
+genuinely new `agent_session_id` (`_w7_drive.py:347` mints three independent
+`uuid4`s; `_bind` resolves each through `find_transcript_by_session_id`, which
+refuses rather than falling back to mtime); the two participants are proven by
+*asymmetry* rather than relabelling (A gets 9 attributed findings, B gets
+"nothing relevant" for the identical question, `leave_session(B)` detaches B
+while A stays bound); `claude_cli_provider.py` has **no** canned or fixture path,
+so F1 is the model echoing its own few-shots and not a stub replaying a corpus;
+the diff against `origin/main` is exactly these two files with **zero**
+production-code changes, so nothing structural was smuggled in as a "small fix";
+`server._identity()` does read `binding.contributor`, so F4's single-contributor
+ceiling is architectural and correctly disclosed; `api.py:662` does compute
+`new_since` contributor-keyed, so §4's `0` is by design; the quoted briefing
+matches `briefing.py` word for word, and the boot banner matches
+`serve_local.py`. `git merge-base --is-ancestor 0b7e21b origin/main` exits 0 and
+no commit has touched `briefing.py` on `main` since that base, so "pre-W5
+briefing" still holds.
+
+Ports re-verified free at review time, one `lsof` per port: 8899, 8787 and 18181
+all exit 1, and
+`pgrep -fl 'serve_local|synapse-service|synapse-orchestrator|local_model_server|synapse-worker'`
+exits 1. Nothing from this workstream is running. `secrets.jsonc` is absent from
+the worktree and absent from the commit. Suite re-run at the reviewed HEAD:
+`1109 passed, 1 warning in 36.18s`.
+
+No section of this file is disputed: neither defect invalidates a live result.
