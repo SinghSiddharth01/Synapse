@@ -31,6 +31,7 @@ Round 2 found this module's promises weren't actually enforced:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 
@@ -132,8 +133,15 @@ async def build_briefing(binding: LocalBinding | None, service_url: str, *,
             "dead end. Call `contribute` when you learn something non-obvious a "
             "teammate would benefit from. "
             f"Team memory holds {total} findings ({types}), "
-            f"{conflicts} conflict(s), at version v{version} — "
-            f"{new_since} new since you last looked."
+            f"{conflicts} conflict(s), at version v{version}, which has moved "
+            # `new_since` is a VERSION delta (api.py: memory_version minus this
+            # asker's last_seen), not a count of findings. Sitting one clause
+            # after "holds 6 findings", the old wording — "1 new since you last
+            # looked" — read as "one new finding", which is a different and
+            # much smaller claim than "the memory changed once since you were
+            # last here". Agents act on this sentence; it has to mean what it
+            # says.
+            f"{new_since} version(s) since you last looked."
             f"{topics_clause}"
         )
     except Exception as exc:  # FAIL OPEN: nothing escapes this function, ever
@@ -143,3 +151,94 @@ async def build_briefing(binding: LocalBinding | None, service_url: str, *,
     if len(text) > _MAX_BRIEFING_CHARS:
         text = text[: _MAX_BRIEFING_CHARS - 1].rstrip() + "…"
     return text
+
+
+# ---------------------------------------------------------------------------
+# Keeping the briefing TRUE after boot
+# ---------------------------------------------------------------------------
+#
+# `instructions` is composed once and handed to `create_mcp`, which stores it
+# on the low-level MCP server. That was a snapshot of the Shared Session at
+# the moment `synapse-orchestrator` started, frozen for the life of the
+# process — and the briefing is the one signal whose entire job is to tell an
+# ARRIVING agent what is already known.
+#
+# Observed 2026-08-05: an orchestrator started against an empty session kept
+# telling every Claude Code session that connected afterwards "Team memory
+# holds 0 findings", while `query` on the same connection returned six. Worse
+# than cosmetic: an agent told the shelf is empty has no reason to reach for
+# it, which defeats the signal rather than degrading it.
+#
+# The same staleness hid a second case. `resolve_binding` is re-read per call
+# by every tool (server.py) precisely so a `join` after boot works without a
+# restart — but the briefing was composed from the binding as it was AT boot,
+# so an orchestrator started before `join` went on introducing itself as
+# unbound forever.
+#
+# `create_initialization_options()` reads `self.instructions` fresh on every
+# new connection (mcp 1.9.4, streamable_http_manager), so keeping that
+# attribute current is enough: each arriving agent gets a current briefing,
+# and sessions already open keep the one they arrived with, which is correct
+# for an *arrival* briefing.
+
+DEFAULT_REFRESH_SECONDS = 10.0
+
+
+async def refresh_briefing(server, resolve_binding, service_url: str, *,
+                           transport: httpx.AsyncBaseTransport | None = None) -> str:
+    """Recompose the briefing from the CURRENT binding and install it.
+
+    `resolve_binding` is called here, not captured: a `join` that happened
+    after boot has to be able to change who this server says it is.
+    """
+    text = await build_briefing(resolve_binding(), service_url, transport=transport)
+    # The low-level server is the one place this lives: it is what
+    # `create_initialization_options()` reads for each new connection, and
+    # `FastMCP.instructions` is a read-only property delegating to it, so the
+    # two cannot drift apart.
+    server._mcp_server.instructions = text
+    return text
+
+
+def attach_briefing_refresher(app, server, resolve_binding, service_url: str, *,
+                              interval: float = DEFAULT_REFRESH_SECONDS,
+                              transport: httpx.AsyncBaseTransport | None = None) -> None:
+    """Refresh `instructions` for as long as the app is actually serving.
+
+    Hung off the ASGI lifespan rather than a thread so the task cannot
+    outlive the server, and so a `uvicorn.run` that never runs (every test in
+    test_cli.py monkeypatches it) never starts one either.
+    """
+    # Reachable from the app for tests and debugging: nothing else on a
+    # FastMCP-built Starlette app leads back to the server object.
+    app.state.synapse_mcp = server
+
+    if interval <= 0:
+        return
+
+    import contextlib
+
+    inner = app.router.lifespan_context
+
+    async def _loop() -> None:
+        while True:
+            try:
+                await refresh_briefing(server, resolve_binding, service_url,
+                                       transport=transport)
+            except Exception:  # noqa: BLE001 — fail open, same as build_briefing
+                logger.debug("Briefing refresh failed; keeping the previous one",
+                             exc_info=True)
+            await asyncio.sleep(interval)
+
+    @contextlib.asynccontextmanager
+    async def _lifespan(scope_app):
+        task = asyncio.create_task(_loop())
+        try:
+            async with inner(scope_app):
+                yield
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    app.router.lifespan_context = _lifespan

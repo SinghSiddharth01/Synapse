@@ -462,3 +462,59 @@ async def test_query_and_contribute_pick_up_a_join_that_happens_after_registrati
         "http://svc/v1/sessions/sh-late/query",       # query() -> the SAME session — they agree
     ]
     assert bodies[0]["findings"][0]["attributions"][0]["agent_session"] == "as-1"
+
+
+# --- the briefing must not be a boot-time snapshot -------------------------
+
+
+async def test_refresh_briefing_picks_up_findings_that_landed_after_boot():
+    """Observed live 2026-08-05: an orchestrator started against an empty
+    session kept telling every agent that connected later "0 findings" while
+    `query` on the same connection returned six. An agent told the shelf is
+    empty has no reason to reach for it."""
+    from synapse_orchestrator.briefing import refresh_briefing
+    from synapse_orchestrator.server import create_mcp
+
+    counts = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={
+            "version": counts["n"], "new_since": counts["n"],
+            "by_type": {"learning": counts["n"]} if counts["n"] else {},
+            "conflicts": 0, "working_memory": "", "purpose": "p", "members": [],
+        })
+
+    binding = LocalBinding(agent_session_id="as-1", shared_id="sh-1",
+                           contributor="me", agent="claude-code")
+    server = create_mcp(await build_briefing(
+        binding, "http://svc", transport=httpx.MockTransport(handler)))
+    assert "0 findings" in server._mcp_server.instructions
+
+    counts["n"] = 6                                  # a teammate pushes
+    await refresh_briefing(server, lambda: binding, "http://svc",
+                           transport=httpx.MockTransport(handler))
+    assert "6 findings" in server._mcp_server.instructions
+
+
+async def test_refresh_briefing_rereads_the_binding_so_a_post_boot_join_lands():
+    """`resolve_binding` is called at refresh time, never captured: an
+    orchestrator started before `synapse-worker join` otherwise introduces
+    itself as unbound for the life of the process."""
+    from synapse_orchestrator.briefing import refresh_briefing
+    from synapse_orchestrator.server import create_mcp
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={
+            "version": 1, "new_since": 1, "by_type": {"learning": 1},
+            "conflicts": 0, "working_memory": "", "purpose": "p", "members": [],
+        })
+
+    joined: list[LocalBinding] = []
+    server = create_mcp(await build_briefing(None, "http://svc"))
+    assert "sh-" not in server._mcp_server.instructions      # unbound at boot
+
+    joined.append(LocalBinding(agent_session_id="as-1", shared_id="sh-late",
+                               contributor="me", agent="claude-code"))
+    await refresh_briefing(server, lambda: joined[-1] if joined else None,
+                           "http://svc", transport=httpx.MockTransport(handler))
+    assert "sh-late" in server._mcp_server.instructions

@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import time
+
 import httpx
 from starlette.testclient import TestClient
 
@@ -599,3 +601,55 @@ def test_build_npu_distiller_matches_the_workers_config_pack_and_model(monkeypat
         "base_url": "http://fake-npu/v1", "model": "fake-model",
         "max_tokens": 111, "temperature": 0.5, "timeout": 7.0,
     }
+
+
+def test_main_attaches_the_briefing_refresher_so_it_does_not_stay_a_boot_snapshot(
+    monkeypatch, tmp_path
+) -> None:
+    """Kills the mutant that drops `attach_briefing_refresher` from main().
+
+    Without it, `instructions` is whatever the session looked like the
+    instant `synapse-orchestrator` started, for the life of the process —
+    observed live 2026-08-05 as an orchestrator telling every agent that
+    connected "0 findings" while `query` returned six on the same
+    connection. Drives the REAL app handed to `uvicorn.run`, and runs its
+    lifespan, so it pins the composition rather than the helper.
+    """
+    captured: dict = {}
+    monkeypatch.setattr(cli.uvicorn, "run", lambda app, **kw: captured.setdefault("app", app))
+
+    findings = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/watermark"):
+            return httpx.Response(200, json={
+                "version": findings["n"], "new_since": findings["n"],
+                "by_type": {"learning": findings["n"]} if findings["n"] else {},
+                "conflicts": 0, "working_memory": "", "purpose": "p", "members": [],
+            })
+        return httpx.Response(200, json={"accepted": 1, "memory_version": 1})
+
+    write_binding(tmp_path / "bindings" / "claude-code.json", SessionBinding(
+        agent_session_id="as-1", shared_id="sh-1", contributor="me",
+        agent="claude-code", transcript_path=str(tmp_path / "t.jsonl"),
+        pinned_at=datetime.now(timezone.utc)))
+
+    cli.main(["--state-dir", str(tmp_path), "--briefing-refresh", "0.01"],
+             transport=httpx.MockTransport(handler))
+    app = captured["app"]
+
+    findings["n"] = 6                       # a teammate pushes AFTER boot
+    with TestClient(app):
+        deadline = time.time() + 3.0
+        while time.time() < deadline:
+            if "6 findings" in (cli_server_instructions(app) or ""):
+                break
+            time.sleep(0.02)
+    assert "6 findings" in (cli_server_instructions(app) or ""), (
+        "the briefing never refreshed — it is still the boot snapshot"
+    )
+
+
+def cli_server_instructions(app) -> str | None:
+    """The instructions string the next MCP client would receive."""
+    return app.state.synapse_mcp._mcp_server.instructions

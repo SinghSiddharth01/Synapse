@@ -27,7 +27,11 @@ import uvicorn
 from synapse_contracts import LocalBinding
 from synapse_contracts.binding import read_binding
 from synapse_orchestrator.app import build_app
-from synapse_orchestrator.briefing import build_briefing
+from synapse_orchestrator.briefing import (
+    DEFAULT_REFRESH_SECONDS,
+    attach_briefing_refresher,
+    build_briefing,
+)
 from synapse_orchestrator.relay import Relay
 from synapse_orchestrator.server import create_mcp, register_tools
 
@@ -121,6 +125,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, default=8787)
     parser.add_argument("--state-dir", default=".synapse")
     parser.add_argument("--service-url", default="http://127.0.0.1:8899")
+    parser.add_argument("--briefing-refresh", type=float,
+                        default=DEFAULT_REFRESH_SECONDS, metavar="SECONDS",
+                        help="how often to recompose the arrival briefing so "
+                             "agents connecting later see current numbers "
+                             "(0 disables)")
     parser.add_argument("-v", "--verbose", action="store_true")
 
     sub = parser.add_subparsers(dest="command")
@@ -268,6 +277,13 @@ def main(argv: list[str] | None = None, *,
     register_tools(server, resolve_binding=resolve_binding, service_url=args.service_url,
                    relay=relay, distiller_factory=build_npu_distiller, transport=transport)
     app = build_app(relay, server, resolve_binding_for_agent=resolve_binding_for_agent)
+    # The briefing above is a snapshot of this instant. Keep it true for
+    # agents that arrive later, and for a `join` that happens after this
+    # process started — see briefing.py's "Keeping the briefing TRUE after
+    # boot". Hung off the app lifespan, so it lives exactly as long as the
+    # server does.
+    attach_briefing_refresher(app, server, resolve_binding, args.service_url,
+                              interval=args.briefing_refresh, transport=transport)
     print(f"synapse-orchestrator on http://{args.host}:{args.port} "
           f"(mcp at /mcp, producer at /producer/findings, "
           f"session: {shared_id or 'unbound'})")
