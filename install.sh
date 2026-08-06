@@ -33,6 +33,16 @@ say()  { printf '%s\n' "$*"; }
 step() { printf '\n==> %s\n' "$*"; }
 die()  { printf 'install.sh: %s\n' "$*" >&2; exit 1; }
 
+# One argument per line. Deliberately NOT "$*": collapsing argv into a string
+# renders --purpose "the DMA timing bug" as four words, which is exactly the
+# bug someone would come here to diagnose. What execs is "$@", so what is
+# shown has to have the same boundaries.
+show_args() {
+  for SHOW_ARG in "$@"; do
+    printf '      | %s\n' "$SHOW_ARG"
+  done
+}
+
 usage() {
   cat <<USAGE
 Synapse installer — clones, syncs, checks, and starts the stack.
@@ -112,7 +122,8 @@ done
 say "Synapse installer"
 say "  os        $(uname -s) $(uname -m)"
 if [ "$KEPT" -gt 0 ]; then
-  say "  forward   $* "
+  say "  forward   $KEPT argument(s) to scripts/serve_local.py:"
+  show_args "$@"
 else
   say "  forward   (no serve_local.py flags given)"
 fi
@@ -228,8 +239,13 @@ fi
 # ---------------------------------------------------------------------------
 # P5 — MCP registration + awareness pack. Idempotent.
 # ---------------------------------------------------------------------------
-if [ "$SKIP_MCP" -eq 1 ]; then
-  step "P5  MCP registration — skipped"
+# --doctor-only is a machine INSPECTION. It must not register a server or
+# copy a pack into ~/.claude as a side effect of someone asking "is this box
+# ready?" -- that is a change, and they did not ask for one.
+if [ "$DOCTOR_ONLY" -eq 1 ]; then
+  step "P5  MCP registration — skipped (--doctor-only changes nothing)"
+elif [ "$SKIP_MCP" -eq 1 ]; then
+  step "P5  MCP registration — skipped (--skip-mcp)"
 else
   step "P5  MCP registration"
   # OLDPWD is where the operator was standing before P2's cd. Defaulted for
@@ -279,7 +295,7 @@ fi
 # ---------------------------------------------------------------------------
 # P6 — port hygiene. Only ever under --clean.
 # ---------------------------------------------------------------------------
-if [ "$DO_CLEAN" -eq 1 ]; then
+if [ "$DO_CLEAN" -eq 1 ] && [ "$DOCTOR_ONLY" -eq 0 ]; then
   step "P6  clearing orphaned processes (--clean)"
   pkill -f synapse-service || true
   pkill -f synapse-orchestrator || true
@@ -318,8 +334,8 @@ fi
 # ---------------------------------------------------------------------------
 if [ "$NO_START" -eq 1 ]; then
   step "P7  start — skipped (--no-start)"
-  say "  would have run:"
-  say "    $UV run python scripts/serve_local.py $*"
+  say "  would have exec'd: $UV run python scripts/serve_local.py"
+  show_args "$@"
   exit 0
 fi
 
