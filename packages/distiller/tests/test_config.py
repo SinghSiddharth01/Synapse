@@ -50,6 +50,35 @@ def test_env_overrides_the_file(tmp_path, monkeypatch) -> None:
     assert config.provider.max_tokens == 256
 
 
+def test_max_tokens_is_capped_at_the_reserve_the_budget_was_derived_from(
+    tmp_path, monkeypatch
+) -> None:
+    """`segment_budget` is `usable_context - overhead - response_reserve`, which
+    makes the reserve a promise: the segmenter packed the prompt assuming no
+    more than that would be asked for on top. Requesting more overruns the
+    context on exactly the segments that used their full budget — measured
+    2026-08-06, `max_tokens` 900 against a reserve of 500 put a full segment at
+    2787 + 809 + 900 = 4496 against a 4096 ceiling, and the response came back
+    truncated or degenerate and was dropped after two attempts."""
+    monkeypatch.setenv("SYNAPSE_MAX_TOKENS", "900")
+
+    config = load_config(_write(tmp_path))
+
+    assert config.provider.max_tokens == 900, "the configured value is preserved"
+    assert config.effective_max_tokens == 500, "what is actually requested is not"
+    assert config.effective_max_tokens == config.record.response_reserve
+
+
+def test_max_tokens_below_the_reserve_is_left_alone(tmp_path, monkeypatch) -> None:
+    """The cap is a ceiling, not a target. A provider deliberately configured
+    to ask for less must not be raised up to the reserve."""
+    monkeypatch.setenv("SYNAPSE_MAX_TOKENS", "400")
+
+    config = load_config(_write(tmp_path))
+
+    assert config.effective_max_tokens == 400
+
+
 def test_budget_is_resolved_from_record_and_pack(tmp_path) -> None:
     config = load_config(_write(tmp_path))
     expected = config.record.segment_budget(

@@ -919,6 +919,11 @@ def test_build_npu_distiller_matches_the_workers_config_pack_and_model(monkeypat
         distil_kinds = ("learning", "decision")
         render_style = "labelled"
         provider = FakeProviderConfig()
+        # What the real SynapseConfig resolves: provider.max_tokens capped at
+        # the capability record's response_reserve. Set BELOW max_tokens here so
+        # the assertion below proves the clamped value is the one passed, not
+        # the raw one -- identical values would let a regression pass.
+        effective_max_tokens = 90
 
     fake_pack = object()
     captured_pack_name = []
@@ -948,8 +953,8 @@ def test_build_npu_distiller_matches_the_workers_config_pack_and_model(monkeypat
     assert isinstance(distiller.provider, FakeNPUProvider)
     assert captured_provider_kwargs == {
         "base_url": "http://fake-npu/v1", "model": "fake-model",
-        "max_tokens": 111, "temperature": 0.5, "timeout": 7.0,
-    }
+        "max_tokens": 90, "temperature": 0.5, "timeout": 7.0,
+    }, "contribute() must ask for the SAME clamped max_tokens as the passive path"
 
 
 def test_main_attaches_the_briefing_refresher_so_it_does_not_stay_a_boot_snapshot(

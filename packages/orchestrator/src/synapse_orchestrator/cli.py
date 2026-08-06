@@ -142,10 +142,17 @@ def build_npu_distiller(binding: LocalBinding):
 
         provider = ClaudeCliProvider(max_tokens=config.provider.max_tokens)
     else:
+        # Capped at the capability record's response_reserve, which is the
+        # output room the segment budget was derived by subtracting. Asking for
+        # more overruns the context on a full-budget segment. Clamped in BOTH
+        # places that build this provider -- the "one distiller" property above
+        # is about the pack and the model, and it would be quietly untrue of
+        # max_tokens if contribute() asked for more than the passive path.
+        max_tokens = config.effective_max_tokens
         provider = NPUProvider(
             base_url=config.provider.base_url,
             model=config.model,
-            max_tokens=config.provider.max_tokens,
+            max_tokens=max_tokens,
             temperature=config.provider.temperature,
             timeout=config.provider.timeout_s,
         )

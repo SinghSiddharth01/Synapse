@@ -100,6 +100,13 @@ class WorkerConfig:
     upstream_url: str = "http://127.0.0.1:8787/producer/findings"
     sink_file: str = ".synapse/upstream.jsonl"
     attach_at_end: bool = True
+    # The producer endpoint flushes to the Service before it answers, and that
+    # flush includes synthesis — a model call on the HOST's machine. 30s was
+    # short enough that a normal push timed out on the first try on every batch
+    # and only landed on the write-ahead log's retry. Nothing was lost, but each
+    # batch paid the full timeout first. This is the cheap half of the fix; the
+    # other half is the endpoint not flushing synchronously at all.
+    upstream_timeout_s: float = 120.0
 
 
 @dataclass(frozen=True)
@@ -138,6 +145,23 @@ class SynapseConfig:
                 f"[capability.\"{self.model}\"] block to config/synapse.toml with "
                 f"MEASURED values. Known models: {known}."
             ) from None
+
+    @property
+    def effective_max_tokens(self) -> int:
+        """`provider.max_tokens`, capped at what the budget actually left room for.
+
+        `segment_budget` is derived as `usable_context - overhead -
+        response_reserve`, which makes the reserve a promise: the segmenter
+        packed prompts on the assumption that no more than that many output
+        tokens would be requested. Asking for more overruns the context on
+        precisely the segments that used their whole budget.
+
+        Clamped rather than raised. A CapabilityError here would refuse to start
+        on every config that already carries the (widespread) 900, and the
+        correct behaviour is available without failing: honour the reserve. The
+        caller logs when the clamp bites, so it is visible rather than silent.
+        """
+        return min(self.provider.max_tokens, self.record.response_reserve)
 
     @property
     def segment_budget(self) -> int:
@@ -231,6 +255,10 @@ def load_config(path: str | Path | None = None) -> SynapseConfig:
             sink_file=_env("SINK_FILE")
             or worker_raw.get("sink_file", WorkerConfig.sink_file),
             attach_at_end=bool(worker_raw.get("attach_at_end", True)),
+            upstream_timeout_s=float(
+                _env("UPSTREAM_TIMEOUT")
+                or worker_raw.get("upstream_timeout_s", WorkerConfig.upstream_timeout_s)
+            ),
         ),
         distil_kinds=_parse_kinds(_env("DISTIL_KINDS") or distiller.get("distil_kinds")),
         render_style=_parse_render_style(

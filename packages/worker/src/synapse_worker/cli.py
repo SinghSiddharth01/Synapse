@@ -131,10 +131,26 @@ def _build_distiller_provider(config):
         from synapse_providers import ClaudeCliProvider
 
         return ClaudeCliProvider(max_tokens=config.provider.max_tokens)
+    # The segment budget is derived as `usable_context - overhead -
+    # response_reserve`, so the reserve is a PROMISE about how much output room
+    # the segmenter left behind. Asking the model for more than that overruns
+    # the context on exactly the segments that used their full budget: with
+    # max_tokens 900 against a reserve of 500, a full segment came to
+    # 2787 + 809 + 900 = 4496 against a 4096 ceiling, and the response was
+    # truncated or degenerate. Clamping here (rather than lowering the shared
+    # [provider] value) keeps the cloud arms above, which have their own much
+    # larger reserves, untouched.
+    max_tokens = config.effective_max_tokens
+    if max_tokens < config.provider.max_tokens:
+        logger.info(
+            "provider.max_tokens %d exceeds %s's response_reserve %d; clamping "
+            "to the reserve the segment budget was derived from",
+            config.provider.max_tokens, config.model, config.record.response_reserve,
+        )
     return NPUProvider(
         base_url=config.provider.base_url,
         model=config.model,
-        max_tokens=config.provider.max_tokens,
+        max_tokens=max_tokens,
         temperature=config.provider.temperature,
         timeout=config.provider.timeout_s,
     )
@@ -225,7 +241,7 @@ def _build(args: argparse.Namespace, debug_port: int = 0):
         transcript = resolved.path
 
     sink = (
-        HttpSink(worker_cfg.upstream_url)
+        HttpSink(worker_cfg.upstream_url, timeout=worker_cfg.upstream_timeout_s)
         if worker_cfg.sink == "http"
         else FileSink(Path(worker_cfg.sink_file))
     )
@@ -446,7 +462,7 @@ async def cmd_replay(args: argparse.Namespace) -> int:
     config = load_config()
     state_dir = Path(config.worker.state_dir)
     sink = (
-        HttpSink(config.worker.upstream_url)
+        HttpSink(config.worker.upstream_url, timeout=config.worker.upstream_timeout_s)
         if config.worker.sink == "http"
         else FileSink(Path(config.worker.sink_file))
     )
