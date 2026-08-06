@@ -44,6 +44,12 @@ REPO = Path(__file__).resolve().parent.parent
 STATE = REPO / ".synapse"
 BIN = Path(sys.executable).parent
 
+# The synthesis output budget, and the read timeout that has to travel with it.
+# Both are passed to the service below; see the comment there for why the
+# provider's own defaults could not stay.
+SYNTHESIS_MAX_TOKENS = 1600
+SYNTHESIS_TIMEOUT_S = 180
+
 SERVICE_URL = "http://127.0.0.1:8899"
 ORCHESTRATOR_URL = "http://127.0.0.1:8787"
 STANDIN_URL = "http://127.0.0.1:18181/v1"
@@ -226,6 +232,16 @@ def main(argv: list[str] | None = None) -> int:
                              "credential at all. Either lets several people run the "
                              "full loop at once instead of contending for the one NPU "
                              "box and the ~20-req/hour Cirrascale key.")
+    parser.add_argument("--claude-model", metavar="MODEL",
+                        help="which Claude model does the distilling, for "
+                             "--distiller anthropic or claude-cli. The two want "
+                             "different spellings: `anthropic` takes a full "
+                             "Messages API id (claude-haiku-4-5-20251001), "
+                             "`claude-cli` takes the short alias the binary "
+                             "accepts (haiku, sonnet, opus). Omitted, each "
+                             "provider uses its own default (claude-opus-5, "
+                             "sonnet). Ignored by --distiller npu, which errors "
+                             "rather than pretending it was honoured.")
     parser.add_argument("--listen", action="store_true",
                         help="READ-ONLY: join without any model at all. Queries and "
                              "the arrival briefing work — the HOST's service does "
@@ -235,6 +251,16 @@ def main(argv: list[str] | None = None) -> int:
                         help="a real model is already serving on :18181 (geniex serve) — "
                              "do not start the stand-in")
     args = parser.parse_args(argv)
+
+    # Fail rather than ignore. `--claude-model haiku --distiller npu` is someone
+    # who believes they are running Haiku; silently distilling on the NPU instead
+    # would send them into a demo with a wrong mental model of which arm produced
+    # which finding -- and the findings themselves carry no record of the model,
+    # so nothing downstream would contradict them either.
+    if args.claude_model and args.distiller == "npu":
+        raise SystemExit(
+            "--claude-model only applies to --distiller anthropic or claude-cli.\n"
+            f"You asked for the NPU arm and model {args.claude_model!r}; pick one.")
 
     needed = [8787] + ([] if args.service_url else [8899]) + \
              ([] if (args.listen or args.npu) else [18181])
@@ -296,6 +322,17 @@ def main(argv: list[str] | None = None) -> int:
             "INFERENCE_CLOUD_BASE_URL": model_url,
             "INFERENCE_CLOUD_API_KEY": "local-stand-in",
             "INFERENCE_CLOUD_MODEL": "local-stand-in",
+            # Derived, not chosen — see synapse_service.synthesis.SynthesisBudget
+            # and the [capability."Llama-3.3-70B"] record in config/synapse.toml.
+            # AIC100Provider's own 800/60s defaults are what broke synthesis on
+            # 2026-08-06: a 500-word working memory is ~850 tokens, so the memory
+            # alone overran the cap and every round came back truncated while
+            # findings kept landing. 1600 buys back the intended 500-word memory
+            # with ~700 tokens of verdict room; 180s keeps the longer generation
+            # clear of the read timeout (two rounds measured at 48.5s and 51.7s
+            # against the old 60s default).
+            "INFERENCE_CLOUD_MAX_TOKENS": str(SYNTHESIS_MAX_TOKENS),
+            "INFERENCE_CLOUD_TIMEOUT": str(SYNTHESIS_TIMEOUT_S),
         })
         if not wait_for(f"{service_url}/debug", service, "service"):
             raise SystemExit("the service did not come up")
@@ -342,6 +379,16 @@ def main(argv: list[str] | None = None) -> int:
 
     orchestrator_env = {"SYNAPSE_BASE_URL": model_url,
                         "SYNAPSE_DISTILLER": args.distiller}
+    # --claude-model routes to a DIFFERENT env var per arm, because the two
+    # providers name models differently and neither can accept the other's
+    # spelling: AnthropicProvider talks to the Messages API and wants a full id
+    # ("claude-haiku-4-5-20251001"), while ClaudeCLIProvider shells out to
+    # `claude --model` and wants the short alias ("haiku"). One flag, two
+    # destinations, so nobody has to remember which shape belongs where.
+    #
+    # Left unset it stays absent from the child env, so each provider falls back
+    # to its own DEFAULT_MODEL (claude-opus-5 / sonnet) rather than this script
+    # duplicating those constants and drifting from them.
     if args.distiller == "anthropic":
         key = _anthropic_key()
         if not key:
@@ -351,7 +398,22 @@ def main(argv: list[str] | None = None) -> int:
                 '  "anthropic": { "api_key": "sk-ant-..." }\n'
                 "secrets.jsonc is gitignored; the key is never printed or logged.")
         orchestrator_env["ANTHROPIC_API_KEY"] = key
-        print("distiller  Claude Opus 5 (your own key — no shared rate limit). "
+        if args.claude_model:
+            orchestrator_env["SYNAPSE_ANTHROPIC_MODEL"] = args.claude_model
+        # Named, never hardcoded. Until 2026-08-06 this line read "Claude Opus 5"
+        # unconditionally, so a run that had set SYNAPSE_ANTHROPIC_MODEL in the
+        # ambient environment -- which `spawn` merges, so it took effect -- was
+        # told on stdout that it was using a model it was not. A banner that can
+        # be wrong about the one thing the operator chose is worse than no banner.
+        print(f"distiller  {args.claude_model or 'claude-opus-5 (default)'} via the "
+              "Messages API on your own key — no shared rate limit. "
+              "Only synthesis still spends the Cirrascale budget.", flush=True)
+
+    if args.distiller == "claude-cli":
+        if args.claude_model:
+            orchestrator_env["SYNAPSE_CLAUDE_CLI_MODEL"] = args.claude_model
+        print(f"distiller  {args.claude_model or 'sonnet (default)'} via the local "
+              "`claude` binary on your SUBSCRIPTION — no API key spent at all. "
               "Only synthesis still spends the Cirrascale budget.", flush=True)
 
     orchestrator = spawn("orchestrator", [
