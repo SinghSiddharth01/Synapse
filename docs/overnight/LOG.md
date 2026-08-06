@@ -91,6 +91,24 @@ Newest at the bottom.
 - **08:25** — W5 (join-time arrival summary) and W4a (dashboard Page 1)
   launched — both were blocked on W2. W6 post-merge fix agent running.
   Still in flight: W1 resume, Integration (W8+W10 reviews).
+- **08:27** — **Integration merged** (`9ed1361`): 1109 tests. The skipped
+  reviews found 4 HIGHs — install.ps1 advertised everywhere but never written
+  (dev2 had not run), a PATH bug failing fresh installs, the doctor's exit
+  code discarded by a tee pipeline, a secrets key-routing drift. Fix stage
+  wrote install.ps1 + install.bat and closed all of them; audit verified live:
+  doctor rc 0, install.sh --doctor-only idempotent, mkdocs --strict clean,
+  rehearse ALL BEATS PASS on shifted ports. W7 live arc launched on the real
+  ports with the claude-cli Haiku arm.
+- **08:35** — **W6 post-fix merged** (`d6c48cd`): 1125 tests. All six
+  confirmed findings closed — incl. the effort-key gate (fail-closed, keeps
+  structured outputs on Haiku) and reproducible stress-doc numbers (crc32
+  seeds; the doc now names which rows moved and why).
+- **08:39** — **W1 merged** (`b460684`): **1191 tests.** Typed-503 retrieval
+  contract, in-app seam supervisor (probe/strikes/kill/respawn, loud logs),
+  boot preflights, `--npu --live` split config, decisions/005 + 008. The
+  review's HIGH (client-killing lsof) and the 45s-threshold misread were fixed
+  pre-merge; audit resolved 4 real conflicts against W2's re-keying. **W3b
+  launched** (last code workstream). Still running: W5, W4a, W7 live arc.
 - **06:10** — **Relaunch with real isolation** (every agent now gets its own
   harness worktree + detached-HEAD checkout, push-by-ref only):
   `w1-geniex-v2` (wf_4c6491eb, full redo from recovered design) ·
