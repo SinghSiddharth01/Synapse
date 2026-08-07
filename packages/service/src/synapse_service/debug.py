@@ -1093,10 +1093,11 @@ _PAGE = """<!doctype html>
 </aside>
 <div class="content">
 <header class="topbar">
-  <nav class="tabs" aria-label="session pages">
+  <nav class="tabs" aria-label="pages">
+    <a href="/">Home</a>
     <a id="tab-brain" href="/debug">Brain</a>
-    <a id="tab-log" href="/debug/log" aria-current="page">Log</a>
     <a id="tab-memory" href="/debug/memory">Memory</a>
+    <a id="tab-log" href="/debug/log" aria-current="page">Log</a>
   </nav>
   <button class="tool" id="theme-btn" type="button" aria-label="toggle theme (T)"><svg class="ic-moon" viewBox="0 0 20 20" aria-hidden="true"><path class="stroke-ic" d="M16.5 12.2A7 7 0 0 1 7.8 3.5a7 7 0 1 0 8.7 8.7z"/></svg><svg class="ic-sun" viewBox="0 0 20 20" aria-hidden="true"><circle class="stroke-ic" cx="10" cy="10" r="3.6"/><path class="stroke-ic" d="M10 1.8v2.1M10 16.1v2.1M1.8 10h2.1M16.1 10h2.1M4.2 4.2l1.5 1.5M14.3 14.3l1.5 1.5M15.8 4.2l-1.5 1.5M5.7 14.3l-1.5 1.5"/></svg><span>Theme</span></button>
 </header>
@@ -1504,6 +1505,9 @@ _PAGE = """<!doctype html>
 
 
 
+
+
+
 (function () {
   "use strict";
   // Light/dark toggle: T key or the topbar button. Guarded throughout so the
@@ -1823,6 +1827,19 @@ _BRAIN_PAGE = """<!doctype html>
     padding: 13px 18px; border-bottom: 1px solid var(--hairline);
   }
   .panel-head h2 { margin: 0; font-size: 15px; font-weight: 650; letter-spacing: -0.01em; color: var(--cyan); }
+  .wm-pin {
+    border: 1px solid var(--hairline); background: var(--surface-2); color: var(--ink-muted);
+    border-radius: 6px; font: 600 11px var(--mono); letter-spacing: 0.04em;
+    padding: 3px 10px; cursor: pointer; flex-shrink: 0;
+    transition: background-color 130ms, color 130ms;
+  }
+  .wm-pin:hover { background: var(--surface-3); color: var(--ink); }
+  .wm-pin:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+  .wm-pin::before { content: "collapse"; }
+  .panel.wm.collapsed .wm-pin::before { content: "expand"; }
+  .panel.wm.collapsed #wm-body,
+  .panel.wm.collapsed .rev-head,
+  .panel.wm.collapsed #revisions { display: none; }
   .panel-head .meta { color: var(--ink-subtle); font: 11px var(--mono); }
   .wm-body {
     padding: 16px 18px; white-space: pre-wrap; overflow-wrap: anywhere;
@@ -1984,10 +2001,11 @@ _BRAIN_PAGE = """<!doctype html>
 </aside>
 <div class="content">
 <header class="topbar">
-  <nav class="tabs" aria-label="session pages">
+  <nav class="tabs" aria-label="pages">
+    <a href="/">Home</a>
     <a id="tab-brain" href="/debug" aria-current="page">Brain</a>
-    <a id="tab-log" href="/debug/log">Log</a>
     <a id="tab-memory" href="/debug/memory">Memory</a>
+    <a id="tab-log" href="/debug/log">Log</a>
   </nav>
   <button class="tool" id="theme-btn" type="button" aria-label="toggle theme (T)"><svg class="ic-moon" viewBox="0 0 20 20" aria-hidden="true"><path class="stroke-ic" d="M16.5 12.2A7 7 0 0 1 7.8 3.5a7 7 0 1 0 8.7 8.7z"/></svg><svg class="ic-sun" viewBox="0 0 20 20" aria-hidden="true"><circle class="stroke-ic" cx="10" cy="10" r="3.6"/><path class="stroke-ic" d="M10 1.8v2.1M10 16.1v2.1M1.8 10h2.1M16.1 10h2.1M4.2 4.2l1.5 1.5M14.3 14.3l1.5 1.5M15.8 4.2l-1.5 1.5M5.7 14.3l-1.5 1.5"/></svg><span>Theme</span></button>
 </header>
@@ -2031,10 +2049,11 @@ _BRAIN_PAGE = """<!doctype html>
     </div>
   </div>
 
-  <section class="panel wm">
+  <section class="panel wm" id="wm-panel">
     <div class="panel-head">
       <h2>Working memory</h2>
       <div class="meta" id="wm-meta">—</div>
+      <button class="wm-pin" id="wm-collapse" type="button" aria-expanded="true" aria-controls="wm-body"></button>
     </div>
     <div class="wm-body" id="wm-body">…</div>
     <div class="rev-head">Revisions <span class="note" id="rev-count"></span></div>
@@ -2504,6 +2523,9 @@ _BRAIN_PAGE = """<!doctype html>
 
 
 
+
+
+
 (function () {
   "use strict";
   // Light/dark toggle: T key or the topbar button. Guarded throughout so the
@@ -2535,6 +2557,28 @@ _BRAIN_PAGE = """<!doctype html>
       });
     }
   } catch (e) { /* theme chrome is optional everywhere */ }
+})();
+
+(function () {
+  "use strict";
+  // Working-memory collapse pin; the panel grows without bound otherwise.
+  try {
+    var pin = document.getElementById("wm-collapse");
+    var panel = document.getElementById("wm-panel");
+    if (!pin || !panel || !pin.addEventListener) return;
+    var KEY = "synapse-wm-collapsed";
+    function setCollapsed(collapsed) {
+      panel.setAttribute("class", collapsed ? "panel wm collapsed" : "panel wm");
+      pin.setAttribute("aria-expanded", collapsed ? "false" : "true");
+      try { localStorage.setItem(KEY, collapsed ? "1" : "0"); } catch (e) {}
+    }
+    var initial = false;
+    try { initial = localStorage.getItem(KEY) === "1"; } catch (e) {}
+    setCollapsed(initial);
+    pin.addEventListener("click", function () {
+      setCollapsed(String(panel.getAttribute("class")).indexOf("collapsed") === -1);
+    });
+  } catch (e) { /* headless test DOM: the pin is optional chrome */ }
 })();
 </script>
 </body>
@@ -2652,27 +2696,14 @@ _HOME_PAGE = """<!doctype html>
   }
   #banner.show { display: block; }
 
-  /* ── shell: sessions live in the sidebar, never in the content flow ── */
-  .shell { display: flex; min-height: 100dvh; }
-  aside {
-    width: 264px; flex-shrink: 0;
-    border-right: 1px solid var(--hairline-soft);
-    padding: 16px 12px;
-    display: flex; flex-direction: column; gap: 14px;
-    position: sticky; top: 0; height: 100dvh; overflow-y: auto;
-  }
-  .brand { display: flex; align-items: center; gap: 9px; text-decoration: none; color: inherit; padding: 2px 6px 0; }
+  /* ── chrome: one topbar, no sidebar; sessions live in a dropdown ── */
+  .brand { display: flex; align-items: center; gap: 9px; text-decoration: none; color: inherit; }
   .brand .mark { width: 30px; height: 16px; overflow: visible; }
   .brand .mark .axon { fill: none; stroke: var(--cyan-deep); stroke-width: 1.4; opacity: 0.7; }
   .brand .mark .soma { fill: var(--cyan); }
   .brand .mark .impulse { fill: var(--ink); }
   .brand .name { font-size: 17px; font-weight: 650; letter-spacing: -0.01em; }
   .brand .scope-label { color: var(--ink-subtle); font-size: 14px; }
-  .live {
-    display: flex; align-items: center; gap: 9px;
-    padding: 0 6px;
-    color: var(--ink-muted); font: 12px var(--mono);
-  }
   .live-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--ink-subtle); flex-shrink: 0; }
   .live-dot.up { background: var(--green); animation: live-pulse 2s ease-in-out infinite; }
   .live-dot.down { background: var(--red-text); animation: none; }
@@ -2680,23 +2711,37 @@ _HOME_PAGE = """<!doctype html>
     0%, 100% { box-shadow: 0 0 0 0 rgba(0, 202, 142, 0.5); }
     50% { box-shadow: 0 0 0 6px rgba(0, 202, 142, 0); }
   }
-  .side-label {
-    font: 600 11px var(--sans); letter-spacing: 0.06em; text-transform: uppercase;
-    color: var(--ink-subtle); padding: 0 6px; margin-top: 4px;
-  }
-  #sessions { display: flex; flex-direction: column; gap: 6px; }
-  .scard {
-    display: flex; flex-direction: column; gap: 8px;
+  #live-text { font: 600 12.5px var(--mono); }
+  .sess-menu { position: relative; }
+  #sess-pop {
+    position: absolute; right: 0; top: calc(100% + 10px);
+    width: 360px; max-height: 62vh; overflow-y: auto;
     background: var(--surface-1);
     border: 1px solid var(--hairline);
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius);
     padding: 12px;
+    box-shadow: 0 22px 60px rgba(0, 0, 0, 0.5);
+    display: none; z-index: 80;
+  }
+  :root[data-theme="light"] #sess-pop { box-shadow: 0 22px 60px rgba(11, 13, 18, 0.18); }
+  .sess-menu.open #sess-pop { display: block; }
+  .side-label {
+    font: 600 11px var(--sans); letter-spacing: 0.06em; text-transform: uppercase;
+    color: var(--ink-subtle); padding: 0 4px 8px;
+  }
+  #sessions { display: flex; flex-direction: column; gap: 8px; }
+  .scard {
+    display: flex; flex-direction: column; gap: 8px;
+    background: var(--canvas);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-sm);
+    padding: 12px 14px;
     text-decoration: none; color: inherit;
     transition: border-color 140ms, background-color 140ms;
   }
-  .scard:hover { border-color: rgba(20, 198, 203, 0.5); background: var(--surface-2); }
+  .scard:hover { border-color: rgba(20, 198, 203, 0.5); }
   .scard:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
-  .scard-purpose { font-weight: 600; font-size: 13px; line-height: 1.4; color: var(--ink); }
+  .scard-purpose { font-weight: 600; font-size: 13.5px; line-height: 1.45; color: var(--ink); }
   .scard-meta { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
   .scard-meta .sid { font: 11px var(--mono); color: var(--ink-subtle); overflow-wrap: anywhere; }
   .pill {
@@ -2708,13 +2753,9 @@ _HOME_PAGE = """<!doctype html>
   .pill.ended  { color: var(--red-text); border-color: rgba(230, 43, 30, 0.45); background: rgba(230, 43, 30, 0.12); }
   .empty {
     padding: 14px 12px; text-align: left; color: var(--ink-subtle); font-size: 12.5px; line-height: 1.55;
-    background: var(--surface-1); border: 1px dashed var(--hairline); border-radius: var(--radius-sm);
+    background: var(--canvas); border: 1px dashed var(--hairline); border-radius: var(--radius-sm);
   }
-  .side-foot { margin-top: auto; padding: 0 6px; display: flex; flex-direction: column; gap: 4px; }
-  .side-foot a { color: var(--ink-subtle); font-size: 12px; text-decoration: none; }
-  .side-foot a:hover { color: var(--ink); }
 
-  .content { flex: 1; min-width: 0; display: flex; flex-direction: column; }
   .topbar {
     display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
     min-height: 58px;
@@ -2891,130 +2932,85 @@ _HOME_PAGE = """<!doctype html>
   .why-note p { margin: 0; }
   .why-note b { color: var(--ink); font-weight: 650; }
 
-  /* ── architecture: end to end, with a today/allows switch ── */
-  .arch-top { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 14px; }
-  .seg { display: inline-flex; background: var(--surface-2); border: 1px solid var(--hairline); border-radius: 999px; padding: 3px; }
-  .seg button {
-    border: 0; background: transparent; color: var(--ink-muted);
-    font: 600 13px var(--sans); padding: 6px 16px; border-radius: 999px; cursor: pointer;
-    transition: background-color 140ms, color 140ms;
-  }
-  .seg button[aria-pressed="true"] { background: var(--cta-bg); color: var(--cta-ink); }
-  .seg button:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
-  #arch-caption { color: var(--ink-subtle); font-size: 13.5px; margin: 0; flex: 1; min-width: 24ch; }
+  /* ── architecture: components and runtimes, one level, no chrome ── */
   .arch-wrap {
     background: var(--surface-1);
     border: 1px solid var(--hairline);
     border-radius: var(--radius);
-    padding: 18px 20px 10px;
+    padding: 20px 22px 14px;
   }
   .arch-wrap svg { width: 100%; height: auto; display: block; }
   .arch .box { fill: var(--canvas); stroke: var(--hairline); }
   .arch .box.svc { stroke: rgba(20, 198, 203, 0.5); stroke-width: 1.5; }
-  .arch .box.cld { stroke: rgba(20, 198, 203, 0.35); }
-  .arch .box.dev { stroke: var(--copper-dim); }
-  .arch .mini { fill: var(--surface-2); stroke: transparent; }
-  .arch .mini.prov { stroke: rgba(224, 154, 90, 0.5); }
-  .arch .mini.prov-alt { stroke: rgba(178, 182, 189, 0.35); }
-  .arch text { font: 600 15px var(--sans); fill: var(--ink); }
-  .arch text.t-mono { font: 650 13.5px var(--mono); letter-spacing: 0.06em; }
-  .arch text.t-sub { font-weight: 500; font-size: 13px; fill: var(--ink-muted); }
-  .arch text.t-faint { font-weight: 500; font-size: 12.5px; fill: var(--ink-subtle); }
+  .arch .box.cld { stroke: rgba(20, 198, 203, 0.35); stroke-width: 1.5; }
+  .arch .box.dev { stroke: rgba(224, 154, 90, 0.5); stroke-width: 1.5; }
+  .arch .lane { fill: var(--surface-2); }
+  .arch .lic { fill: none; stroke: var(--cyan); stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+  .arch .lic.cop { stroke: var(--copper); }
+  .arch text { font: 600 16px var(--sans); fill: var(--ink); }
+  .arch text.t-mono { font: 650 15px var(--mono); letter-spacing: 0.08em; }
+  .arch text.t-sub { font-weight: 500; font-size: 14px; fill: var(--ink-muted); }
   .arch text.t-cyan { fill: var(--cyan); }
   .arch text.t-copper { fill: var(--copper); }
   .arch text.t-green { fill: var(--green); }
-  .arch .flow { fill: none; stroke-width: 1.8; }
-  .arch .flow.in { stroke: var(--copper); opacity: 0.85; }
-  .arch .flow.syn { stroke: var(--cyan); opacity: 0.85; }
-  .arch .flow.out { stroke: var(--green); stroke-dasharray: 4 5; opacity: 0.85; }
-  .arch .ah { stroke-width: 1.8; stroke-linecap: round; fill: none; }
+  .arch .flow { fill: none; stroke-width: 2; }
+  .arch .flow.in { stroke: var(--copper); opacity: 0.9; }
+  .arch .flow.syn { stroke: var(--cyan); opacity: 0.9; }
+  .arch .flow.out { stroke: var(--green); stroke-dasharray: 5 6; opacity: 0.9; }
+  .arch .ah { stroke-width: 2; stroke-linecap: round; fill: none; }
   .arch .plug-node { fill: var(--surface-2); stroke: var(--hairline); }
-  .arch .plug-t { font: 600 12.5px var(--mono); fill: var(--ink-muted); }
-  .arch .g-allows { opacity: 0; transition: opacity 400ms; }
-  .arch .ghost { stroke-dasharray: 5 5; }
-  .arch[data-view="allows"] .g-allows { opacity: 1; }
+  .arch .plug-t { font: 600 14px var(--mono); fill: var(--ink-muted); }
   .arch .plug-live .plug-node { stroke: rgba(20, 198, 203, 0.55); }
   .arch .plug-live .plug-t { fill: var(--cyan); }
-  .arch .plug-any .plug-node, .arch .plug-any .plug-t { transition: stroke 400ms, fill 400ms; }
-  .arch[data-view="allows"] .plug-any .plug-node { stroke: rgba(20, 198, 203, 0.55); }
-  .arch[data-view="allows"] .plug-any .plug-t { fill: var(--cyan); }
-  /* the five service stages are clickable; focus lights one and dims the rest */
-  .arch .lane-g { cursor: pointer; }
-  .arch .lane-g rect { fill: var(--surface-2); stroke: rgba(20, 198, 203, 0.18); transition: stroke 200ms, opacity 200ms; }
-  .arch .lane-g .lic { fill: none; stroke: var(--cyan); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
-  .arch .lane-g:hover rect { stroke: rgba(20, 198, 203, 0.55); }
-  .arch[data-focus] .lane-g { opacity: 0.45; }
-  .arch[data-focus="log"] .lane-g[data-lane="log"],
-  .arch[data-focus="fold"] .lane-g[data-lane="fold"],
-  .arch[data-focus="retrieve"] .lane-g[data-lane="retrieve"],
-  .arch[data-focus="synth"] .lane-g[data-lane="synth"],
-  .arch[data-focus="memory"] .lane-g[data-lane="memory"] { opacity: 1; }
-  .arch[data-focus="log"] .lane-g[data-lane="log"] rect,
-  .arch[data-focus="fold"] .lane-g[data-lane="fold"] rect,
-  .arch[data-focus="retrieve"] .lane-g[data-lane="retrieve"] rect,
-  .arch[data-focus="synth"] .lane-g[data-lane="synth"] rect,
-  .arch[data-focus="memory"] .lane-g[data-lane="memory"] rect { stroke: var(--cyan); }
-  #arch-detail {
-    margin: 12px 0 0; padding: 14px 20px;
-    background: rgba(20, 198, 203, calc(var(--wash) - 0.02));
-    border: 1px solid rgba(20, 198, 203, 0.3);
-    border-radius: var(--radius-sm);
-    color: var(--ink-muted); font-size: 15.5px; line-height: 1.6; font-weight: 500;
-    min-height: 52px;
-  }
-  #arch-detail b { color: var(--cyan); font-weight: 650; }
 
-  /* ── pipeline + division of labor, one composition ── */
-  .pipe { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 14px; }
-  .pipe-card {
-    --stage: var(--ink-muted);
-    position: relative;
+  /* ── the data flow: two lanes, one round trip ── */
+  .flowlane { margin-bottom: 18px; }
+  .fl-label {
+    display: flex; align-items: center; gap: 12px;
+    font: 650 13.5px var(--sans); letter-spacing: 0.12em; text-transform: uppercase;
+    margin-bottom: 10px;
+  }
+  .fl-label::after {
+    content: ""; flex: 1; height: 2px; border-radius: 1px;
+    background: linear-gradient(90deg, currentColor, transparent); opacity: 0.35;
+  }
+  .flowlane.in .fl-label { color: var(--copper); }
+  .flowlane.out .fl-label { color: var(--green); }
+  .chain { display: flex; align-items: stretch; }
+  .node {
+    flex: 1; min-width: 0;
     background: var(--surface-1);
     border: 1px solid var(--hairline);
-    border-top: 2px solid var(--stage);
-    border-radius: var(--radius);
-    padding: 18px 20px;
+    border-radius: 10px;
+    padding: 14px 10px 13px;
+    text-align: center;
   }
-  .pipe-card::after {
-    content: ""; position: absolute; top: 50%; right: -11px; z-index: 1;
-    width: 0; height: 0; margin-top: -5px;
-    border-top: 5px solid transparent; border-bottom: 5px solid transparent;
-    border-left: 7px solid var(--stage);
-    opacity: 0.85;
+  .node b { display: block; font-size: 16px; font-weight: 650; letter-spacing: -0.012em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .node span { display: block; font: 500 13px var(--mono); color: var(--ink-muted); margin-top: 5px; line-height: 1.5; }
+  .node.agent {
+    border-color: rgba(224, 154, 90, 0.5);
+    background: linear-gradient(160deg, rgba(224, 154, 90, calc(var(--wash) - 0.01)), transparent 55%), var(--surface-1);
   }
-  .pipe-card:last-child::after { display: none; }
-  .pipe-card .k { font: 650 15.5px var(--mono); letter-spacing: 0.1em; margin-bottom: 4px; color: var(--stage); }
-  .pipe-card .where { font-size: 13.5px; color: var(--ink-muted); margin-bottom: 12px; }
-  .pipe-card:nth-child(2) { --stage: var(--copper); }
-  .pipe-card:nth-child(3) { --stage: var(--cyan); }
-  .pipe-card:nth-child(4) { --stage: var(--green); }
-  .pipe-card p { margin: 0; color: var(--ink-muted); font-size: 15px; line-height: 1.62; font-weight: 500; }
+  .flowlane.in .node.end {
+    border-color: rgba(20, 198, 203, 0.5);
+    background: linear-gradient(160deg, rgba(20, 198, 203, calc(var(--wash) - 0.01)), transparent 55%), var(--surface-1);
+  }
+  .flowlane.out .node.end {
+    border-color: rgba(0, 202, 142, 0.5);
+    background: linear-gradient(160deg, rgba(0, 202, 142, calc(var(--wash) - 0.01)), transparent 55%), var(--surface-1);
+  }
+  .arrowsep { flex: 0 0 30px; display: flex; align-items: center; justify-content: center; }
+  .arrowsep::before { content: "→"; font: 700 20px var(--sans); }
+  .flowlane.in .arrowsep::before { color: var(--copper); }
+  .flowlane.out .arrowsep::before { color: var(--green); }
   .curated {
-    margin: 14px 0 0; padding: 18px 24px;
+    margin: 16px 0 0; padding: 18px 24px;
     background: linear-gradient(135deg, rgba(20, 198, 203, calc(var(--wash) + 0.06)), transparent 60%), var(--surface-1);
     border: 1px solid rgba(20, 198, 203, 0.35);
     border-radius: var(--radius);
     color: var(--ink-muted); font-size: 16px; line-height: 1.68; font-weight: 500;
   }
   .curated b { color: var(--cyan); font-weight: 650; }
-  .retrv {
-    margin-top: 14px;
-    background: linear-gradient(140deg, rgba(0, 202, 142, calc(var(--wash) + 0.06)), transparent 55%), var(--surface-1);
-    border: 1px solid rgba(0, 202, 142, 0.38);
-    border-radius: var(--radius);
-    padding: 20px 24px;
-  }
-  .retrv h3 { margin: 0 0 4px; font-size: 20px; font-weight: 650; letter-spacing: -0.015em; color: var(--green); }
-  .retrv .rsub { margin: 0 0 14px; color: var(--ink-muted); font-size: 14.5px; }
-  .retrv-cols { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; }
-  .rcol {
-    background: var(--canvas);
-    border: 1px solid var(--hairline);
-    border-radius: var(--radius-sm);
-    padding: 14px 16px;
-  }
-  .rcol .rk { font: 650 13px var(--mono); letter-spacing: 0.08em; color: var(--green); margin-bottom: 6px; }
-  .rcol p { margin: 0; color: var(--ink-muted); font-size: 14px; line-height: 1.6; font-weight: 500; }
 
   /* ── use cases: each takes its own hue, each carries a real scenario ── */
   .cases { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; }
@@ -3148,7 +3144,6 @@ _HOME_PAGE = """<!doctype html>
   .footer b { color: var(--ink-muted); font-weight: 600; }
 
   /* ── slides mode: full-bleed, content fills the room, chrome hides ── */
-  body[data-mode="slides"] aside { display: none; }
   body[data-mode="slides"] .topbar {
     position: fixed; top: 0; left: 0; right: 0; z-index: 60;
     background: var(--canvas);
@@ -3171,14 +3166,14 @@ _HOME_PAGE = """<!doctype html>
   body[data-mode="slides"] .hero h1 { font-size: clamp(48px, 5vw, 74px); margin-bottom: 18px; }
   body[data-mode="slides"] .hero .tagline { font-size: 20px; max-width: 58ch; margin-bottom: 24px; }
   body[data-mode="slides"] .btn { font-size: 16px; padding: 13px 26px; }
-  body[data-mode="slides"] .net { max-width: 1150px; margin: 26px auto 0; }
+  body[data-mode="slides"] .net { max-width: 1020px; margin: 20px auto 0; }
   body[data-mode="slides"] .net-caption { font-size: 16px; }
   body[data-mode="slides"] .slide h2 { font-size: clamp(34px, 3.1vw, 46px); }
   body[data-mode="slides"] .slide .sub { font-size: 18.5px; margin-bottom: 24px; }
   body[data-mode="slides"] .slide-eyebrow { font-size: 13.5px; }
   body[data-mode="slides"] .why-panel h3 { font-size: 24px; }
   body[data-mode="slides"] .why-panel .cap { font-size: 16px; }
-  body[data-mode="slides"] .why-panel svg { max-height: 38dvh; width: auto; max-width: 100%; margin: 0 auto; display: block; }
+  body[data-mode="slides"] .why-panel svg { max-height: 33dvh; width: auto; max-width: 100%; margin: 0 auto; display: block; }
   body[data-mode="slides"] .why-note { font-size: 17px; padding: 16px 24px; }
   body[data-mode="slides"] .why-note h4 { font-size: 21px; }
   body[data-mode="slides"] .cases { gap: 18px; grid-template-columns: 1fr 1fr; }
@@ -3190,16 +3185,16 @@ _HOME_PAGE = """<!doctype html>
   body[data-mode="slides"] .gh-card { padding: 22px 30px; }
   body[data-mode="slides"] .gh-card b { font-size: 18px; }
   body[data-mode="slides"] .gh-card span { font-size: 14.5px; }
-  body[data-mode="slides"] #arch-caption { font-size: 15.5px; }
-  body[data-mode="slides"] .arch-wrap svg { max-height: 56dvh; width: auto; max-width: 100%; margin: 0 auto; }
-  body[data-mode="slides"] #arch-detail { font-size: 17px; }
-  body[data-mode="slides"] .pipe-card .k { font-size: 17px; }
-  body[data-mode="slides"] .pipe-card .where { font-size: 14.5px; }
-  body[data-mode="slides"] .pipe-card p { font-size: 16px; }
+  body[data-mode="slides"] .arch-wrap svg { max-height: 66dvh; width: auto; max-width: 100%; margin: 0 auto; }
+  body[data-mode="slides"] .node { padding: 24px 14px 22px; }
+  body[data-mode="slides"] .node b { font-size: 20px; }
+  body[data-mode="slides"] .node span { font-size: 15.5px; margin-top: 8px; }
+  body[data-mode="slides"] .flowlane { margin-bottom: 30px; }
+  body[data-mode="slides"] .curated { font-size: 18px; padding: 22px 28px; }
+  body[data-mode="slides"] .fl-label { font-size: 15px; }
+  body[data-mode="slides"] .arrowsep { flex-basis: 36px; }
+  body[data-mode="slides"] .arrowsep::before { font-size: 23px; }
   body[data-mode="slides"] .curated { font-size: 17.5px; }
-  body[data-mode="slides"] .retrv h3 { font-size: 22px; }
-  body[data-mode="slides"] .retrv .rsub { font-size: 15.5px; }
-  body[data-mode="slides"] .rcol p { font-size: 15px; }
   body[data-mode="slides"] .case b { font-size: 20px; }
   body[data-mode="slides"] .case .gist { font-size: 15.5px; }
   body[data-mode="slides"] .case .scen { font-size: 16px; }
@@ -3226,26 +3221,20 @@ _HOME_PAGE = """<!doctype html>
   .hud-hint { color: var(--ink-subtle); font: 500 11.5px var(--mono); letter-spacing: 0.03em; }
 
   @media (max-width: 1100px) {
-    .pipe { grid-template-columns: 1fr 1fr; }
-    .pipe-card:nth-child(2)::after { display: none; }
     .band { grid-template-columns: 1fr 1fr; }
     .band-card.hero-stat { grid-row: auto; grid-column: 1 / 3; }
     .band-card.wide { grid-column: 1 / 3; }
     .cases { grid-template-columns: 1fr 1fr; }
   }
-  @media (max-width: 900px) {
-    .shell { flex-direction: column; }
-    aside { position: static; width: auto; height: auto; border-right: none; border-bottom: 1px solid var(--hairline-soft); }
-    #sessions { flex-direction: row; overflow-x: auto; }
-    .scard { min-width: 220px; }
-    .side-foot { display: none; }
-  }
   @media (max-width: 760px) {
     main { padding: 44px 20px 64px; }
     .slide { margin-top: 72px; }
-    .why-grid, .pipe, .band, .cases, .run, .retrv-cols { grid-template-columns: 1fr; }
+    .why-grid, .band, .cases, .run { grid-template-columns: 1fr; }
+    .chain { flex-direction: column; }
+    .arrowsep { flex-basis: 26px; }
+    .arrowsep::before { content: "↓"; }
+    .node b { white-space: normal; }
     .band-card.hero-stat, .band-card.wide { grid-column: auto; }
-    .pipe-card::after { display: none; }
     .net text { font-size: 18px; }
     .net text.sub2, .net text.sub3 { display: none; }
   }
@@ -3259,27 +3248,22 @@ _HOME_PAGE = """<!doctype html>
 </head>
 <body data-mode="scroll">
 <div id="banner">Service unreachable. Retrying…</div>
-<div class="shell">
-<aside>
-  <a class="brand" href="/"><svg class="mark" viewBox="0 0 30 16" aria-hidden="true"><path class="axon" d="M4 8 C 10 3, 20 13, 26 8"/><circle class="soma" cx="4" cy="8" r="2.7"/><circle class="soma" cx="26" cy="8" r="2.7"/><circle class="impulse" r="1.7"><animateMotion dur="2.8s" repeatCount="indefinite" path="M4 8 C 10 3, 20 13, 26 8"/></circle></svg><span class="name">Synapse</span><span class="scope-label">service</span></a>
-  <div class="live"><span class="live-dot" id="live-dot"></span><span id="live-text">connecting…</span></div>
-  <div class="side-label">Shared sessions</div>
-  <nav id="sessions" aria-label="shared sessions"><div class="empty">connecting to the service…</div></nav>
-  <div class="side-foot">
-    <a href="/debug">Brain</a>
-    <a href="/debug/log">Log</a>
-    <a href="/debug/memory">Memory</a>
-  </div>
-</aside>
-<div class="content">
 <header class="topbar">
-  <nav class="pages" aria-label="debug pages">
+  <a class="brand" href="/"><svg class="mark" viewBox="0 0 30 16" aria-hidden="true"><path class="axon" d="M4 8 C 10 3, 20 13, 26 8"/><circle class="soma" cx="4" cy="8" r="2.7"/><circle class="soma" cx="26" cy="8" r="2.7"/><circle class="impulse" r="1.7"><animateMotion dur="2.8s" repeatCount="indefinite" path="M4 8 C 10 3, 20 13, 26 8"/></circle></svg><span class="name">Synapse</span><span class="scope-label">service</span></a>
+  <nav class="pages" aria-label="pages">
     <a href="/" aria-current="page">Home</a>
     <a href="/debug">Brain</a>
-    <a href="/debug/log">Log</a>
     <a href="/debug/memory">Memory</a>
+    <a href="/debug/log">Log</a>
   </nav>
   <div class="toolbar">
+    <div class="sess-menu" id="sess-menu">
+      <button class="tool" id="sess-btn" type="button" aria-expanded="false" aria-haspopup="true"><span class="live-dot" id="live-dot"></span><span id="live-text">connecting…</span></button>
+      <div id="sess-pop" aria-label="shared sessions">
+        <div class="side-label">Shared sessions</div>
+        <nav id="sessions" aria-label="shared sessions"><div class="empty">connecting to the service…</div></nav>
+      </div>
+    </div>
     <a class="tool" id="gh-link" href="#" aria-label="Synapse on GitHub"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg><span>GitHub</span></a>
     <button class="tool" id="theme-btn" type="button" aria-label="toggle theme (T)"><svg class="ic-moon" viewBox="0 0 20 20" aria-hidden="true"><path class="stroke-ic" d="M16.5 12.2A7 7 0 0 1 7.8 3.5a7 7 0 1 0 8.7 8.7z"/></svg><svg class="ic-sun" viewBox="0 0 20 20" aria-hidden="true"><circle class="stroke-ic" cx="10" cy="10" r="3.6"/><path class="stroke-ic" d="M10 1.8v2.1M10 16.1v2.1M1.8 10h2.1M16.1 10h2.1M4.2 4.2l1.5 1.5M14.3 14.3l1.5 1.5M15.8 4.2l-1.5 1.5M5.7 14.3l-1.5 1.5"/></svg><span>Theme</span></button>
     <button class="tool primary" id="present-btn" type="button" aria-label="toggle slides mode (Shift+S)"><svg viewBox="0 0 20 20" aria-hidden="true"><path class="stroke-ic" d="M3 4.5h14M5.5 4.5v8.5a1.5 1.5 0 0 0 1.5 1.5h6a1.5 1.5 0 0 0 1.5-1.5V4.5M10 14.5V17M7.5 17h5"/><path d="M8.6 7.2l3.4 2-3.4 2z"/></svg><span id="present-label">Present</span></button>
@@ -3410,188 +3394,171 @@ _HOME_PAGE = """<!doctype html>
   <section class="slide s-arch" data-reveal id="s-arch">
     <span class="slide-eyebrow">Architecture</span>
     <h2>End to end: edge, service, cloud.</h2>
-    <p class="sub">The whole workflow on one diagram. Flip the switch to see what the same seams allow, and click any service stage to unpack it.</p>
-    <div class="arch-top">
-      <div class="seg" role="group" aria-label="architecture view">
-        <button id="arch-today" type="button" aria-pressed="true">Running today</button>
-        <button id="arch-allows" type="button" aria-pressed="false">What it allows</button>
-      </div>
-      <p id="arch-caption">Running now: sid and aditya distil with Qwen3-4B on the Hexagon NPU, akhil runs the same worker on Claude Haiku through the Anthropic API, and synthesis runs Llama-3.3-70B on Cloud AI 100.</p>
-    </div>
+    <p class="sub">Three machines, one service, one cloud accelerator. Copper arrows carry findings in; green arrows carry answers back. Every component below is running right now.</p>
     <div class="arch-wrap">
-      <div class="arch" id="arch" data-view="today">
-      <svg viewBox="0 0 1240 620">
-        <rect class="box dev" x="20" y="24" width="348" height="150" rx="12"/>
-        <text x="40" y="52">sid</text>
-        <text class="t-faint" x="70" y="52">· Snapdragon X Elite</text>
-        <rect class="mini" x="38" y="66" width="312" height="28" rx="7"/>
-        <text class="t-sub" x="50" y="85">Claude Code agent</text>
-        <path class="ah" stroke="var(--green)" d="M328 88 v10 m0 -10 l-4 4 m4 -4 l4 4 m-4 6 l-4 -4 m4 4 l4 -4"/>
-        <rect class="mini" x="38" y="100" width="312" height="28" rx="7"/>
-        <text class="t-sub" x="50" y="119">Synapse MCP · orchestrator</text>
-        <rect class="mini prov" x="38" y="134" width="312" height="28" rx="7"/>
-        <text class="t-sub" x="50" y="153">worker → GenieX · <tspan class="t-copper">Qwen3-4B on Hexagon NPU</tspan></text>
+      <div class="arch" id="arch">
+      <svg viewBox="0 0 1240 732">
+        <rect class="box dev" x="20" y="10" width="352" height="204" rx="14"/>
+        <text class="t-mono t-copper" x="38" y="38">SID · SNAPDRAGON X ELITE</text>
+        <rect class="lane" x="38" y="50" width="316" height="44" rx="8"/>
+        <path class="lic cop" d="M52 64 l7 7 l-7 7 M64 78 h12"/>
+        <text x="86" y="68">Claude Code agent</text>
+        <text class="t-sub" x="86" y="87">asks · gets briefed on join</text>
+        <rect class="lane" x="38" y="100" width="316" height="44" rx="8"/>
+        <path class="lic cop" d="M58 106 l8 8 l-8 8 l-8 -8 z M58 126 v6"/>
+        <text x="86" y="118">Synapse MCP</text>
+        <text class="t-sub" x="86" y="137">orchestrator · pull-only doorway</text>
+        <rect class="lane" x="38" y="150" width="316" height="44" rx="8"/>
+        <circle class="lic cop" cx="58" cy="172" r="8"/>
+        <path class="lic cop" d="M58 160 v-4 M58 184 v4 M46 172 h-4 M74 172 h-4"/>
+        <text x="86" y="168">Edge worker</text>
+        <text class="t-sub" x="86" y="187">distil · Qwen3-4B · Hexagon NPU</text>
 
-        <rect class="box dev" x="20" y="190" width="348" height="150" rx="12"/>
-        <text x="40" y="218">aditya</text>
-        <text class="t-faint" x="98" y="218">· Snapdragon X Elite</text>
-        <rect class="mini" x="38" y="232" width="312" height="28" rx="7"/>
-        <text class="t-sub" x="50" y="251">Claude Code agent</text>
-        <path class="ah" stroke="var(--green)" d="M328 254 v10 m0 -10 l-4 4 m4 -4 l4 4 m-4 6 l-4 -4 m4 4 l4 -4"/>
-        <rect class="mini" x="38" y="266" width="312" height="28" rx="7"/>
-        <text class="t-sub" x="50" y="285">Synapse MCP · orchestrator</text>
-        <rect class="mini prov" x="38" y="300" width="312" height="28" rx="7"/>
-        <text class="t-sub" x="50" y="319">worker → GenieX · <tspan class="t-copper">Qwen3-4B on Hexagon NPU</tspan></text>
+        <rect class="box dev" x="20" y="234" width="352" height="204" rx="14"/>
+        <text class="t-mono t-copper" x="38" y="262">ADITYA · SNAPDRAGON X ELITE</text>
+        <rect class="lane" x="38" y="274" width="316" height="44" rx="8"/>
+        <path class="lic cop" d="M52 288 l7 7 l-7 7 M64 302 h12"/>
+        <text x="86" y="292">Claude Code agent</text>
+        <text class="t-sub" x="86" y="311">asks · gets briefed on join</text>
+        <rect class="lane" x="38" y="324" width="316" height="44" rx="8"/>
+        <path class="lic cop" d="M58 330 l8 8 l-8 8 l-8 -8 z M58 350 v6"/>
+        <text x="86" y="342">Synapse MCP</text>
+        <text class="t-sub" x="86" y="361">orchestrator · pull-only doorway</text>
+        <rect class="lane" x="38" y="374" width="316" height="44" rx="8"/>
+        <circle class="lic cop" cx="58" cy="396" r="8"/>
+        <path class="lic cop" d="M58 384 v-4 M58 408 v4 M46 396 h-4 M74 396 h-4"/>
+        <text x="86" y="392">Edge worker</text>
+        <text class="t-sub" x="86" y="411">distil · Qwen3-4B · Hexagon NPU</text>
 
-        <rect class="box dev" x="20" y="356" width="348" height="150" rx="12"/>
-        <text x="40" y="384">akhil</text>
-        <text class="t-faint" x="90" y="384">· any laptop, no NPU</text>
-        <rect class="mini" x="38" y="398" width="312" height="28" rx="7"/>
-        <text class="t-sub" x="50" y="417">Codex agent</text>
-        <path class="ah" stroke="var(--green)" d="M328 420 v10 m0 -10 l-4 4 m4 -4 l4 4 m-4 6 l-4 -4 m4 4 l4 -4"/>
-        <rect class="mini" x="38" y="432" width="312" height="28" rx="7"/>
-        <text class="t-sub" x="50" y="451">Synapse MCP · orchestrator</text>
-        <rect class="mini prov-alt" x="38" y="466" width="312" height="28" rx="7"/>
-        <text class="t-sub" x="50" y="485">worker → Anthropic API · Claude Haiku</text>
+        <rect class="box dev" x="20" y="458" width="352" height="204" rx="14"/>
+        <text class="t-mono t-copper" x="38" y="486">AKHIL · ANY LAPTOP · NO NPU</text>
+        <rect class="lane" x="38" y="498" width="316" height="44" rx="8"/>
+        <path class="lic cop" d="M52 512 l7 7 l-7 7 M64 526 h12"/>
+        <text x="86" y="516">Codex agent</text>
+        <text class="t-sub" x="86" y="535">asks · gets briefed on join</text>
+        <rect class="lane" x="38" y="548" width="316" height="44" rx="8"/>
+        <path class="lic cop" d="M58 554 l8 8 l-8 8 l-8 -8 z M58 574 v6"/>
+        <text x="86" y="566">Synapse MCP</text>
+        <text class="t-sub" x="86" y="585">orchestrator · pull-only doorway</text>
+        <rect class="lane" x="38" y="598" width="316" height="44" rx="8"/>
+        <circle class="lic cop" cx="58" cy="620" r="8"/>
+        <path class="lic cop" d="M58 608 v-4 M58 632 v4 M46 620 h-4 M74 620 h-4"/>
+        <text x="86" y="616">Edge worker</text>
+        <text class="t-sub" x="86" y="635">distil · Claude Haiku · Anthropic API</text>
 
-        <g class="g-allows">
-          <rect class="box dev ghost" x="20" y="516" width="348" height="34" rx="10"/>
-          <text class="t-faint" x="40" y="538">+ any teammate's machine · any OS · any provider</text>
-        </g>
+        <path class="flow in" d="M372 150 C 425 160, 438 180, 470 200"/>
+        <path class="ah" stroke="var(--copper)" d="M470 200 l-11 -3 m11 3 l-10 6"/>
+        <path class="flow out" d="M470 160 C 436 140, 424 122, 372 110"/>
+        <path class="ah" stroke="var(--green)" d="M372 110 l11 -2 m-11 2 l10 6"/>
+        <path class="flow in" d="M372 356 L 470 356"/>
+        <path class="ah" stroke="var(--copper)" d="M470 356 l-11 -5 m11 5 l-11 5"/>
+        <path class="flow out" d="M470 326 L 372 326"/>
+        <path class="ah" stroke="var(--green)" d="M372 326 l11 -5 m-11 5 l11 5"/>
+        <path class="flow in" d="M372 560 C 430 552, 442 510, 470 476"/>
+        <path class="ah" stroke="var(--copper)" d="M470 476 l-10 4 m10 -4 l-4 11"/>
+        <path class="flow out" d="M470 436 C 438 466, 428 500, 372 520"/>
+        <path class="ah" stroke="var(--green)" d="M372 520 l10 -6 m-10 6 l11 2"/>
+        <text class="t-copper t-mono" x="421" y="380" text-anchor="middle">findings</text>
+        <text class="t-green t-mono" x="421" y="312" text-anchor="middle">answers</text>
 
-        <path class="flow in" d="M368 148 C 415 148, 425 190, 462 220"/>
-        <path class="flow in" d="M368 314 C 410 314, 425 300, 462 280"/>
-        <path class="flow in" d="M368 480 C 425 480, 432 400, 464 330"/>
-        <path class="ah" stroke="var(--copper)" d="M462 280 l-10 -4 m10 4 l-10 6"/>
-        <text class="t-copper t-mono" x="412" y="258" text-anchor="middle">findings</text>
-        <path class="flow out" d="M462 118 C 425 102, 405 108, 370 112"/>
-        <path class="flow out" d="M464 152 C 432 200, 415 240, 370 246"/>
-        <text class="t-green t-mono" x="410" y="96" text-anchor="middle">ask · answers</text>
+        <rect class="box svc" x="470" y="100" width="330" height="390" rx="14"/>
+        <text class="t-cyan t-mono" x="635" y="132" text-anchor="middle" style="letter-spacing:0.12em">SYNAPSE SERVICE</text>
+        <rect class="lane" x="490" y="150" width="290" height="56" rx="8"/>
+        <path class="lic" d="M506 170 h18 M506 178 h18 M506 186 h12"/>
+        <text x="536" y="176">Session log</text>
+        <text class="t-sub" x="536" y="196">append-only · provenance kept</text>
+        <rect class="lane" x="490" y="216" width="290" height="56" rx="8"/>
+        <path class="lic" d="M506 236 h20 l-7 9 v9 h-6 v-9 z"/>
+        <text x="536" y="242">The fold · triage</text>
+        <text class="t-sub" x="536" y="262">deterministic view · no LLM</text>
+        <rect class="lane" x="490" y="282" width="290" height="56" rx="8"/>
+        <circle class="lic" cx="514" cy="306" r="7"/>
+        <path class="lic" d="M519 311 l8 8"/>
+        <text x="536" y="308">Retrieval</text>
+        <text class="t-sub" x="536" y="328">ranked · suppression-aware</text>
+        <rect class="lane" x="490" y="348" width="290" height="56" rx="8"/>
+        <path class="lic" d="M506 384 c8 0 8 -12 16 -12 M506 372 c8 0 8 12 16 12 M518 368 l4 4 l-4 4 M518 380 l4 4 l-4 4"/>
+        <text x="536" y="374">Synthesis scheduler</text>
+        <text class="t-sub" x="536" y="394">debounced · spend-governed</text>
+        <rect class="lane" x="490" y="414" width="290" height="56" rx="8"/>
+        <path class="lic" d="M507 438 l8 -5 l8 5 l-8 5 z M507 446 l8 5 l8 -5"/>
+        <text x="536" y="440">Working memory</text>
+        <text class="t-sub" x="536" y="460">curated · versioned · attributed</text>
 
-        <rect class="box svc" x="466" y="40" width="330" height="466" rx="14"/>
-        <text class="t-cyan t-mono" x="631" y="72" text-anchor="middle" style="letter-spacing:0.12em;font-size:15px">SYNAPSE SERVICE</text>
-        <g class="lane-g" data-lane="log" tabindex="0">
-          <rect x="486" y="90" width="290" height="66" rx="8"/>
-          <path class="lic" d="M502 112 h18 M502 120 h18 M502 128 h12"/>
-          <text x="532" y="118">Session log</text>
-          <text class="t-faint" x="532" y="140">append-only · provenance kept</text>
-        </g>
-        <g class="lane-g" data-lane="fold" tabindex="0">
-          <rect x="486" y="164" width="290" height="66" rx="8"/>
-          <path class="lic" d="M502 186 h20 l-7 9 v9 h-6 v-9 z"/>
-          <text x="532" y="192">The fold · triage</text>
-          <text class="t-faint" x="532" y="214">deterministic view · no LLM</text>
-        </g>
-        <g class="lane-g" data-lane="retrieve" tabindex="0">
-          <rect x="486" y="238" width="290" height="66" rx="8"/>
-          <circle class="lic" cx="510" cy="264" r="7"/>
-          <path class="lic" d="M515 269 l8 8"/>
-          <text x="532" y="266">Retrieval</text>
-          <text class="t-faint" x="532" y="288">embeddings · ranked · suppression-aware</text>
-        </g>
-        <g class="lane-g" data-lane="synth" tabindex="0">
-          <rect x="486" y="312" width="290" height="66" rx="8"/>
-          <path class="lic" d="M502 350 c8 0 8 -12 16 -12 M502 338 c8 0 8 12 16 12 M514 334 l4 4 l-4 4 M514 346 l4 4 l-4 4"/>
-          <text x="532" y="340">Synthesis scheduler</text>
-          <text class="t-faint" x="532" y="362">debounced · spend-governed</text>
-        </g>
-        <g class="lane-g" data-lane="memory" tabindex="0">
-          <rect x="486" y="386" width="290" height="66" rx="8"/>
-          <path class="lic" d="M503 410 l8 -5 l8 5 l-8 5 z M503 418 l8 5 l8 -5"/>
-          <text x="532" y="414">Working memory</text>
-          <text class="t-faint" x="532" y="436">curated · versioned · attributed</text>
-        </g>
-        <text class="t-faint" x="631" y="484" text-anchor="middle">every route GET-only · raw transcripts never arrive</text>
+        <path class="flow syn" d="M800 300 C 850 300, 860 300, 898 300"/>
+        <path class="ah" stroke="var(--cyan)" d="M898 300 l-11 -5 m11 5 l-11 5"/>
+        <path class="flow syn" d="M898 370 C 860 370, 850 370, 800 370"/>
+        <path class="ah" stroke="var(--cyan)" d="M800 370 l11 -5 m-11 5 l11 5"/>
+        <text class="t-cyan t-mono" x="828" y="282" text-anchor="middle">merge round</text>
+        <text class="t-cyan t-mono" x="833" y="394" text-anchor="middle">rewritten</text>
 
-        <path class="flow syn" d="M796 210 C 850 210, 860 210, 902 210"/>
-        <path class="ah" stroke="var(--cyan)" d="M902 210 l-10 -5 m10 5 l-10 5"/>
-        <path class="flow syn" d="M902 300 C 860 300, 850 300, 796 300"/>
-        <path class="ah" stroke="var(--cyan)" d="M796 300 l10 -5 m-10 5 l10 5"/>
-        <text class="t-cyan t-mono" x="830" y="190" text-anchor="middle">merge round</text>
-        <text class="t-cyan t-mono" x="828" y="336" text-anchor="middle">rewritten memory</text>
+        <rect class="box cld" x="900" y="240" width="320" height="190" rx="14"/>
+        <text class="t-cyan t-mono" x="1060" y="274" text-anchor="middle" style="letter-spacing:0.1em">CLOUD AI 100</text>
+        <text x="1060" y="308" text-anchor="middle">Llama-3.3-70B · synthesis</text>
+        <text class="t-sub" x="1060" y="334" text-anchor="middle">dedup · conflicts · lineage</text>
+        <text class="t-sub" x="1060" y="356" text-anchor="middle">the curator of the shared memory</text>
 
-        <rect class="box cld" x="904" y="150" width="316" height="210" rx="14"/>
-        <text class="t-cyan t-mono" x="1062" y="184" text-anchor="middle" style="letter-spacing:0.1em;font-size:15px">CLOUD AI 100</text>
-        <text x="1062" y="216" text-anchor="middle">Llama-3.3-70B · synthesis</text>
-        <text class="t-sub" x="1062" y="242" text-anchor="middle">dedup · conflicts · lineage</text>
-        <text class="t-sub" x="1062" y="264" text-anchor="middle">the curator of the shared memory</text>
-        <g class="g-allows">
-          <text class="t-faint" x="1062" y="296" text-anchor="middle">swappable: any provider below,</text>
-        <text class="t-faint" x="1062" y="316" text-anchor="middle">up to a frontier model</text>
-        </g>
-
+        <text class="t-sub" x="20" y="690">Provider seam · one interface, five plugs, all swappable</text>
         <g class="plug plug-live">
-          <rect class="plug-node" x="60" y="576" width="200" height="34" rx="9"/>
-          <text class="plug-t" x="160" y="598" text-anchor="middle">NPU · GenieX · Qwen3-4B</text>
-        </g>
-        <g class="plug plug-live">
-          <rect class="plug-node" x="280" y="576" width="200" height="34" rx="9"/>
-          <text class="plug-t" x="380" y="598" text-anchor="middle">Cloud AI 100 · 70B</text>
+          <rect class="plug-node" x="20" y="700" width="228" height="30" rx="9"/>
+          <text class="plug-t" x="134" y="720" text-anchor="middle">NPU · GenieX · Qwen3-4B</text>
         </g>
         <g class="plug plug-live">
-          <rect class="plug-node" x="500" y="576" width="200" height="34" rx="9"/>
-          <text class="plug-t" x="600" y="598" text-anchor="middle">Anthropic API</text>
+          <rect class="plug-node" x="264" y="700" width="228" height="30" rx="9"/>
+          <text class="plug-t" x="378" y="720" text-anchor="middle">Cloud AI 100 · 70B</text>
         </g>
-        <g class="plug plug-any">
-          <rect class="plug-node" x="720" y="576" width="200" height="34" rx="9"/>
-          <text class="plug-t" x="820" y="598" text-anchor="middle">Claude CLI</text>
+        <g class="plug plug-live">
+          <rect class="plug-node" x="508" y="700" width="228" height="30" rx="9"/>
+          <text class="plug-t" x="622" y="720" text-anchor="middle">Anthropic API</text>
         </g>
-        <g class="plug plug-any">
-          <rect class="plug-node" x="940" y="576" width="200" height="34" rx="9"/>
-          <text class="plug-t" x="1040" y="598" text-anchor="middle">offline stand-in</text>
+        <g class="plug">
+          <rect class="plug-node" x="752" y="700" width="228" height="30" rx="9"/>
+          <text class="plug-t" x="866" y="720" text-anchor="middle">Claude CLI</text>
         </g>
-        <text class="t-sub" x="510" y="564">Provider seam: one interface, five plugs</text>
+        <g class="plug">
+          <rect class="plug-node" x="996" y="700" width="228" height="30" rx="9"/>
+          <text class="plug-t" x="1110" y="720" text-anchor="middle">offline stand-in</text>
+        </g>
       </svg>
       </div>
     </div>
-    <p id="arch-detail">Click a service stage above to see the work it does. <b>Retrieval</b> and <b>the fold</b> never wake a model; <b>synthesis</b> is the only stage that spends.</p>
   </section>
 
   <section class="slide s-pipe" data-reveal id="s-pipe">
-    <span class="slide-eyebrow">Inside the service</span>
-    <h2>From raw work to curated memory.</h2>
-    <p class="sub">Four stages, and the silicon each one runs on. The Log page tails every stage live.</p>
-    <div class="pipe">
-      <div class="pipe-card">
-        <div class="k">TRIAGE</div>
-        <div class="where">deterministic · no LLM</div>
-        <p>Decides what is worth processing at all. Most raw work stops here, before anything costs a token.</p>
-      </div>
-      <div class="pipe-card">
-        <div class="k">DISTIL</div>
-        <div class="where">Qwen3-4B on the <em class="hw hw-npu">Hexagon NPU</em></div>
-        <p>A small local model compresses raw work into structured Findings: learnings, decisions, dead ends, open questions. Raw transcripts never leave the device.</p>
-      </div>
-      <div class="pipe-card">
-        <div class="k">SYNTHESIZE</div>
-        <div class="where">Llama-3.3-70B on <em class="hw hw-ai100">Cloud AI 100</em></div>
-        <p>A large model folds everyone's findings into one working memory: dedup, conflicts, lineage. Two people reaching the same insight become one Finding with both names on it.</p>
-      </div>
-      <div class="pipe-card">
-        <div class="k">RETRIEVE</div>
-        <div class="where">MCP · pull-only · no LLM</div>
-        <p>Agents ask in natural language and get suppression-aware answers with attribution. Nothing is injected unprompted.</p>
+    <span class="slide-eyebrow">The data flow</span>
+    <h2>From raw work to curated memory, and back.</h2>
+    <p class="sub">The full round trip. A finding leaves your machine on the copper lane; an answer returns on the green one. No stage on the answer path ever wakes a model.</p>
+    <div class="flowlane in">
+      <div class="fl-label">A finding goes in</div>
+      <div class="chain">
+        <div class="node agent"><b>Your agent works</b><span>raw work · stays on-device</span></div>
+        <div class="arrowsep"></div>
+        <div class="node"><b>Distil</b><span>Qwen3-4B · Hexagon NPU</span></div>
+        <div class="arrowsep"></div>
+        <div class="node"><b>Triage</b><span>deterministic · no LLM</span></div>
+        <div class="arrowsep"></div>
+        <div class="node"><b>Session log</b><span>append-only</span></div>
+        <div class="arrowsep"></div>
+        <div class="node"><b>Synthesize</b><span>Llama-3.3-70B · AI 100</span></div>
+        <div class="arrowsep"></div>
+        <div class="node end"><b>Working memory</b><span>curated · versioned</span></div>
       </div>
     </div>
-    <p class="curated"><b>Curated, not accumulated.</b> The shared memory is not a dump of everything everyone said: synthesis merges duplicates into one finding, resolves conflicts, demotes the trivial, and keeps every author's name on the lineage. Findings are queryable the instant they land; curation catches up behind them inside natural human think-time.</p>
-    <div class="retrv">
-      <h3>Retrieval is ranked, and it never wakes a model.</h3>
-      <p class="rsub">The query path is deterministic end to end, which is why answers are instant and free.</p>
-      <div class="retrv-cols">
-        <div class="rcol">
-          <div class="rk">LANES</div>
-          <p>Candidates gather from two lanes: the curated working memory and the long-term finding store, so a fresh decision and an old dead end compete on equal terms.</p>
-        </div>
-        <div class="rcol">
-          <div class="rk">RANK</div>
-          <p>Embedding similarity does the ordering, with recency in the mix. Same query, same ranking, every time: no sampling, no drift.</p>
-        </div>
-        <div class="rcol">
-          <div class="rk">FILTER</div>
-          <p>Suppression-aware delivery: an asker never gets their own contribution echoed back, and every answer arrives with its authors attached.</p>
-        </div>
+    <div class="flowlane out">
+      <div class="fl-label">An answer comes back</div>
+      <div class="chain">
+        <div class="node agent"><b>Your agent asks</b><span>MCP · pull-only</span></div>
+        <div class="arrowsep"></div>
+        <div class="node"><b>Lanes</b><span>working + long-term</span></div>
+        <div class="arrowsep"></div>
+        <div class="node"><b>Rank</b><span>embeddings + recency</span></div>
+        <div class="arrowsep"></div>
+        <div class="node"><b>Filter</b><span>suppression-aware</span></div>
+        <div class="arrowsep"></div>
+        <div class="node end"><b>Back to your agent</b><span>answer + authors</span></div>
       </div>
     </div>
+    <p class="curated"><b>Curated, not accumulated.</b> Synthesis merges duplicates into one finding, resolves conflicts, demotes the trivial, and keeps every author on the lineage. Findings are queryable the instant they land; curation catches up inside human think-time.</p>
   </section>
 
   <section class="slide s-cases" data-reveal id="s-cases">
@@ -3683,8 +3650,6 @@ _HOME_PAGE = """<!doctype html>
     buttons above are read-only by construction: every route is mounted GET-only.
   </p>
 </main>
-</div>
-</div>
 <div id="hud" aria-hidden="true">
   <div class="hud-dots" id="hud-dots"></div>
   <span class="hud-hint" id="hud-count">1 / 6</span>
@@ -3790,50 +3755,6 @@ _HOME_PAGE = """<!doctype html>
   } catch (e) {}
   var themeBtn = document.getElementById("theme-btn");
   if (themeBtn) themeBtn.addEventListener("click", toggleTheme);
-
-  // ── architecture switch: today vs what the seams allow ──
-  var arch = document.getElementById("arch");
-  var archToday = document.getElementById("arch-today");
-  var archAllows = document.getElementById("arch-allows");
-  var archCaption = document.getElementById("arch-caption");
-  var ARCH_TEXT = {
-    today: "Running now: sid and aditya distil with Qwen3-4B on the Hexagon NPU, akhil runs the same worker on Claude Haiku through the Anthropic API, and synthesis runs Llama-3.3-70B on Cloud AI 100.",
-    allows: "Every module is swappable: any agent, any worker provider (GenieX NPU, Anthropic API, Claude CLI, offline stand-in), and any synthesis backend up to a frontier model. The pipeline runs end to end on any machine, even fully offline."
-  };
-  function setArch(view) {
-    if (!arch) return;
-    arch.setAttribute("data-view", view);
-    if (archToday) archToday.setAttribute("aria-pressed", view === "today" ? "true" : "false");
-    if (archAllows) archAllows.setAttribute("aria-pressed", view === "allows" ? "true" : "false");
-    if (archCaption) archCaption.textContent = ARCH_TEXT[view];
-  }
-  if (archToday) archToday.addEventListener("click", function () { setArch("today"); });
-  if (archAllows) archAllows.addEventListener("click", function () { setArch("allows"); });
-
-  // ── the five service stages: click to unpack ──
-  var LANE_TEXT = {
-    log: "Session log. Every finding lands in an append-only log first. Nothing is edited in place: the current view is always recomputed from history, so provenance is never lost, even across merges.",
-    fold: "The fold. Deterministic triage replays the log into the current view: visible, superseded, or trivial. No LLM in the loop, no token cost, and the same answer every time.",
-    retrieve: "Retrieval. Queries never wake a model: candidates gather from the working memory and long-term finding lanes, rank by embedding similarity with recency, and suppression filters out what the asker already knows.",
-    synth: "Synthesis scheduler. Merges are scheduled, not reflexive: debounced behind human think-time and spend-governed. Each round sends the fold to Llama-3.3-70B on Cloud AI 100 and lands one curated rewrite.",
-    memory: "Working memory. One bounded, versioned document. Curated, not accumulated: every merge keeps authors on the lineage, and superseded findings stay, struck through, pointing at what replaced them."
-  };
-  var archDetail = document.getElementById("arch-detail");
-  if (arch && archDetail) {
-    arch.addEventListener("click", function (ev) {
-      var lane = ev.target.closest ? ev.target.closest(".lane-g") : null;
-      if (!lane) return;
-      var key = lane.getAttribute("data-lane");
-      if (!key || !LANE_TEXT[key]) return;
-      if (arch.getAttribute("data-focus") === key) {
-        arch.removeAttribute("data-focus");
-        archDetail.innerHTML = "Click a service stage above to see the work it does. <b>Retrieval</b> and <b>the fold</b> never wake a model; <b>synthesis</b> is the only stage that spends.";
-        return;
-      }
-      arch.setAttribute("data-focus", key);
-      archDetail.textContent = LANE_TEXT[key];
-    });
-  }
 
   // ── count-ups: the measured numbers earn their reveal ──
   function countUp(el) {
@@ -3959,6 +3880,7 @@ _HOME_PAGE = """<!doctype html>
   function enterSlides() {
     if (slideMode) return;
     slideMode = true;
+    closeSessMenu();
     revealEverythingNow();
     document.body.setAttribute("data-mode", "slides");
     if (presentLabel) presentLabel.textContent = "Exit";
@@ -3982,6 +3904,25 @@ _HOME_PAGE = """<!doctype html>
   function toggleSlides() { if (slideMode) exitSlides(); else enterSlides(); }
   if (presentBtn) presentBtn.addEventListener("click", toggleSlides);
 
+  // ── sessions dropdown: the one piece of session chrome on this page ──
+  var sessMenu = document.getElementById("sess-menu");
+  var sessBtn = document.getElementById("sess-btn");
+  function closeSessMenu() {
+    if (!sessMenu) return;
+    sessMenu.classList.remove("open");
+    if (sessBtn) sessBtn.setAttribute("aria-expanded", "false");
+  }
+  if (sessMenu && sessBtn) {
+    sessBtn.addEventListener("click", function (ev) {
+      ev.stopPropagation();
+      var open = sessMenu.classList.toggle("open");
+      sessBtn.setAttribute("aria-expanded", open ? "true" : "false");
+    });
+    document.addEventListener("click", function (ev) {
+      if (sessMenu.classList.contains("open") && !sessMenu.contains(ev.target)) closeSessMenu();
+    });
+  }
+
   // In slides mode the topbar auto-hides; it peeks back when the pointer
   // approaches the top edge, so Exit and the theme toggle stay reachable.
   var topbar = document.querySelector(".topbar");
@@ -4003,6 +3944,7 @@ _HOME_PAGE = """<!doctype html>
   document.addEventListener("keydown", function (e) {
     var tag = e.target && e.target.tagName;
     if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+    if (e.key === "Escape" && sessMenu && sessMenu.classList.contains("open")) { closeSessMenu(); return; }
     if (e.key === "t" || e.key === "T") { toggleTheme(); return; }
     if (e.key === "f" || e.key === "F") { toggleFullscreen(); return; }
     if (e.shiftKey && (e.key === "S" || e.key === "s")) { toggleSlides(); return; }
@@ -4427,10 +4369,11 @@ _MEMORY_PAGE = """<!doctype html>
 </aside>
 <div class="content">
 <header class="topbar">
-  <nav class="tabs" aria-label="session pages">
+  <nav class="tabs" aria-label="pages">
+    <a href="/">Home</a>
     <a id="tab-brain" href="/debug">Brain</a>
-    <a id="tab-log" href="/debug/log">Log</a>
     <a id="tab-memory" href="/debug/memory" aria-current="page">Memory</a>
+    <a id="tab-log" href="/debug/log">Log</a>
   </nav>
   <button class="tool" id="theme-btn" type="button" aria-label="toggle theme (T)"><svg class="ic-moon" viewBox="0 0 20 20" aria-hidden="true"><path class="stroke-ic" d="M16.5 12.2A7 7 0 0 1 7.8 3.5a7 7 0 1 0 8.7 8.7z"/></svg><svg class="ic-sun" viewBox="0 0 20 20" aria-hidden="true"><circle class="stroke-ic" cx="10" cy="10" r="3.6"/><path class="stroke-ic" d="M10 1.8v2.1M10 16.1v2.1M1.8 10h2.1M16.1 10h2.1M4.2 4.2l1.5 1.5M14.3 14.3l1.5 1.5M15.8 4.2l-1.5 1.5M5.7 14.3l-1.5 1.5"/></svg><span>Theme</span></button>
 </header>
@@ -4737,6 +4680,9 @@ _MEMORY_PAGE = """<!doctype html>
   refresh();
   setInterval(refresh, 2000);
 })();
+
+
+
 
 
 
