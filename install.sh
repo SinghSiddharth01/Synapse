@@ -1,536 +1,372 @@
 #!/bin/sh
-# Synapse — one-command install and run, macOS / Linux.
+# Synapse installer — macOS / Linux. INSTALLS AND NOTHING ELSE.
 #
-#   curl -LsSf https://raw.githubusercontent.com/SinghSiddharth01/Synapse/main/install.sh | sh -s -- --purpose "demo session"
+#   client:  curl -LsSf https://raw.githubusercontent.com/SinghSiddharth01/Synapse/main/install.sh | sh
+#   server:  curl -LsSf https://raw.githubusercontent.com/SinghSiddharth01/Synapse/main/install.sh | sh -s -- server
 #
-# `sh -s --` is load-bearing: it is what lets arguments through the pipe, so a
-# teammate joining a session pastes ONE line instead of transcribing a URL and
-# a session id by hand.
+# The lifecycle is three separate stages, and this script is ONLY the first:
 #
-# POSIX sh, deliberately: this runs under `dash` on Debian-family boxes where
-# /bin/sh is not bash. No arrays, no [[ ]], no `local`, no `set -o pipefail`.
+#   install     this script — puts the `synapse` (or `synapse-server`)
+#               command on the machine. Writes no config, asks no questions,
+#               registers nothing, STARTS NOTHING.
+#   configure   `synapse configure` / `synapse config set` — service URL,
+#               contributor, keys file. Re-runnable, one key at a time.
+#   run         `synapse up` / `synapse-server up` — starts the services, in
+#               the foreground, only when you ask. Nothing is a daemon.
 #
-# Safe under `curl … | sh`: stdin IS the script, so nothing here ever reads
-# from it. Every interactive decision is a flag instead. That is only half the
-# guarantee: a CHILD that reads stdin eats the rest of THIS SCRIPT out of the
-# pipe, and the shell then dies mid-file with "unexpected EOF" having skipped
-# every line the child swallowed. So every child below is run with
-# `< /dev/null`, and git is told never to prompt.
+# No git, no clone: the wheels come from the GitHub Release bundle built by
+# CI (.github/workflows/release.yml). Inside a checkout the wheels are built
+# from the tree instead, so this same script serves developers.
+#
+# POSIX sh, deliberately: runs under dash. Safe under `curl … | sh`: stdin is
+# the script, nothing here reads from it, and every child runs < /dev/null.
 set -eu
-GIT_TERMINAL_PROMPT=0
-export GIT_TERMINAL_PROMPT
-# Every `cd` below means "this literal path", never "search CDPATH for it".
 unset CDPATH 2>/dev/null || true
 
-REPO_URL="https://github.com/SinghSiddharth01/Synapse.git"
-RAW_URL="https://raw.githubusercontent.com/SinghSiddharth01/Synapse/main"
-# Kept in lockstep with packages/orchestrator/pyproject.toml:12 ("mcp==1.9.4")
-# and scripts/doctor.py:REQUIRED_MCP. Three copies is two too many, but the
-# installer must be able to say the number before a venv exists to ask.
-REQUIRED_MCP="1.9.4"
+REPO_SLUG="SinghSiddharth01/Synapse"
+CLIENT_ASSET="synapse-client-wheels.zip"
+SERVER_ASSET="synapse-server-wheels.zip"
+MIN_UV_MINOR=6            # warn below uv 0.6 — old uvs mishandle workspaces
 
-DIR="./Synapse"
-PROJECT=""
+COMPONENT="client"
+TAG=""
+LOCAL_DIR=""
 DO_UPDATE=0
-DO_CLEAN=0
-DOCTOR_ONLY=0
-NO_START=0
-SKIP_MCP=0
-FORCE=0
-JOINING=0          # set when --service-url is seen; observed, never consumed
+KEEP_CONFIG=0
 UV="uv"
 
 say()  { printf '%s\n' "$*"; }
 step() { printf '\n==> %s\n' "$*"; }
 die()  { printf 'install.sh: %s\n' "$*" >&2; exit 1; }
 
-# One argument per line. Deliberately NOT "$*": collapsing argv into a string
-# renders --purpose "the DMA timing bug" as four words, which is exactly the
-# bug someone would come here to diagnose. What execs is "$@", so what is
-# shown has to have the same boundaries.
-show_args() {
-  for SHOW_ARG in "$@"; do
-    printf '      | %s\n' "$SHOW_ARG"
-  done
-}
-
 usage() {
   cat <<USAGE
-Synapse installer — clones, syncs, checks, and starts the stack.
+Synapse installer — installs, and only installs.
 
-HOST a session (from nothing):
-  curl -LsSf $RAW_URL/install.sh | sh -s -- --purpose "demo session"
+  install.sh [client|server|uninstall] [options]
 
-JOIN someone's session (from nothing, one paste):
-  curl -LsSf $RAW_URL/install.sh | sh -s -- --service-url http://192.168.4.44:8899 --shared-id sh-bbe76a56 --contributor akhil
+  client (default)  the 'synapse' CLI: orchestrator, MCP server, edge worker
+  server            the 'synapse-server' CLI: the shared context service
+  uninstall         stop Synapse processes, remove both installed halves AND
+                    ~/.synapse (config + state) — a reinstall that inherits a
+                    stale service.url is worse than re-running configure.
+                    Pack/MCP leftovers are listed, never deleted.
 
-Windows (PowerShell) does the same thing:
-  & ([scriptblock]::Create((irm $RAW_URL/install.ps1))) -ServiceUrl http://192.168.4.44:8899 -SharedId sh-bbe76a56 -Contributor akhil
+Options:
+  --tag <tag>    install this release instead of the latest
+  --local <dir>  install from a local bundle/checkout instead of GitHub
+  --update       reinstall over an existing install (picks up new versions)
+  --keep-config  (uninstall) preserve ~/.synapse for a later reinstall
+  -h, --help     this
 
-From a checkout:
-  ./install.sh --purpose "demo session"
+One-liners (no clone, no flags — install is just install):
+  curl -LsSf https://raw.githubusercontent.com/$REPO_SLUG/main/install.sh | sh
+  curl -LsSf https://raw.githubusercontent.com/$REPO_SLUG/main/install.sh | sh -s -- server
 
-Installer flags:
-  --dir <path>      where to clone (default $DIR); ignored inside a checkout
-  --update          git pull --ff-only, and replace already-installed awareness
-                    pack entries (the old copy is moved aside, not deleted).
-                    The ONLY flag that pulls. Never switches branch.
-  --clean           kill orphaned synapse processes before starting
-  --project <path>  where to run 'claude mcp add' (default: your cwd, unless
-                    that is inside the Synapse checkout)
-  --doctor-only     inspect this machine, then stop. Clones and syncs if there
-                    is nothing to inspect yet, but creates no secrets.jsonc,
-                    registers no MCP server, copies no pack, writes no log
-                    into the checkout, and starts nothing.
-  --no-start        do everything except start the stack
-  --skip-mcp        do not register the MCP server or copy the awareness pack
-  --force           start even if the doctor reports a FAIL, and downgrade the
-                    mcp version mismatch from an abort to a warning
-  --                end of installer flags; everything after it is forwarded
-                    verbatim, even if it looks like one of the above
-  -h, --help        this
+Windows (PowerShell):
+  & ([scriptblock]::Create((irm https://raw.githubusercontent.com/$REPO_SLUG/main/install.ps1)))
+  & ([scriptblock]::Create((irm https://raw.githubusercontent.com/$REPO_SLUG/main/install.ps1))) -Component server
 
-EVERY OTHER FLAG is passed straight through to scripts/serve_local.py --
---purpose, --shared-id, --service-url, --contributor, --host, --npu, --listen,
---live, --distiller, --distiller-model, --synthesizer-model, --claude-model,
-and anything added later. The installer never enumerates them, so the two
-cannot drift. Run 'uv run python scripts/serve_local.py --help' for that list.
+After installing:
+  synapse configure           # client: service URL (ping-tested), contributor
+  synapse-server configure    # server: API keys file (one key per line), model
+  synapse up | synapse-server up      # start things — only ever on demand
+  synapse health | synapse-server health
 USAGE
 }
 
-# ---------------------------------------------------------------------------
-# argument parsing
-#
-# POSIX sh has no arrays. The idiom is to rotate "$@": consume from the front,
-# append what we keep to the back, and shift past the originals. That preserves
-# each argument EXACTLY, spaces and all -- which matters, because --purpose
-# "the DMA timing bug" must arrive at serve_local.py as one token.
-# ---------------------------------------------------------------------------
-#
-# One hazard the rotation cannot see on its own: an installer-consumed flag
-# sitting where a pass-through flag wanted its VALUE. `--purpose --update` is
-# not "purpose, then update" -- it is a missing purpose -- but a flat scan
-# consumes --update and forwards a bare --purpose. The installer is forbidden
-# to enumerate serve_local.py's flags (that is the whole point of the
-# pass-through rule), so it cannot know which take a value; instead it NOTICES
-# the shape and says so, and offers `--` for the case where the shape is
-# intended. PREV_KEPT is the last token that was forwarded.
-# ---------------------------------------------------------------------------
-ARGC=$#
-KEPT=0
-PREV_KEPT=""
-ENDOPTS=0
-while [ "$ARGC" -gt 0 ]; do
-  ARG=$1
+while [ $# -gt 0 ]; do
+  case "$1" in
+    client|server|uninstall) COMPONENT=$1 ;;
+    --tag)    [ $# -gt 1 ] || die "--tag needs a value";  TAG=$2; shift ;;
+    --local)  [ $# -gt 1 ] || die "--local needs a path"; LOCAL_DIR=$2; shift ;;
+    --update) DO_UPDATE=1 ;;
+    --keep-config) KEEP_CONFIG=1 ;;
+    -h|--help) usage; exit 0 ;;
+    --service-url|--shared-id|--purpose|--contributor)
+      die "'$1' is not an installer flag any more. Install and configuration
+are separate stages now:
+  1) finish this install (no flags needed)
+  2) synapse config set service.url http://<host>:8899
+  3) synapse up --shared-id <id>        # joining happens at RUN time" ;;
+    *) die "unknown flag '$1' (see --help)" ;;
+  esac
   shift
-  ARGC=$((ARGC - 1))
-  if [ "$ENDOPTS" -eq 1 ]; then
-    case "$ARG" in --service-url|--service-url=*) JOINING=1 ;; esac
-    set -- "$@" "$ARG"
-    KEPT=$((KEPT + 1))
-    continue
-  fi
-  case "$ARG" in
-    --dir|--project|--update|--clean|--doctor-only|--no-start|--skip-mcp|--force)
-      case "$PREV_KEPT" in
-        --*=*|"") ;;
-        --*) say "  WARNING: '$ARG' was consumed by the installer, but it follows"
-             say "           '$PREV_KEPT', which may have wanted it as a value. Put"
-             say "           installer flags first, or use -- to force pass-through:"
-             say "             ./install.sh $ARG -- $PREV_KEPT <value>" ;;
-      esac ;;
-  esac
-  case "$ARG" in
-    --)        ENDOPTS=1 ;;
-    --dir)     [ "$ARGC" -gt 0 ] || die "--dir needs a path"
-               DIR=$1; shift; ARGC=$((ARGC - 1)) ;;
-    --project) [ "$ARGC" -gt 0 ] || die "--project needs a path"
-               PROJECT=$1; shift; ARGC=$((ARGC - 1)) ;;
-    --update)      DO_UPDATE=1 ;;
-    --clean)       DO_CLEAN=1 ;;
-    --doctor-only) DOCTOR_ONLY=1 ;;
-    --no-start)    NO_START=1 ;;
-    --skip-mcp)    SKIP_MCP=1 ;;
-    --force)       FORCE=1 ;;
-    -h|--help)     usage; exit 0 ;;
-    *)
-      # Observed, not consumed: P7 needs to know this is a joiner run, and
-      # serve_local.py still needs the flag itself.
-      case "$ARG" in --service-url|--service-url=*) JOINING=1 ;; esac
-      set -- "$@" "$ARG"
-      KEPT=$((KEPT + 1))
-      PREV_KEPT=$ARG
-      ;;
-  esac
 done
-# Everything still in "$@" is now the pass-through list, in original order.
+
+[ "$KEEP_CONFIG" -eq 1 ] && [ "$COMPONENT" != "uninstall" ] && \
+  die "--keep-config only applies to 'uninstall'"
 
 # ---------------------------------------------------------------------------
-# P0 — preamble
+# U — uninstall: the mirror of install, plus config removal. In the INSTALLER
+# and not the CLI so it works when the installed CLI is broken (the decided
+# shape, docs/plans/2026-08-06-uninstall-mechanism.md). One amendment to that
+# plan (2026-08-06, by the owner): ~/.synapse is REMOVED by default — after
+# `uv tool uninstall`, a reinstall silently inherited the previous machine's
+# service.url from the surviving config, which is exactly the class of stale
+# state an uninstall exists to end. --keep-config preserves it for upgrades.
 # ---------------------------------------------------------------------------
-say "Synapse installer"
-say "  os        $(uname -s) $(uname -m)"
-if [ "$KEPT" -gt 0 ]; then
-  say "  forward   $KEPT argument(s) to scripts/serve_local.py:"
-  show_args "$@"
-else
-  say "  forward   (no serve_local.py flags given)"
+if [ "$COMPONENT" = "uninstall" ]; then
+  say "Synapse uninstaller"
+  SYN_HOME="${SYNAPSE_HOME:-$HOME/.synapse}"
+
+  step "U1  stop running Synapse processes"
+  # By OUR ports only (8787 orchestrator, 8790 worker dashboard, 8899 local
+  # service) — never by name-substring, which could match an editor with a
+  # synapse file open, and never geniex: the model seam is not ours to stop.
+  STOPPED=0
+  if command -v lsof >/dev/null 2>&1; then
+    for SPEC in "8787 orchestrator" "8790 edge-worker" "8899 service"; do
+      PORT=${SPEC%% *}; LABEL=${SPEC#* }
+      PIDS=$(lsof -ti "tcp:$PORT" 2>/dev/null || true)
+      if [ -n "$PIDS" ]; then
+        # shellcheck disable=SC2086
+        kill $PIDS 2>/dev/null || true
+        say "  stopped   $LABEL (:$PORT)"
+        STOPPED=1
+      fi
+    done
+    [ "$STOPPED" -eq 0 ] && say "  nothing running on :8787/:8790/:8899"
+  else
+    say "  lsof not available — if 'synapse up' or 'synapse-server up' is"
+    say "  running, stop it with Ctrl-C; this script will not guess at PIDs."
+  fi
+
+  step "U2  remove installed tools"
+  REMOVED=0
+  if command -v "$UV" >/dev/null 2>&1; then
+    for TOOL in synapse-cli synapse-service; do
+      if "$UV" tool list 2>/dev/null | grep -q "^$TOOL "; then
+        "$UV" tool uninstall "$TOOL" < /dev/null
+        say "  removed   $TOOL"
+        REMOVED=1
+      fi
+    done
+  fi
+  [ "$REMOVED" -eq 0 ] && say "  no synapse uv tools installed — nothing to remove"
+
+  step "U3  config and state"
+  if [ -d "$SYN_HOME" ]; then
+    if [ "$KEEP_CONFIG" -eq 1 ]; then
+      say "  kept      $SYN_HOME (--keep-config)"
+    else
+      say "  removing  $SYN_HOME — config.toml, session bindings, the"
+      say "            write-ahead log, and logs go with it. (--keep-config"
+      say "            preserves it for a reinstall/upgrade.)"
+      rm -rf "$SYN_HOME"
+      say "  removed   $SYN_HOME"
+    fi
+  else
+    say "  no $SYN_HOME — nothing to remove"
+  fi
+
+  step "U4  left in place — yours, listed with the removal command"
+  CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+  LEFT=0
+  for KIND in skills commands agents; do
+    for ENTRY in "$CLAUDE_DIR/$KIND"/synapse*; do
+      [ -e "$ENTRY" ] || continue
+      say "  pack      $ENTRY"
+      say "            rm -r '$ENTRY'"
+      LEFT=1
+    done
+  done
+  if command -v claude >/dev/null 2>&1; then
+    say "  mcp       if 'synapse' is registered (user scope or per project):"
+    say "            claude mcp remove synapse"
+    LEFT=1
+  fi
+  [ "$LEFT" -eq 0 ] && say "  none found"
+
+  say ""
+  say "Uninstalled."
+  exit 0
 fi
-# No secret can appear above: credentials are never flags in this project,
-# they live in secrets.jsonc.
+
+say "Synapse installer — $COMPONENT"
+say "  os        $(uname -s) $(uname -m)"
+say "  this script only installs. It will not ask questions, write config,"
+say "  or start anything."
 
 # ---------------------------------------------------------------------------
-# P1 — prerequisites
+# P1 — prerequisites. Use what exists; install what is missing; warn on old.
 # ---------------------------------------------------------------------------
 step "P1  prerequisites"
-command -v git >/dev/null 2>&1 || die "git is required. Install Xcode command line tools (xcode-select --install) or your distro's git package, then re-run."
-say "  git       $(git --version)"
 
 if command -v uv >/dev/null 2>&1; then
-  say "  uv        $(uv --version)"
+  UV_VERSION=$(uv --version 2>/dev/null | awk '{print $2}')
+  say "  uv        $UV_VERSION (already installed — using it)"
+  UV_MINOR=$(printf '%s' "$UV_VERSION" | awk -F. '{print $2}')
+  case "$UV_MINOR" in
+    ''|*[!0-9]*) ;;
+    *) if [ "${UV_VERSION%%.*}" -eq 0 ] && [ "$UV_MINOR" -lt "$MIN_UV_MINOR" ]; then
+         say "  WARNING: uv $UV_VERSION is older than 0.$MIN_UV_MINOR — consider 'uv self update'"
+       fi ;;
+  esac
 else
   say "  uv        not found — installing from https://astral.sh/uv"
   curl -LsSf https://astral.sh/uv/install.sh | sh
-  # PATH in THIS shell is stale: the installer edited a profile we already
-  # sourced. Re-probe the known location and use the absolute path from here.
   if [ -x "$HOME/.local/bin/uv" ]; then
     UV="$HOME/.local/bin/uv"
   elif command -v uv >/dev/null 2>&1; then
     UV="uv"
   else
-    die "uv installed but is not on PATH and not at \$HOME/.local/bin/uv. Open a new terminal and re-run."
+    die "uv installed but not on PATH and not at \$HOME/.local/bin/uv. Open a new terminal and re-run."
   fi
-  say "  uv        $("$UV" --version)  ($UV)"
+  say "  uv        $("$UV" --version | awk '{print $2}')  ($UV)"
 fi
-
-# An absolute $UV is not enough. `uv run` prepends ONLY <repo>/.venv/bin to the
-# child's PATH, so scripts/doctor.py's check 1 (`shutil.which("uv")`) reports
-# "FAIL uv not on PATH" on the very box this installer just provisioned -- and
-# P8's `grep '^FAIL'` then aborts the run over its own success. Put uv's own
-# directory on PATH for every child from here on.
+# Put uv's own directory on PATH for every child of this run.
 UV_BIN=$(command -v "$UV" 2>/dev/null || printf '%s' "$UV")
 case "$UV_BIN" in
   */*) UV_DIR=$(cd -- "$(dirname -- "$UV_BIN")" && pwd)
        case ":$PATH:" in
          *":$UV_DIR:"*) ;;
-         *) PATH="$UV_DIR:$PATH"; export PATH
-            say "  path      added $UV_DIR to PATH for this run" ;;
+         *) PATH="$UV_DIR:$PATH"; export PATH ;;
        esac ;;
 esac
 
-if command -v claude >/dev/null 2>&1; then
-  say "  claude    present"
+if PY=$("$UV" python find '>=3.12' 2>/dev/null); then
+  say "  python    $PY (already present — using it)"
 else
-  say "  claude    not found — the stack still runs; you just have no agent to"
-  say "            connect yet. Install Claude Code, then run:"
-  say "              claude mcp add --transport http --scope project synapse http://127.0.0.1:8787/mcp"
-  SKIP_MCP=1
+  say "  python    no 3.12+ found — uv will download one (managed, isolated)"
+  "$UV" python install 3.12 < /dev/null
+  say "  python    $("$UV" python find '>=3.12')"
 fi
 
-# ---------------------------------------------------------------------------
-# P2 — repo. Never clobber, never switch branch, never pull unless asked.
-# ---------------------------------------------------------------------------
-step "P2  repository"
-TOP=""
-if TOP=$(git rev-parse --show-toplevel 2>/dev/null) && [ -f "$TOP/scripts/serve_local.py" ]; then
-  cd "$TOP"
-  say "  using this checkout: $TOP"
-elif [ -f "$DIR/scripts/serve_local.py" ]; then
-  cd "$DIR"
-  say "  using existing checkout: $(pwd)"
-else
-  say "  cloning $REPO_URL -> $DIR"
-  git clone "$REPO_URL" "$DIR" < /dev/null
-  cd "$DIR"
-fi
-
-# Print what you are actually about to run. A checkout parked on a fallback
-# branch is a legitimate state -- the demo may depend on it -- so this reports
-# rather than corrects.
-BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')
-SHA=$(git rev-parse --short HEAD 2>/dev/null || echo '?')
-say "  branch    $BRANCH  $SHA"
-
-if [ "$DO_UPDATE" -eq 1 ]; then
-  say "  updating (--update): git pull --ff-only on $BRANCH"
-  git pull --ff-only < /dev/null
-  say "  now at    $(git rev-parse --short HEAD)"
-else
-  say "  not pulling (pass --update if you want to)"
-fi
-
-# ---------------------------------------------------------------------------
-# P3 — sync, then assert the one pin that silently ruins Windows-on-ARM
-# ---------------------------------------------------------------------------
-step "P3  dependencies"
-"$UV" sync < /dev/null
-# The probe must never raise. `m.version('mcp')` on a venv where mcp did not
-# install throws PackageNotFoundError; under `set -eu` that traceback killed
-# the script at this line and the carefully worded `die` below -- the only
-# place that says "do not upgrade mcp" -- never printed.
-FOUND_MCP=$("$UV" run python -c '
-import importlib.metadata as m
-try:
-    print(m.version("mcp"))
-except Exception:
-    print("absent")
-' < /dev/null 2>/dev/null) || FOUND_MCP="absent"
-[ -n "$FOUND_MCP" ] || FOUND_MCP="absent"
-if [ "$FOUND_MCP" != "$REQUIRED_MCP" ]; then
-  MCP_MSG="mcp is $FOUND_MCP, expected $REQUIRED_MCP.
-Do not upgrade mcp; re-sync from uv.lock:  $UV sync --frozen
-Newer mcp pulls a cryptography release with no ARM64 Windows wheel, and the
-build failure it produces reads like an unrelated Rust error."
-  # --force is documented as "start even if the doctor reports a FAIL". The
-  # doctor reports this same mismatch as a FAIL, so an ungated abort here made
-  # --force unable to do the one thing it promises.
-  if [ "$FORCE" -eq 1 ]; then
-    say "  WARNING (--force): $MCP_MSG"
+if [ "$COMPONENT" = "client" ]; then
+  if command -v claude >/dev/null 2>&1; then
+    say "  claude    present (needed later for MCP registration / the claude-cli arm)"
   else
-    die "$MCP_MSG"
+    say "  claude    not found — fine for install; 'synapse configure' will say"
+    say "            what to do when an agent needs to connect"
   fi
-else
-  say "  mcp       $FOUND_MCP  (pinned)"
-fi
-
-# ---------------------------------------------------------------------------
-# P4 — secrets. Created from the template, NEVER overwritten, never echoed.
-# ---------------------------------------------------------------------------
-step "P4  credentials"
-if [ -f secrets.jsonc ]; then
-  say "  secrets.jsonc already exists — left untouched"
-elif [ "$DOCTOR_ONLY" -eq 1 ]; then
-  # --doctor-only is an INSPECTION. Creating the file here would answer the
-  # doctor's own question before it is asked: check 6 reports "secrets.jsonc
-  # absent" as a WARN, and that WARN was unreachable through the installer
-  # because P4 had already made it false. An inspection that changes what it
-  # inspects is not one.
-  say "  secrets.jsonc absent — NOT creating it (--doctor-only changes nothing)"
-  say "  the doctor below reports the real state of this machine"
-elif [ -f secrets.example.jsonc ]; then
-  cp secrets.example.jsonc secrets.jsonc
-  say "  created $(pwd)/secrets.jsonc from the template"
-else
-  say "  secrets.example.jsonc missing from this checkout — skipping"
-fi
-say "  Nothing in it is required for a first run: the stand-in arm needs no key."
-say "  Paste real keys there only when you want --live or --distiller anthropic."
-
-if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  if [ -f secrets.jsonc ] && ! git check-ignore -q secrets.jsonc; then
-    die "secrets.jsonc is NOT gitignored in this checkout. Refusing to continue —
-restore the 'secrets.jsonc' line in .gitignore first, or you will commit a key."
-  fi
-else
-  # A zip download has no .git. That is a legitimate way to get the code, and
-  # aborting on it would be a false failure -- there is no index to commit to.
-  say "  WARNING: not a git checkout (zip download?) — cannot verify that"
-  say "           secrets.jsonc is ignored. Do not commit it."
-fi
-
-# ---------------------------------------------------------------------------
-# P6 — port hygiene. Only ever under --clean. Before the doctor, so the
-# doctor's port check reports the state --clean actually left behind.
-# ---------------------------------------------------------------------------
-if [ "$DO_CLEAN" -eq 1 ] && [ "$DOCTOR_ONLY" -eq 0 ]; then
-  step "P6  clearing orphaned processes (--clean)"
-  pkill -f synapse-service || true
-  pkill -f synapse-orchestrator || true
-  pkill -f local_model_server || true
-  # These three patterns are Synapse's own processes and nothing else's. The
-  # model seam on 18181 can equally be held by `geniex serve` (see
-  # scripts/serve_local.py:68), which --clean deliberately does NOT kill: an
-  # NPU server is somebody's deliberate setup, not an orphan. So report what
-  # survived rather than leaving the operator to discover it at bind time.
-  if command -v lsof >/dev/null 2>&1; then
-    for PORT in 8787 8899 18181; do
-      HOLDER=$(lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null | tr '\n' ' ')
-      [ -n "$HOLDER" ] || continue
-      say "  still held: $PORT by pid ${HOLDER% }  (--clean does not kill"
-      say "              non-Synapse holders such as \`geniex serve\`)"
-    done
-  fi
-  say "  done"
-fi
-
-# ---------------------------------------------------------------------------
-# P8 — doctor. Runs BEFORE anything is started AND before P5 mutates
-# ~/.claude, so a box with the wrong interpreter or the wrong mcp is not
-# half-configured on the way to failing. Its output is teed, because the
-# Unicode canary only proves something through a redirection.
-# ---------------------------------------------------------------------------
-step "P8  pre-flight doctor"
-DOCTOR_RC_FILE=$(mktemp "${TMPDIR:-/tmp}/synapse-doctor-rc.XXXXXX")
-printf '0\n' > "$DOCTOR_RC_FILE"
-if [ "$DOCTOR_ONLY" -eq 1 ]; then
-  # An inspection writes nothing into the checkout. The tee still happens --
-  # it is the redirection that gives check 4 its meaning -- just into a temp
-  # file instead of creating .synapse/logs/ on a machine nobody asked to change.
-  DOCTOR_LOG=$(mktemp "${TMPDIR:-/tmp}/synapse-doctor.XXXXXX")
-else
-  mkdir -p .synapse/logs
-  DOCTOR_LOG=".synapse/logs/doctor.log"
-fi
-# `set -o pipefail` is a bashism we cannot use, and grepping the log for
-# '^FAIL' misses every way the doctor can fail WITHOUT printing a FAIL line --
-# an unhandled traceback, an OSError from the port probe, an ImportError in
-# the venv. So record the real exit status out of the pipeline and use it.
-# `|| echo` keeps `set -e` out of this: the status is data, not a failure.
-{ "$UV" run python scripts/doctor.py < /dev/null 2>&1 || echo "$?" > "$DOCTOR_RC_FILE"; } \
-  | tee "$DOCTOR_LOG"
-DOCTOR_RC=$(cat "$DOCTOR_RC_FILE" 2>/dev/null || echo 1)
-rm -f "$DOCTOR_RC_FILE"
-case "$DOCTOR_RC" in ''|*[!0-9]*) DOCTOR_RC=1 ;; esac
-if [ "$DOCTOR_RC" -ne 0 ]; then
-  say ""
-  say "  the doctor exited $DOCTOR_RC"
-fi
-# Belt and braces: a FAIL line with a zero exit would be a doctor bug, and
-# this is the cheaper half of catching it.
-if grep -q '^FAIL' "$DOCTOR_LOG"; then
-  DOCTOR_RC=1
-fi
-say ""
-if [ "$DOCTOR_ONLY" -eq 1 ]; then
-  say "  full log: $DOCTOR_LOG  (temporary — --doctor-only writes nothing here)"
-else
-  say "  full log: $(pwd)/$DOCTOR_LOG"
-fi
-
-if [ "$DOCTOR_ONLY" -eq 1 ]; then
-  say ""
-  say "--doctor-only: nothing was started, nothing was registered, nothing was"
-  say "written into this checkout."
-  exit "$DOCTOR_RC"
-fi
-
-if [ "$DOCTOR_RC" -ne 0 ] && [ "$FORCE" -eq 0 ]; then
-  die "the doctor reported a FAIL (above). Fix it, or re-run with --force."
-fi
-
-# A held port is a WARN, not a FAIL, and correctly so -- a host already
-# running is a normal state. But serve_local.py's claim_ports
-# (scripts/serve_local.py:159-189) does NOT treat it as normal: it SystemExits
-# on the first port it cannot bind. Without this line the operator reads
-# "0 fail", the installer proceeds, and the stack dies seconds later on
-# something the doctor already knew and graded as harmless.
-if grep -q '^WARN  ports' "$DOCTOR_LOG"; then
-  say ""
-  say "  NOTE: the doctor WARNed about a held port. serve_local.py will REFUSE"
-  say "        to start on one it cannot bind — which ports it needs depends on"
-  say "        your flags (--service-url drops 8899; --listen/--npu drop 18181;"
-  say "        see scripts/serve_local.py:277-278). If P7 below exits with"
-  say "        \"ports already in use\", re-run with --clean."
-fi
-
-# ---------------------------------------------------------------------------
-# P5 — MCP registration + awareness pack. Idempotent.
-# ---------------------------------------------------------------------------
-# --doctor-only is a machine INSPECTION. It must not register a server or
-# copy a pack into ~/.claude as a side effect of someone asking "is this box
-# ready?" -- that is a change, and they did not ask for one.
-if [ "$DOCTOR_ONLY" -eq 1 ]; then
-  step "P5  MCP registration — skipped (--doctor-only changes nothing)"
-elif [ "$SKIP_MCP" -eq 1 ]; then
-  step "P5  MCP registration — skipped (--skip-mcp)"
-else
-  step "P5  MCP registration"
-  # OLDPWD is where the operator was standing before P2's cd. Defaulted for
-  # `set -u`: under `curl | sh` it can be unset if no cd ever happened.
-  [ -n "$PROJECT" ] || PROJECT=${OLDPWD:-$PWD}
-  REPO_ABS=$(pwd)
-  PROJECT_ABS=$(cd -- "$PROJECT" 2>/dev/null && pwd) || PROJECT_ABS=""
-  # `!= "$(pwd)"` was an equality test, and the case it had to catch is
-  # containment: run the one-liner from $HOME and the clone lands in
-  # $HOME/Synapse, so OLDPWD ($HOME) is not equal to the checkout but every
-  # `docs/`, `packs/`, `scripts/` under it IS inside it. Registering a
-  # project-scoped server in a subdirectory of the Synapse checkout writes a
-  # .mcp.json into the repo the operator is about to `git status`.
-  INSIDE_CHECKOUT=0
-  case "$PROJECT_ABS" in
-    "$REPO_ABS"|"$REPO_ABS"/*) INSIDE_CHECKOUT=1 ;;
-    "") INSIDE_CHECKOUT=1 ;;
+  # Hardware-dependent, deliberately: GenieX serves the Snapdragon X Elite
+  # NPU, which is Windows-on-ARM hardware. On macOS/Linux there is nothing to
+  # install — the client uses the claude-cli / anthropic / listen arms here.
+  case "$(uname -s)" in
+    Darwin|Linux)
+      say "  geniex    skipped — NPU distillation (GenieX) is Snapdragon/Windows"
+      say "            hardware; this machine uses claude-cli / anthropic / listen" ;;
   esac
-  # Always YOUR OWN 127.0.0.1:8787, never the host's. One orchestrator per
-  # laptop is what keeps attribution honest: point your agent at someone
-  # else's and your findings are stamped with their contributor.
-  MCP_URL="http://127.0.0.1:8787/mcp"
-  if [ "$INSIDE_CHECKOUT" -eq 1 ]; then
-    say "  no project directory to register in (you are inside the Synapse"
-    say "  checkout itself, or it no longer exists). From the project you want"
-    say "  shared memory in, run:"
-    say "    claude mcp add --transport http --scope project synapse $MCP_URL"
-  # --scope project is per-directory: the registration lives in $PROJECT's own
-  # .mcp.json. Asking `claude mcp list` from the Synapse checkout therefore
-  # answered a question about the WRONG directory, and the idempotency skip
-  # never fired for anyone whose project was somewhere else. Ask from there.
-  elif ( cd "$PROJECT_ABS" && claude mcp list 2>/dev/null ) | grep -q '^synapse'; then
-    say "  already registered in $PROJECT_ABS — if /mcp shows it failed, pick"
-    say "  Reconnect there"
+fi
+
+# ---------------------------------------------------------------------------
+# P2 — obtain wheels: a local dir, this checkout, or the GitHub Release.
+# ---------------------------------------------------------------------------
+step "P2  packages"
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/synapse-install.XXXXXX")
+trap 'rm -rf "$TMP"' EXIT
+WHEELS=""
+
+SCRIPT_DIR=""
+case "$0" in
+  */*) SCRIPT_DIR=$(cd -- "$(dirname -- "$0")" 2>/dev/null && pwd) || SCRIPT_DIR="" ;;
+esac
+
+if [ -n "$LOCAL_DIR" ]; then
+  [ -d "$LOCAL_DIR" ] || die "--local $LOCAL_DIR is not a directory"
+  if ls "$LOCAL_DIR"/synapse_*.whl >/dev/null 2>&1; then
+    WHEELS="$LOCAL_DIR"
+    say "  using wheels already in $LOCAL_DIR"
+  elif [ -f "$LOCAL_DIR/pyproject.toml" ]; then
+    say "  building wheels from the checkout at $LOCAL_DIR"
+    (cd "$LOCAL_DIR" && "$UV" build --all-packages --out-dir "$TMP/wheels" < /dev/null)
+    WHEELS="$TMP/wheels"
   else
-    ( cd "$PROJECT_ABS" && claude mcp add --transport http --scope project synapse "$MCP_URL" < /dev/null )
-    say "  registered 'synapse' in $PROJECT_ABS"
+    die "--local $LOCAL_DIR holds neither wheels nor a checkout"
   fi
+elif [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/pyproject.toml" ] && [ -f "$SCRIPT_DIR/scripts/serve_local.py" ]; then
+  # Running from inside a checkout (developer path): build from the tree —
+  # what you install is what you are looking at, not last week's release.
+  say "  building wheels from this checkout ($SCRIPT_DIR)"
+  (cd "$SCRIPT_DIR" && "$UV" build --all-packages --out-dir "$TMP/wheels" < /dev/null)
+  WHEELS="$TMP/wheels"
+else
+  if [ "$COMPONENT" = "server" ]; then ASSET="$SERVER_ASSET"; else ASSET="$CLIENT_ASSET"; fi
+  if [ -n "$TAG" ]; then
+    URL="https://github.com/$REPO_SLUG/releases/download/$TAG/$ASSET"
+  else
+    URL="https://github.com/$REPO_SLUG/releases/latest/download/$ASSET"
+  fi
+  say "  downloading $URL"
+  if ! curl -fLsS -o "$TMP/$ASSET" "$URL" < /dev/null; then
+    die "could not download $ASSET. Either no release is published yet (run the
+'release' GitHub Actions workflow, or push a v* tag), or this machine is
+offline. From a checkout, './install.sh $COMPONENT' builds locally instead."
+  fi
+  mkdir -p "$TMP/wheels"
+  if command -v unzip >/dev/null 2>&1; then
+    unzip -q "$TMP/$ASSET" -d "$TMP/wheels"
+  else
+    PYBIN=$("$UV" python find '>=3.12')
+    "$PYBIN" -m zipfile -e "$TMP/$ASSET" "$TMP/wheels"
+  fi
+  WHEELS="$TMP/wheels"
+  [ -f "$WHEELS/VERSION" ] && say "  bundle    $(cat "$WHEELS/VERSION")"
+fi
 
-  # Awareness pack. A glob over whatever the pack actually ships, so a
-  # commands/ or agents/ directory landing later needs no edit here.
-  for KIND in skills commands agents; do
-    SRC="packs/claude-code/$KIND"
-    [ -d "$SRC" ] || continue
-    DEST="$HOME/.claude/$KIND"
-    mkdir -p "$DEST"
-    for ENTRY in "$SRC"/*; do
-      [ -e "$ENTRY" ] || continue
-      NAME=$(basename "$ENTRY")
-      if [ -e "$DEST/$NAME" ] && [ "$DO_UPDATE" -eq 0 ]; then
-        say "  pack      $KIND/$NAME already installed — left alone (--update to replace)"
-      else
-        # Move aside, never delete. What sits at $DEST/$NAME may be a skill the
-        # operator edited by hand; --update is documented as "git pull
-        # --ff-only", and an unprompted, unbacked-up rm -rf under that
-        # description is a surprise nobody consented to.
-        if [ -e "$DEST/$NAME" ]; then
-          BAK="$DEST/$NAME.synapse-bak.$(date +%Y%m%d%H%M%S)"
-          mv -- "$DEST/$NAME" "$BAK"
-          say "  pack      previous $KIND/$NAME moved aside -> $BAK"
-        fi
-        cp -R "$ENTRY" "$DEST/$NAME"
-        say "  pack      $KIND/$NAME -> $DEST/$NAME"
-      fi
-    done
+# ---------------------------------------------------------------------------
+# P3 — install. `uv tool install` gives each half its own isolated venv and a
+# command on PATH; local wheels satisfy the synapse-* pins, PyPI the rest.
+# ---------------------------------------------------------------------------
+step "P3  install"
+if [ "$COMPONENT" = "server" ]; then TOOL_GLOB="synapse_service"; TOOL="synapse-service"
+else TOOL_GLOB="synapse_cli"; TOOL="synapse-cli"; fi
+TOOL_WHEEL=""
+for WHEEL in "$WHEELS/$TOOL_GLOB"-*.whl; do
+  [ -e "$WHEEL" ] || continue
+  TOOL_WHEEL=$WHEEL
+  break
+done
+[ -n "$TOOL_WHEEL" ] || die "no $TOOL wheel in $WHEELS — wrong bundle for '$COMPONENT'?"
+# Every synapse-* dependency is pinned to the bundle's own wheel by explicit
+# path (--with <file>), so nothing that happens to share a name on PyPI can
+# ever shadow the release. PyPI serves only the third-party deps. The list is
+# filtered per component — a checkout build produces EVERY wheel, and the
+# client env must not quietly grow the service (or vice versa): the halves
+# stay decoupled precisely because neither can accidentally contain the other.
+if [ "$COMPONENT" = "server" ]; then
+  KEEP="synapse_contracts synapse_providers"
+else
+  KEEP="synapse_contracts synapse_providers synapse_distiller synapse_worker synapse_orchestrator"
+fi
+WITH_ARGS=""
+for WHEEL in "$WHEELS"/synapse_*.whl; do
+  [ "$WHEEL" = "$TOOL_WHEEL" ] && continue
+  BASE=$(basename "$WHEEL")
+  WANTED=0
+  for NAME in $KEEP; do
+    case "$BASE" in "$NAME"-*) WANTED=1 ;; esac
   done
-  say "  the doctor's 'awareness' line above described this machine BEFORE the"
-  say "  copy; re-run './install.sh --doctor-only' to see it settle."
-  if [ -f packs/claude-code/settings-snippet.json ]; then
-    say "  Optional hooks: merge packs/claude-code/settings-snippet.json into"
-    say "  your ~/.claude/settings.json by hand — this script will not rewrite"
-    say "  a settings file it does not own. See packs/claude-code/INSTALL.md."
-    # The snippet's command is
-    #   python3 "$CLAUDE_PROJECT_DIR/.claude/synapse-pack/hooks/freshness_pointer.py"
-    # and NOTHING above puts a file there: the pack loop copies skills/,
-    # commands/ and agents/ into ~/.claude, and hooks/ is neither. Merging the
-    # snippet alone yields a hook that cannot find its script on every prompt.
-    if [ -d packs/claude-code/hooks ]; then
-      say "  The snippet also needs the hook script itself, per project:"
-      say "    mkdir -p <your-project>/.claude/synapse-pack"
-      say "    cp -R $(pwd)/packs/claude-code/hooks <your-project>/.claude/synapse-pack/"
-    fi
-  fi
-fi
+  [ "$WANTED" -eq 1 ] && WITH_ARGS="$WITH_ARGS --with $WHEEL"
+done
+REINSTALL=""
+[ "$DO_UPDATE" -eq 1 ] && REINSTALL="--reinstall"
+# shellcheck disable=SC2086
+"$UV" tool install $REINSTALL $WITH_ARGS "$TOOL_WHEEL" < /dev/null
+say "  installed $TOOL into an isolated environment"
 
 # ---------------------------------------------------------------------------
-# P7 — start, in the foreground, so Ctrl-C works and the banner is live.
+# P4 — verify, then say what the NEXT stage is (without doing it).
 # ---------------------------------------------------------------------------
-if [ "$NO_START" -eq 1 ]; then
-  step "P7  start — skipped (--no-start)"
-  say "  would have exec'd: $UV run python scripts/serve_local.py"
-  show_args "$@"
-  exit 0
+step "P4  verify"
+if [ "$COMPONENT" = "server" ]; then CMD="synapse-server"; else CMD="synapse"; fi
+if command -v "$CMD" >/dev/null 2>&1; then
+  say "  $CMD is on PATH"
+else
+  say "  $CMD is installed but not on PATH yet. Run:"
+  say "    $UV tool update-shell"
+  say "  then open a new terminal. (uv puts tools in ~/.local/bin.)"
 fi
 
-step "P7  starting Synapse"
-if [ "$JOINING" -eq 1 ]; then
-  say "  joining a service someone else is hosting"
-fi
 say ""
-exec "$UV" run python scripts/serve_local.py "$@"
+say "Installed. Nothing was configured and nothing was started. Next:"
+if [ "$COMPONENT" = "server" ]; then
+  say "  synapse-server configure --keys /path/to/keys.txt   # one API key per line"
+  say "  synapse-server up        # health-checks the keys, then serves (Ctrl-C stops)"
+  say "  synapse-server health    # configuration + key check, any time"
+else
+  say "  synapse configure        # service URL (ping-tested), contributor, distiller"
+  say "  synapse up               # start orchestrator + worker (Ctrl-C stops)"
+  say "  synapse health           # what is configured, what is running"
+fi

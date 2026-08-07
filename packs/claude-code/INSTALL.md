@@ -16,6 +16,15 @@ protocol itself:
   skill that auto-loads when the work looks like something a teammate may
   already have been through.
 
+It also ships `commands/synapse/`, which is not a signal and is not automatic:
+slash commands are things a human types. Both signals above fire on their own
+judgement — the hook when memory moved, the skill when the work smells
+familiar — and that is exactly why a deterministic escape hatch has to exist
+next to them. `/synapse:health` is the first: when someone asks "is this thing
+even on?", the answer should not depend on a model deciding the question is
+relevant. It checks the session's own MCP tools, then shells out to `synapse
+health` for the orchestrator, the Edge Worker and a live ping of the Service.
+
 (Signals ① and ② — ambient tool descriptions and the arrival briefing — need
 no pack at all; they ride the MCP `instructions` field and are already live
 the moment `synapse-orchestrator` is running and this project has joined a
@@ -42,16 +51,16 @@ This repo ships a project-scoped [`.mcp.json`](../../.mcp.json):
 {"mcpServers": {"synapse": {"type": "http", "url": "http://127.0.0.1:8787/mcp"}}}
 ```
 
-Copy it to the root of whatever project you want shared memory in, or run the
-equivalent from that project:
+Register it once for your user (the default `synapse configure` offers) —
+`~/.claude.json` covers every project on your machine:
 
 ```bash
-claude mcp add --transport http --scope project synapse http://127.0.0.1:8787/mcp
+claude mcp add --transport http --scope user synapse http://127.0.0.1:8787/mcp
 ```
 
-`--scope project` writes `.mcp.json`, which is committable — everyone who
-clones the repo gets the connection. `--scope user` (in `~/.claude.json`)
-covers every project on your machine instead and is not shared.
+Or copy the JSON above into one project's `.mcp.json` (equivalently
+`--scope project` from that project) — that file is committable, so everyone
+who clones the repo gets the connection.
 
 Then **start a new Claude Code session** — the file is read at session start,
 not live — and **approve the server** when prompted. Project-scoped servers
@@ -104,30 +113,53 @@ a session. The tools appear as `mcp__synapse__query` and
 
 Two locations work, and the repo uses both. Know which one you are in:
 
-| | skill goes to | hook goes to | who does it |
-|---|---|---|---|
-| **Per project** (this section) | `<project>/.claude/skills/` | `<project>/.claude/synapse-pack/hooks/` | you, by hand |
-| **Per user** | `~/.claude/skills/` | *(not installed)* | `install.sh` / `install.ps1`, phase P5 |
+| | skill goes to | commands go to | hook goes to | who does it |
+|---|---|---|---|---|
+| **Per project** (this section) | `<project>/.claude/skills/` | `<project>/.claude/commands/` | `<project>/.claude/synapse-pack/hooks/` | you, by hand |
+| **Per user** | `~/.claude/skills/` | `~/.claude/commands/` | *(not installed)* | `synapse configure`, or `synapse pack` |
 
-`install.sh` copies `skills/`, `commands/` and `agents/` into `~/.claude/`, so
-the skill is available in every project on the machine without repeating this
-section. It deliberately does **not** install the hook and does **not** touch
-`settings.json`: `settings-snippet.json`'s command is
+**`synapse configure` does the per-user row for you.** It copies `skills/`,
+`commands/` and `agents/` into `~/.claude/`, so the skill and `/synapse:health`
+are available in every project on the machine without repeating this section.
+`synapse pack` does the same thing on its own, and `synapse pack --update` is
+how you refresh them after upgrading Synapse — without it, an install that
+already has the files keeps its old copies forever.
+
+Not the installer, deliberately. `install.sh` and `install.ps1` install
+packages and nothing else — this CLI's contract is *install never configures;
+configure never starts* — and putting a Shared Session's tooling into your home
+directory is a configuration decision, made by the same command that decides
+which Service you talk to and which project gets the MCP registration. The pack
+travels inside the `synapse-cli` wheel to make that possible, so a machine that
+installed from a release bundle has it without ever seeing this repo.
+
+Two things `configure` still will not do. It does **not** install the hook and
+does **not** touch `settings.json`: `settings-snippet.json`'s command is
 `$CLAUDE_PROJECT_DIR/.claude/synapse-pack/hooks/freshness_pointer.py`, which is
-per-project by construction, and rewriting a settings file the installer does
-not own is an overwrite risk. If you want the hook, do the `hooks` half of the
-steps below even after running the installer — the installer prints the two
-commands for exactly that. `scripts/doctor.py`'s `awareness` check looks at
+per-project by construction, and rewriting a settings file it does not own is an
+overwrite risk. If you want the hook, do the `hooks` half of the steps below.
+And it never overwrites: anything already in `~/.claude` is left alone and
+reported, and `--update` moves the previous copy aside with a timestamp rather
+than deleting what may be a skill you edited by hand.
+
+`scripts/doctor.py`'s `awareness` check looks at
 `~/.claude/skills/synapse-shared-memory`, i.e. the per-user row; a per-project
 install is invisible to it and that WARN is then expected.
 
 From this project's root:
 
 ```bash
-mkdir -p .claude/skills .claude/synapse-pack
+mkdir -p .claude/skills .claude/commands .claude/synapse-pack
 cp -r <path-to-synapse-repo>/packs/claude-code/skills/synapse-shared-memory .claude/skills/synapse-shared-memory
+cp -r <path-to-synapse-repo>/packs/claude-code/commands/synapse .claude/commands/synapse
 cp -r <path-to-synapse-repo>/packs/claude-code/hooks .claude/synapse-pack/hooks
 ```
+
+The `commands/synapse/` **directory name is the namespace**: a file at
+`commands/synapse/health.md` is the command `/synapse:health`. Copy the
+directory, not its contents — flattening it into `.claude/commands/` would
+give you `/health`, which collides with anyone else's and says nothing about
+whose health it is.
 
 Then merge `settings-snippet.json`'s contents into your project's
 `.claude/settings.json` (create the file if it doesn't exist yet). If you

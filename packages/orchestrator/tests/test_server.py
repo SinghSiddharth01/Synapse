@@ -23,7 +23,7 @@ def test_no_tools_or_prompts_are_registered_yet() -> None:
     assert server.mcp._tool_manager._tools == {}
 
 
-from synapse_orchestrator.server import SENTINEL, create_mcp
+from synapse_orchestrator.server import SENTINEL, create_mcp  # noqa: E402 — asserts on module-level `server.mcp` state above first
 
 
 def test_factory_carries_custom_instructions():

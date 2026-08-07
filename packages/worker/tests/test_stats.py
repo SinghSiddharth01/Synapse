@@ -66,7 +66,7 @@ def test_snapshot_is_json_dumps_able() -> None:
     stats.event("tick", "5 lines")
     snapshot = stats.snapshot()
     json.dumps(snapshot)  # must not raise
-    assert set(snapshot) == {"now", "current", "ticks", "events", "llm"}
+    assert set(snapshot) == {"now", "phase", "current", "ticks", "events", "llm"}
 
 
 def test_distil_started_and_finished() -> None:

@@ -69,7 +69,7 @@ async def verify_join(scratch_cwd: Path, real_project_dir: Path) -> None:
         cwd=scratch_cwd, env=env, capture_output=True, text=True, timeout=60,
     )
     print(f"  exit code: {result.returncode}")
-    print(f"  stdout:\n" + "\n".join(f"    {line}" for line in result.stdout.splitlines()))
+    print("  stdout:\n" + "\n".join(f"    {line}" for line in result.stdout.splitlines()))
     assert result.returncode == 0, result.stderr
     assert "verify-session" in result.stdout
 
@@ -89,7 +89,7 @@ async def verify_join(scratch_cwd: Path, real_project_dir: Path) -> None:
         [sys.executable, "-m", "synapse_worker.cli", "status"],
         cwd=scratch_cwd, env=env, capture_output=True, text=True, timeout=60,
     )
-    print(f"  synapse-worker status (fresh process):")
+    print("  synapse-worker status (fresh process):")
     for line in status.stdout.splitlines():
         if "joined" in line.lower() or "transcript" in line.lower():
             print(f"    {line}")

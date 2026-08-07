@@ -19,6 +19,20 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  lint:
+    # PEP8 baseline (ruff: pycodestyle errors + pyflakes, configured in
+    # pyproject.toml). Kept as its own job so a style finding never hides a
+    # test failure or vice versa.
+    name: lint (ruff)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uvx ruff check packages scripts tests
+
   tests:
     # No count in the name: it read "717 tests" while the suite ran 724, and a
     # label that asserts a number goes stale on the next commit that adds one.
@@ -37,12 +51,13 @@ jobs:
       - run: uv run pytest -q
 
   install-path:
-    # The first code a joining teammate runs, and until now the only code in
-    # the repo with no CI at all: `install.sh` and `scripts/doctor.py` were
-    # reachable from README, from serve_local.py's printed banner and from
-    # every Windows instruction, and nothing checked that they even parsed.
-    # Static and offline: nothing here binds a port or starts the stack.
-    name: install path (shell lint + doctor)
+    # The first code a joining teammate runs. Not just linted — EXECUTED: the
+    # client and server installs both run end to end (wheels built from this
+    # tree, `uv tool install` into isolated envs), and the installed commands
+    # are exercised. What is deliberately NOT here: configuration and startup.
+    # Install must not configure or start anything, so this job proves the
+    # installed CLIs *refuse politely* when unconfigured.
+    name: install path (both halves, executed)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -56,6 +71,35 @@ jobs:
       - run: sh -n install.sh
       - run: shellcheck -s sh install.sh
       - run: test -x install.sh
+      # PowerShell parses on the Linux runner too — a syntax error in the
+      # Windows installer should fail CI here, not on the Snapdragon box.
+      - name: install.ps1 parses
+        run: pwsh -NoProfile -Command '$null = [scriptblock]::Create((Get-Content -Raw install.ps1)); "ok"'
+      - name: client install, end to end
+        run: |
+          ./install.sh client
+          export PATH="$HOME/.local/bin:$PATH"
+          synapse --version
+          # Unconfigured: health must FAIL (exit 1) and say exactly which key
+          # to set — that refusal is the decoupling contract.
+          synapse health --json > /tmp/health.json || true
+          python3 -c "
+          import json
+          d = json.load(open('/tmp/health.json'))
+          [url] = [r for r in d['results'] if 'service.url' in r['name']]
+          assert url['status'] == 'FAIL', url
+          assert 'synapse config set service.url' in url['remedy'], url
+          "
+      - name: server install, end to end
+        run: |
+          ./install.sh server
+          export PATH="$HOME/.local/bin:$PATH"
+          synapse-server health --json > /tmp/server-health.json || true
+          python3 -c "
+          import json
+          d = json.load(open('/tmp/server-health.json'))
+          assert d['results'], d
+          "
       - run: uv sync
       # Asserts the result model, not the verdict. Whether a GitHub runner has
       # `claude` or a free 8787 is not this repo's business, and coupling the

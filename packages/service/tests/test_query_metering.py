@@ -154,10 +154,21 @@ def test_the_deferral_reason_names_retrieval_as_the_spender(monkeypatch, caplog)
 
 def test_queries_count_against_the_request_ceiling_too(monkeypatch):
     """Tokens are not the only thing a key meters. The hosted key allows 20
-    REQUESTS/hour and retrieval passes a response_schema, so it takes the same
-    internal retry a merge does and is priced at 2 the same way."""
+    REQUESTS/hour, and a retrieval round spends them from the same pool a
+    merge does.
+
+    ⟨2026-08-06⟩ The cap moved from 8 to 4 with the request charge. This used
+    to read `(len(_spend) + 1) * 2`, pricing EVERY round as though the
+    provider's internal retry had fired -- it fires only on failure -- so four
+    clean rounds were billed as eight and a 20/hour ceiling behaved like
+    10/hour. Requests are now counted as the provider actually makes them
+    (`last_request_count`), which also picks up key rotations and 429 backoff
+    attempts that the flat x2 never modelled. Four rounds against a cap of four
+    keeps this test asserting what it always meant: retrieval spends the
+    request budget.
+    """
     client, _ = _client(monkeypatch, tokens_per_hour=10_000_000,
-                        requests_per_hour=8)
+                        requests_per_hour=4)
     sid = _session(client)
     client.post(f"/v1/sessions/{sid}/findings", json={"findings": [_finding("f-0")]})
 

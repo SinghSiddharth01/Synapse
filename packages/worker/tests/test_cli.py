@@ -85,6 +85,37 @@ async def test_join_binds_the_live_transcript(tmp_path, monkeypatch, capsys) -> 
 # run
 # ---------------------------------------------------------------------------
 
+async def test_run_debug_server_answers_while_waiting_for_a_binding(monkeypatch) -> None:
+    """The debug port is the worker's ONLY liveness signal (`synapse health`
+    parses /debug/stats.json — net.ping_worker), and under --wait-for-binding
+    the wait can last forever. Binding it only after a session joined made
+    health report a healthy, deliberately-idle worker as "died after start"
+    (2026-08-06 misdiagnosis). The dashboard must be up BEFORE the wait, and
+    say what the worker is actually doing."""
+    monkeypatch.setattr(cli, "DebugServer", _FakeDebugServer)
+    _FakeDebugServer.instances.clear()
+
+    class _StopWait(Exception):
+        pass
+
+    seen: dict = {}
+
+    def _fake_wait(args):
+        server = _FakeDebugServer.instances[0] if _FakeDebugServer.instances else None
+        seen["started"] = bool(server and server.started)
+        seen["phase"] = server.stats.phase if server else None
+        raise _StopWait
+
+    monkeypatch.setattr(cli, "_wait_for_binding", _fake_wait)
+    with pytest.raises(_StopWait):
+        await cli.cmd_run(
+            _ns(transcript=None, wait_for_binding=True, debug_port=8790)
+        )
+
+    assert seen["started"] is True, "debug server not listening during the wait"
+    assert seen["phase"] == "waiting for a session"
+
+
 async def test_run_stops_when_the_canary_fails(tmp_path, monkeypatch, capsys) -> None:
     transcript = tmp_path / "sess.jsonl"
     _write_transcript(transcript)
@@ -1444,6 +1475,74 @@ def test_main_rejects_an_unknown_subcommand() -> None:
     with pytest.raises(SystemExit) as excinfo:
         cli.main(["not-a-real-command"])
     assert excinfo.value.code == 2
+
+
+def test_main_prompt_pack_error_is_a_clean_exit(monkeypatch, capsys) -> None:
+    """A missing packaged prompt pack is a broken INSTALL, not a mystery
+    crash: it must exit 2 with the error's own actionable message, not a
+    traceback. (2026-08-06: a wheel built without the pack data made the
+    worker die with a raw traceback in worker.log the moment a session was
+    joined.)"""
+    from synapse_distiller.promptpack import PromptPackError
+
+    async def _broken(args):
+        raise PromptPackError("no packaged copy — reinstall from a release wheel")
+
+    monkeypatch.setattr(cli, "cmd_status", _broken)
+    assert cli.main(["status"]) == 2
+    err = capsys.readouterr().err
+    assert "reinstall" in err.lower()
+    assert "Traceback" not in err
+
+
+def test_main_ctrl_c_exits_quietly(monkeypatch) -> None:
+    """A KeyboardInterrupt outside cmd_run's own handler (status, replay, the
+    wait-for-binding idle loop) must not escape main() as a traceback:
+    exit 130 (128+SIGINT)."""
+
+    async def _interrupted(args):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "cmd_status", _interrupted)
+    assert cli.main(["status"]) == 130
+
+
+async def test_run_cancellation_still_shuts_down_cleanly(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """On Python 3.11+ asyncio.Runner delivers Ctrl-C by CANCELLING the main
+    task, so it reaches cmd_run's await as CancelledError, not
+    KeyboardInterrupt — catching only the latter skipped the graceful
+    shutdown and let a traceback escape."""
+    import asyncio
+
+    transcript = tmp_path / "sess.jsonl"
+    _write_transcript(transcript)
+    monkeypatch.setattr(cli, "check_canary", _async(PASSING_CANARY))
+
+    async def _cancelled(self, **kwargs):
+        raise asyncio.CancelledError
+
+    shutdown_called = []
+
+    class _Result:
+        def summary(self) -> str:
+            return "0 findings"
+
+    async def _shutdown(self):
+        shutdown_called.append(True)
+        return _Result()
+
+    monkeypatch.setattr(WorkerLoop, "run", _cancelled)
+    monkeypatch.setattr(WorkerLoop, "shutdown", _shutdown)
+
+    exit_code = await cli.cmd_run(
+        _ns(transcript=str(transcript), interval=None, ticks=1, from_start=False)
+    )
+
+    assert exit_code == 0
+    assert shutdown_called
+    assert "shutdown" in capsys.readouterr().out
 
 
 # ---------------------------------------------------------------------------

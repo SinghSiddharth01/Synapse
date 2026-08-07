@@ -133,7 +133,9 @@ async def test_brain_page_has_required_ids() -> None:
         r = await client.get("/debug")
         assert r.status_code == 200
         assert "text/html" in r.headers["content-type"]
-        for element_id in ("session-select", "wm-body", "revisions",
+        # ⟨redesign 2026-08-07⟩ session selection moved to the sidebar's
+        # session-list; the header select is gone.
+        for element_id in ("session-list", "wm-body", "revisions",
                            "participants", "recent"):
             assert f'id="{element_id}"' in r.text
 
@@ -675,3 +677,67 @@ async def test_polling_brain_json_changes_nothing_and_calls_no_provider() -> Non
         # The revision ring is written by the merge path, never by a read.
         assert len((await _brain(client, sid))["session"]["working_memory"]
                    ["revisions"]) == revisions_before
+
+
+# --------------------------------------------------------------------------
+# Rate-limit state (2026-08-06)
+# --------------------------------------------------------------------------
+class _StubProvider:
+    """Only the surface `_rate_limit_panel` reads."""
+
+    def __init__(self, snapshot):
+        self.last_rate_limit = snapshot
+
+
+def test_brain_payload_reports_throttled_when_the_provider_says_zero():
+    """A rate-limited service must SAY so. The 2026-08-06 failure was
+    invisible from every surface: findings landed, memory did not move, and
+    nothing anywhere said why."""
+    from synapse_providers import RateLimitSnapshot
+
+    from synapse_service.debug import _rate_limit_panel
+
+    panel = _rate_limit_panel(_StubProvider(
+        RateLimitSnapshot(requests_remaining=0, reset_seconds=42)))
+    assert panel["state"] == "throttled"
+    assert panel["requests_remaining"] == 0
+    assert panel["reset_seconds"] == 42
+    assert "0 request" in panel["reason"]
+
+
+def test_brain_payload_reports_ok_with_headroom():
+    from synapse_providers import RateLimitSnapshot
+
+    from synapse_service.debug import _rate_limit_panel
+
+    panel = _rate_limit_panel(_StubProvider(
+        RateLimitSnapshot(requests_remaining=13, tokens_remaining=18_000)))
+    assert panel["state"] == "ok"
+    assert panel["requests_remaining"] == 13
+
+
+def test_brain_payload_reports_unknown_when_nothing_was_reported():
+    """Absence of headers is not evidence of headroom."""
+    from synapse_service.debug import _rate_limit_panel
+
+    assert _rate_limit_panel(_StubProvider(None))["state"] == "unknown"
+
+
+def test_an_empty_snapshot_is_unknown_not_ok():
+    """An unrecognised header spelling parses to an empty snapshot. Showing
+    headroom we cannot see would recreate the silent failure."""
+    from synapse_providers import RateLimitSnapshot
+
+    from synapse_service.debug import _rate_limit_panel
+
+    assert _rate_limit_panel(_StubProvider(RateLimitSnapshot()))["state"] == "unknown"
+
+
+async def test_the_brain_json_route_carries_the_rate_limit_block() -> None:
+    async with _client(build_app(FakeProvider(scripts=[]))) as client:
+        await _new_session(client, "a purpose")
+        payload = await _brain(client)
+    session = payload["session"]
+    assert "rate_limit" in session
+    # FakeProvider reports no headers, so the honest answer is "unknown".
+    assert session["rate_limit"]["state"] == "unknown"

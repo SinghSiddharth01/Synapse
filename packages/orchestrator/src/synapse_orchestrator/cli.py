@@ -498,6 +498,18 @@ async def cmd_resync(args: argparse.Namespace, *,
 
 def main(argv: list[str] | None = None, *,
          transport: httpx.AsyncBaseTransport | None = None) -> int:
+    try:
+        return _main(argv, transport=transport)
+    except KeyboardInterrupt:
+        # Ctrl-C during boot (the briefing compose, resync's pushes) —
+        # uvicorn handles its own SIGINT once serving. Newline past the
+        # echoed ^C, exit 130 (128+SIGINT), never a traceback.
+        print(file=sys.stderr)
+        return 130
+
+
+def _main(argv: list[str] | None = None, *,
+          transport: httpx.AsyncBaseTransport | None = None) -> int:
     # argv=None reads sys.argv, matching the old parser.parse_args() call
     # exactly — real invocation is unchanged. Tests pass an explicit list.
     # `transport` is likewise test-only: it never comes from argv, and is

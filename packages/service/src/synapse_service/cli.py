@@ -188,7 +188,15 @@ def main(argv: list[str] | None = None) -> int:
             "reach the API. Pass --no-debug or set SYNAPSE_SERVICE_DEBUG=0.",
             file=sys.stderr,
         )
-    uvicorn.run(build_app(_provider(), debug=debug), host=args.host, port=args.port)
+    try:
+        uvicorn.run(build_app(_provider(), debug=debug), host=args.host, port=args.port)
+    except KeyboardInterrupt:
+        # Reachable only before uvicorn installs its own SIGINT handler —
+        # i.e. during _provider()'s boot preflights (key check, NPU probe).
+        # Once serving, Ctrl-C is uvicorn's graceful shutdown and falls
+        # through to the normal return. 130 = 128 + SIGINT, no traceback.
+        print(file=sys.stderr)
+        return 130
     return 0
 
 

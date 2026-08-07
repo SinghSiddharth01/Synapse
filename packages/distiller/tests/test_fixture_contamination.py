@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from synapse_distiller.fixtures import available_fixtures, fixtures_root, load_segment
+from synapse_distiller.fixtures import available_fixtures, load_segment
 from synapse_distiller.promptpack import available_packs, load_pack_by_name
 
 

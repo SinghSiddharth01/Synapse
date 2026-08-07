@@ -13,6 +13,7 @@ resent, then honest schema_valid=False. max_tokens is bounded on every call
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -23,6 +24,7 @@ import httpx
 
 from synapse_contracts import ModelResult, ModelUsage
 from synapse_providers.base import ModelProvider, ProviderCapabilities
+from synapse_providers.ratelimit import RateLimitSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +34,49 @@ logger = logging.getLogger(__name__)
 # 2026-08-03, so anything that did not set INFERENCE_CLOUD_BASE_URL has been
 # pointed at a host we cannot authenticate against.
 DEFAULT_BASE_URL = "https://aisuite-indonesia.cirrascale.com/apis/v2"
+
+# Retries for a 429, and the schedule they follow.
+#
+# This provider observed "~36s cooldown under load" and did not act on it: with
+# a one-key pool `_post_rotating` looped once, returned the 429, and
+# `raise_for_status()` raised it. The service's governor was then written to
+# avoid ever reaching this path -- refusing work the dashboard showed was
+# affordable (1 of 20 requests used in the hour it refused).
+#
+# RATE_LIMIT_SLEEP_BUDGET_S is the important one. INFERENCE_CLOUD_TIMEOUT
+# defaults to 180s and covers GENERATION; a 70B synthesis was measured at 48.5s
+# and 51.7s. Sleeping 3x36s inside that budget would leave a slow round one
+# tick from a ReadTimeout -- which synthesis.py reports as the identical
+# "findings landed, memory unchanged" symptom. So total sleep is capped
+# independently of what the gateway asks for.
+RATE_LIMIT_MAX_ATTEMPTS = 3
+RATE_LIMIT_DEFAULT_COOLDOWN_S = 36.0
+RATE_LIMIT_SLEEP_BUDGET_S = 45.0
+
+# Module-level so tests can replace it without sleeping. Same seam shape as
+# `transport=` on the constructor.
+_sleep = asyncio.sleep
+
+
+class RateLimitedError(Exception):
+    """Every key 429'd and the retry budget is spent.
+
+    Typed rather than an httpx.HTTPStatusError so `api.py` can tell a real
+    exhausted quota from a 5xx and say so on the brain page. The distinction is
+    the whole point: an untyped failure here is what "findings landed, memory
+    unchanged" looked like from the outside.
+    """
+
+    def __init__(self, snapshot: RateLimitSnapshot, attempts: int) -> None:
+        detail = ""
+        if snapshot.requests_remaining is not None:
+            detail = f", {snapshot.requests_remaining} request(s) remaining"
+        super().__init__(
+            f"rate limited after {attempts} attempt(s){detail}. "
+            f"Raise the key pool (INFERENCE_CLOUD_API_KEYS) or wait for the "
+            f"window to roll.")
+        self.snapshot = snapshot
+        self.attempts = attempts
 
 
 def extract_first_json_object(text: str) -> dict[str, Any] | None:
@@ -187,6 +232,15 @@ class AIC100Provider(ModelProvider):
         self.max_tokens = int(os.environ.get("INFERENCE_CLOUD_MAX_TOKENS") or max_tokens)
         self.timeout = float(os.environ.get("INFERENCE_CLOUD_TIMEOUT") or timeout)
         self._transport = transport
+        # The most recent rate-limit headers seen on ANY response, success or
+        # 429. Read by the service's governor in preference to its own guessed
+        # ledger, and by the brain page to show why synthesis is paused.
+        self.last_rate_limit: RateLimitSnapshot | None = None
+        self._logged_unknown_headers = False
+        # HTTP requests made by the most recent `complete()`. Reset at the top
+        # of `complete()`, incremented in `_post_rotating`. `api._record_spend`
+        # charges this instead of assuming a constant.
+        self.last_request_count = 0
 
     @property
     def capabilities(self) -> ProviderCapabilities:
@@ -194,19 +248,61 @@ class AIC100Provider(ModelProvider):
 
     async def _post_rotating(self, client: httpx.AsyncClient, url: str,
                              payload: dict[str, Any]) -> httpx.Response:
-        """POST, rotating through the key pool on 429. Each key tried at most
-        once per request; a non-429 answer (success or failure) returns
-        immediately with whichever key gave it."""
-        last: httpx.Response | None = None
-        for _ in range(len(self.api_keys)):
-            key = self.api_keys[self._key_index]
-            resp = await client.post(
-                url, json=payload, headers={"Authorization": f"Bearer {key}"})
-            if resp.status_code != 429:
-                return resp
-            last = resp
-            self._key_index = (self._key_index + 1) % len(self.api_keys)
-        return last  # every key rate-limited; caller's raise_for_status reports it
+        """POST, rotating keys on 429, then waiting and retrying.
+
+        Rotation first, sleeping second: another key is free and a sleep is
+        not. Only when EVERY key in the pool has 429'd is the window genuinely
+        shut, and only then is waiting the right move.
+        """
+        attempts = 0
+        slept = 0.0
+        snapshot = RateLimitSnapshot()
+        while attempts < RATE_LIMIT_MAX_ATTEMPTS:
+            attempts += 1
+            for _ in range(len(self.api_keys)):
+                key = self.api_keys[self._key_index]
+                # Counted HERE, where requests are actually made. The governor
+                # used to assume two per round (the internal schema retry) and
+                # charge it unconditionally, which halved a 20/hour ceiling.
+                # This counts rotations and backoff attempts too -- every one
+                # of them is a real request against the key's quota.
+                self.last_request_count += 1
+                resp = await client.post(
+                    url, json=payload, headers={"Authorization": f"Bearer {key}"})
+                snapshot = self._record_rate_limit(resp)
+                if resp.status_code != 429:
+                    return resp
+                self._key_index = (self._key_index + 1) % len(self.api_keys)
+
+            # Every key is limited. Wait, unless waiting would cost more than
+            # the budget allows or this was the last attempt.
+            if attempts >= RATE_LIMIT_MAX_ATTEMPTS:
+                break
+            wait = snapshot.retry_after_seconds or RATE_LIMIT_DEFAULT_COOLDOWN_S
+            wait = min(wait, RATE_LIMIT_SLEEP_BUDGET_S - slept)
+            if wait <= 0:
+                break
+            logger.warning(
+                "All %d key(s) rate limited; waiting %.0fs before attempt %d of %d.",
+                len(self.api_keys), wait, attempts + 1, RATE_LIMIT_MAX_ATTEMPTS)
+            await _sleep(wait)
+            slept += wait
+
+        raise RateLimitedError(snapshot, attempts)
+
+    def _record_rate_limit(self, resp: httpx.Response) -> RateLimitSnapshot:
+        """Keep the newest snapshot, and say once when the gateway's header
+        spelling is one this parser does not know -- the alias table was
+        written without a live response to read."""
+        snapshot = RateLimitSnapshot.from_headers(resp.headers)
+        self.last_rate_limit = snapshot
+        if snapshot.is_empty and not self._logged_unknown_headers:
+            self._logged_unknown_headers = True
+            logger.info(
+                "No recognised rate-limit headers on %s. Headers seen: %s. Add the "
+                "right names to synapse_providers.ratelimit if any of these carry "
+                "quota.", self.base_url, sorted(snapshot.raw))
+        return snapshot
 
     def _client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(
@@ -216,6 +312,7 @@ class AIC100Provider(ModelProvider):
     async def complete(self, messages: list[dict[str, Any]],
                        response_schema: dict[str, Any] | None = None) -> ModelResult:
         started = time.perf_counter()
+        self.last_request_count = 0
         async with self._client() as client:
             if response_schema is None:
                 resp = await self._post_rotating(client, f"{self.base_url}/chat/completions", {

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import threading
+from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from synapse_worker.stats import StatsBuffer
@@ -504,11 +505,9 @@ _PAGE = """<!doctype html>
 """
 
 
-def _make_handler(stats: StatsBuffer, transcript: str | None) -> type[BaseHTTPRequestHandler]:
-    page_bytes = _PAGE.replace(_TRANSCRIPT_TOKEN, transcript or "(no transcript bound)").encode(
-        "utf-8"
-    )
-
+def _make_handler(
+    stats: StatsBuffer, get_transcript: Callable[[], str | None]
+) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         server_version = "SynapseWorkerDebug/1"
 
@@ -524,6 +523,14 @@ def _make_handler(stats: StatsBuffer, transcript: str | None) -> type[BaseHTTPRe
                 self.end_headers()
                 self.wfile.write(body)
             elif self.path == "/debug":
+                # Rendered per request, not baked at construction: under
+                # --wait-for-binding the server starts long before any
+                # transcript exists, and the page must show the one bound
+                # later. A debug page is fetched rarely; the re-render is
+                # nothing.
+                page_bytes = _PAGE.replace(
+                    _TRANSCRIPT_TOKEN, get_transcript() or "(no transcript bound)"
+                ).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(page_bytes)))
@@ -558,7 +565,9 @@ class DebugServer:
         self._thread: threading.Thread | None = None
 
     def start(self) -> int:
-        handler = _make_handler(self.stats, self.transcript)
+        # The lambda reads self.transcript at request time — cmd_run assigns
+        # it only once a binding exists and _build has resolved the path.
+        handler = _make_handler(self.stats, lambda: self.transcript)
         self._httpd = ThreadingHTTPServer(("127.0.0.1", self.port), handler)
         self._thread = threading.Thread(
             target=self._httpd.serve_forever, name="synapse-worker-debug", daemon=True

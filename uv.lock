@@ -9,6 +9,7 @@ resolution-markers = [
 [manifest]
 members = [
     "synapse",
+    "synapse-cli",
     "synapse-contracts",
     "synapse-distiller",
     "synapse-orchestrator",
@@ -1021,6 +1022,7 @@ name = "synapse"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "synapse-cli" },
     { name = "synapse-contracts" },
     { name = "synapse-distiller" },
     { name = "synapse-orchestrator" },
@@ -1044,6 +1046,7 @@ docs = [
 
 [package.metadata]
 requires-dist = [
+    { name = "synapse-cli", editable = "packages/cli" },
     { name = "synapse-contracts", editable = "packages/contracts" },
     { name = "synapse-distiller", editable = "packages/distiller" },
     { name = "synapse-orchestrator", editable = "packages/orchestrator" },
@@ -1063,6 +1066,29 @@ docs = [
     { name = "mkdocs", specifier = ">=1.6" },
     { name = "mkdocs-material", specifier = ">=9.5" },
     { name = "mkdocstrings", extras = ["python"], specifier = ">=0.26" },
+]
+
+[[package]]
+name = "synapse-cli"
+version = "0.1.0"
+source = { editable = "packages/cli" }
+dependencies = [
+    { name = "httpx" },
+    { name = "synapse-contracts" },
+    { name = "synapse-distiller" },
+    { name = "synapse-orchestrator" },
+    { name = "synapse-providers" },
+    { name = "synapse-worker" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "synapse-contracts", editable = "packages/contracts" },
+    { name = "synapse-distiller", editable = "packages/distiller" },
+    { name = "synapse-orchestrator", editable = "packages/orchestrator" },
+    { name = "synapse-providers", editable = "packages/providers" },
+    { name = "synapse-worker", editable = "packages/worker" },
 ]
 
 [[package]]

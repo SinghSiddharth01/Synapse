@@ -9,11 +9,14 @@ route; see its docstring.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
 from collections import Counter
+from contextlib import asynccontextmanager, suppress
 from collections.abc import Mapping
+from typing import Any
 
 from pydantic import ValidationError
 from starlette.applications import Starlette
@@ -91,6 +94,22 @@ MERGE_MIN_INTERVAL_S = float(os.environ.get("SYNAPSE_MERGE_MIN_INTERVAL_S", 60))
 # everything spending that key is counted against them.
 SYNTHESIS_TOKENS_PER_HOUR = 25_000
 SYNTHESIS_REQUESTS_PER_HOUR = 20
+
+# The dashboard enforces THREE request ceilings; the governor modelled one.
+# Read off the Cirrascale console for Llama-3.3-70B on 2026-08-06.
+#
+# PER_MINUTE IS RECORDED HERE BUT DELIBERATELY NOT ENFORCED by `_affordable`
+# -- see the loop in `_affordable_from_ledger` for why. Short version: a burst
+# limit is what AIC100Provider's rotate-then-backoff is FOR, and pre-refusing
+# on it stalls the memory over traffic that would have cleared in seconds. It
+# stays here because the number is real and the next reader will want it
+# (and `_warn_if_the_key_pool_cannot_pay_for_the_budget`-style checks may want
+# it later); it is documentation of the ceiling, not a gate.
+SYNTHESIS_REQUESTS_PER_MINUTE = 5
+SYNTHESIS_REQUESTS_PER_DAY = 250
+MINUTE_S = 60.0
+HOUR_S = 3600.0
+DAY_S = 86_400.0
 SYNTHESIS_KEYS = int(os.environ.get("SYNAPSE_SYNTHESIS_KEYS", 1))
 
 # What one round is assumed to cost before we have measured one. Replaced by
@@ -149,6 +168,174 @@ def _warn_if_the_key_pool_cannot_pay_for_the_budget(provider: ModelProvider) -> 
             "will defer merges the pool could afford. Raise it to %d.",
             type(provider).__name__, len(pool), SYNTHESIS_KEYS, len(pool),
         )
+
+
+def affordable(spend: list[tuple[float, int, str, int]], *,
+               provider: Any, now: float | None = None) -> tuple[bool, str]:
+    """Whether one more synthesis round fits.
+
+    Two sources, in priority order.
+
+    THE PROVIDER'S OWN HEADERS win when present. The local ledger is an
+    estimate built from ASSUMED_MERGE_TOKENS and ASSUMED_QUERY_TOKENS, and it
+    over-charges in one direction only -- a failed call is billed the assumed
+    cost, and nothing ever credits it back. On 2026-08-06 that drift refused
+    synthesis for an hour in which the dashboard recorded ONE request of
+    twenty. A number the gateway reported is not an estimate.
+
+    THE LEDGER is the fallback, and it is not optional: `RateLimitSnapshot`
+    is empty until the first response, and stays empty if the gateway spells
+    its headers in a way `synapse_providers.ratelimit` does not yet know.
+    Empty must read as "no information", never as "no limit".
+    """
+    snapshot = getattr(provider, "last_rate_limit", None)
+    if snapshot is None:
+        return _affordable_from_ledger(spend, now=now)
+
+    # Reported exhaustion is decisive in the REFUSING direction, per dimension.
+    if snapshot.requests_remaining is not None and snapshot.requests_remaining < 1:
+        return False, ("provider reported 0 request(s) remaining"
+                       + (f", resets in {snapshot.reset_seconds:.0f}s"
+                          if snapshot.reset_seconds else ""))
+    if (snapshot.tokens_remaining is not None
+            and snapshot.tokens_remaining < ASSUMED_MERGE_TOKENS):
+        return False, (f"provider reported {snapshot.tokens_remaining} token(s) "
+                       f"remaining, below the {ASSUMED_MERGE_TOKENS} one round costs")
+
+    # Reported HEADROOM is decisive only for the dimensions actually reported.
+    # A gateway that sends request counts and no token counts must not buy a
+    # free pass on the token ceiling -- that is the dimension which binds first
+    # at ~6 merges/hour, and skipping it would put us straight back to
+    # discovering the limit as a 429.
+    if snapshot.requests_remaining is not None and snapshot.tokens_remaining is not None:
+        return True, ""
+
+    return _affordable_from_ledger(
+        spend, now=now,
+        skip_requests=snapshot.requests_remaining is not None,
+        skip_tokens=snapshot.tokens_remaining is not None)
+
+
+def _affordable_from_ledger(spend: list[tuple[float, int, str, int]], *,
+                            now: float | None = None,
+                            skip_requests: bool = False,
+                            skip_tokens: bool = False) -> tuple[bool, str]:
+    """The estimate, used for every dimension the provider did not report.
+
+    Requests are charged AS MADE (the fourth tuple element) rather than at two
+    per round. The old `* 2` assumed AIC100Provider's internal retry always
+    fires; it fires on failure, and pricing the happy path as a failure halved
+    a 20/hour ceiling to 10.
+
+    `skip_requests` / `skip_tokens` let `affordable()` hand back only the half
+    it could not answer from live headers, so a partial snapshot neither
+    overrides the ledger wholesale nor is ignored.
+    """
+    now = time.monotonic() if now is None else now
+    while spend and spend[0][0] < now - DAY_S:
+        spend.pop(0)
+
+    def window(seconds: float) -> list[tuple[float, int, str, int]]:
+        return [e for e in spend if e[0] >= now - seconds]
+
+    hour = window(HOUR_S)
+    if not skip_tokens:
+        tokens_spent = sum(t for _, t, _c, _r in hour)
+        merges = [t for _, t, c, _r in hour if c == "synthesis"]
+        next_cost = max(merges[-5:] or [ASSUMED_MERGE_TOKENS])
+        if tokens_spent + next_cost > SYNTHESIS_TOKENS_PER_HOUR * SYNTHESIS_KEYS:
+            return False, (f"token budget: {tokens_spent}+{next_cost} would exceed "
+                           f"{SYNTHESIS_TOKENS_PER_HOUR * SYNTHESIS_KEYS}/hour across "
+                           f"{SYNTHESIS_KEYS} key(s) ({_spenders(hour)})")
+
+    if skip_requests:
+        return True, ""
+
+    # HOUR and DAY only -- deliberately NOT the per-minute limit.
+    #
+    # The 5/minute ceiling is a BURST limit, and the right tool for a burst is
+    # the backoff added to AIC100Provider (rotate every key, then wait the
+    # ~36s cooldown, then retry): a burst clears by itself in seconds. Refusing
+    # synthesis pre-emptively for it does not. Worse, `_spend` counts RETRIEVAL
+    # too, so five queries in a minute -- an ordinary thing for a team reading
+    # the memory -- would stop the memory being written at all, which is the
+    # exact "findings landed, memory unchanged" stall this whole change set
+    # exists to end. Measured against the real thing: the rehearsal's demo
+    # pace (two pushes, three queries, one push) trips 5/minute and never
+    # trips 20/hour.
+    #
+    # The hour and day figures are BUDGETS -- overrunning them means waiting up
+    # to an hour, which backoff cannot absorb -- so those stay pre-emptive.
+    for label, seconds, per_key_cap in (
+            ("hour", HOUR_S, SYNTHESIS_REQUESTS_PER_HOUR),
+            ("day", DAY_S, SYNTHESIS_REQUESTS_PER_DAY)):
+        entries = window(seconds)
+        made = sum(r for _, _t, _c, r in entries)
+        cap = per_key_cap * SYNTHESIS_KEYS
+        if made + 1 > cap:
+            return False, (f"request budget: {made} request(s) this {label} against "
+                           f"{cap}/{label} ({_spenders(entries)})")
+    return True, ""
+
+
+def _spenders(entries: list[tuple[float, int, str, int]]) -> str:
+    counts = Counter(c for _, _t, c, _r in entries)
+    return ", ".join(f"{n} {c}" for c, n in sorted(counts.items()))
+
+
+async def drain_pending(*, store, synthesizer, pending: dict[str, list],
+                        last_merge: dict[str, float],
+                        affordable, interval_s: float, now: float) -> list[str]:
+    """Run the merges that deferral postponed.
+
+    Without this, `deferred: true` is a promise the service cannot keep: the
+    only thing that drains `_pending` is the next push to the SAME session, so
+    a burst that ends in a deferral leaves the working memory stale until
+    someone happens to push again. Observed 2026-08-06 -- findings pushed at
+    23:03 and 23:10 against a memory last written at 22:57. Findings stay
+    queryable throughout, which is why the stall took 40 minutes to notice: the
+    gap is confined to the SYNTHESIZED memory.
+
+    A failure here is logged and skipped, never fatal: this runs on a
+    background loop, and one sick session must not stop every other session's
+    memory from catching up. The findings stay in `pending` and the next tick
+    retries them.
+    """
+    merged: list[str] = []
+    for sid in list(pending):
+        findings = pending.get(sid) or []
+        if not findings:
+            continue
+        last = last_merge.get(sid)
+        if last is not None and (now - last) < interval_s:
+            continue
+        ok, why = affordable()
+        if not ok:
+            logger.info("Drain for %s held on budget (%s); %d finding(s) still "
+                        "pending.", sid, why, len(findings))
+            continue
+
+        # CLAIM THE BATCH BEFORE THE AWAIT, exactly as `push_findings` does.
+        # A merge on the 70B runs ~50s and a live worker pushes every ~30s, so
+        # a push landing mid-merge is the ordinary case rather than a race: it
+        # extends the very list this function is holding. Popping afterwards
+        # would discard it. Those findings survive in the store -- they are
+        # upserted before the debounce decision -- but they would lose
+        # `new_findings` status and can then age out of synthesis.merge's
+        # candidate window without ever being considered.
+        claimed = pending.pop(sid, [])
+        last_merge[sid] = now
+        try:
+            await synthesizer.merge(store, sid, claimed)
+        except Exception:
+            # Ahead of anything that arrived while the call was in flight: the
+            # batch that failed is the older one.
+            pending[sid] = claimed + pending.get(sid, [])
+            logger.exception("Drain for %s failed; %d finding(s) stay pending "
+                             "for the next tick.", sid, len(claimed))
+            continue
+        merged.append(sid)
+    return merged
 
 
 def _missing(body: dict, *required: str) -> JSONResponse | None:
@@ -283,7 +470,13 @@ def build_app(provider: ModelProvider, *, debug: bool = True,
     # and must be summed across everything, while merge PRICING must still
     # look only at merges -- a run of cheap queries must not convince
     # `_affordable` that the next 70B merge is cheap.
-    _spend: list[tuple[float, int, str]] = []
+    # ⟨2026-08-06⟩ The fourth element is requests ACTUALLY MADE, counted by the
+    # provider (AIC100Provider.last_request_count) rather than assumed. The old
+    # `* 2` in `_affordable` priced every round as a failed one -- the internal
+    # schema retry fires only on failure -- and so halved a 20/hour ceiling to
+    # 10. It also missed key rotations and backoff attempts, which are real
+    # requests against the same quota.
+    _spend: list[tuple[float, int, str, int]] = []
 
     # The arrival summary's memo (W5, decisions/004). Closure scope like the
     # debounce state above and for the same reason: two apps in one test
@@ -322,7 +515,15 @@ def build_app(provider: ModelProvider, *, debug: bool = True,
         tokens = ASSUMED_MERGE_TOKENS
         if usage is not None:
             tokens = max(1, usage.input_tokens + usage.output_tokens)
-        _spend.append((time.monotonic(), tokens, "synthesis"))
+        # `requests` is what the round actually cost the key, counted by the
+        # provider as it made them rather than assumed.
+        #
+        # Read off the SYNTHESIS façade, not the shared inner provider:
+        # `synthesis_provider` and `retrieval_provider` are two
+        # RecordingProviders over one object, and the inner counter is
+        # whichever component called most recently.
+        requests = max(1, getattr(synthesis_provider, "last_request_count", 1))
+        _spend.append((time.monotonic(), tokens, "synthesis", requests))
 
     def _record_query_spend(usage) -> None:
         """Charge a retrieval round to the SAME key ledger (W3b).
@@ -373,44 +574,21 @@ def build_app(provider: ModelProvider, *, debug: bool = True,
         tokens = ASSUMED_QUERY_TOKENS
         if usage is not None:
             tokens = max(1, usage.input_tokens + usage.output_tokens)
-        _spend.append((time.monotonic(), tokens, "retrieval"))
+        requests = max(1, getattr(retrieval_provider, "last_request_count", 1))
+        _spend.append((time.monotonic(), tokens, "retrieval", requests))
 
     def _affordable() -> tuple[bool, str]:
-        """Whether one more synthesis round fits the hour's remaining budget.
+        """Thin wrapper: the policy lives in the module-level `affordable` so
+        it is testable without booting an app, and so the provider's reported
+        headroom can override this app's guessed ledger.
 
-        Charges the NEXT round at the most expensive recent MERGE rather than
-        an average: merge cost grows with the candidate listing, so an average
-        lags the trend and the governor would keep authorising rounds the key
-        can no longer pay for. Retrieval rounds are excluded from that pricing
-        on purpose -- they are several times cheaper, and letting a run of
-        queries drag `next_cost` down would price the next 70B merge as if it
-        were a ranking call. They are NOT excluded from the ceilings: those
+        Pricing still charges the NEXT round at the most expensive recent MERGE
+        rather than an average (see `_affordable_from_ledger`): merge cost grows
+        with the candidate listing, so an average lags the trend. Retrieval
+        rounds are excluded from that pricing but NOT from the ceilings -- those
         belong to the key, and the key does not care who spent it.
-
-        Requests are checked at 2 per round because AIC100Provider retries once
-        internally, and a failing round -- the expensive kind -- always takes
-        that retry. True of retrieval too: it passes a `response_schema`, which
-        is the branch that retries.
         """
-        cutoff = time.monotonic() - 3600
-        while _spend and _spend[0][0] < cutoff:
-            _spend.pop(0)
-        tokens_spent = sum(t for _, t, _c in _spend)
-        merges = [t for _, t, c in _spend if c == "synthesis"]
-        next_cost = max(merges[-5:] or [ASSUMED_MERGE_TOKENS])
-        token_budget = SYNTHESIS_TOKENS_PER_HOUR * SYNTHESIS_KEYS
-        request_budget = SYNTHESIS_REQUESTS_PER_HOUR * SYNTHESIS_KEYS
-        if tokens_spent + next_cost > token_budget:
-            spenders = Counter(c for _, _t, c in _spend)
-            return False, (f"token budget: {tokens_spent}+{next_cost} would exceed "
-                           f"{token_budget}/hour across {SYNTHESIS_KEYS} key(s) "
-                           f"({', '.join(f'{n} {c}' for c, n in sorted(spenders.items()))})")
-        if (len(_spend) + 1) * 2 > request_budget:
-            spenders = Counter(c for _, _t, c in _spend)
-            return False, (f"request budget: {len(_spend)} round(s) this hour against "
-                           f"{request_budget}/hour, 2 requests each worst case "
-                           f"({', '.join(f'{n} {c}' for c, n in sorted(spenders.items()))})")
-        return True, ""
+        return affordable(_spend, provider=provider)
 
     def _session_or_404(sid: str):
         return store.get_session(sid)
@@ -1046,9 +1224,46 @@ def build_app(provider: ModelProvider, *, debug: bool = True,
         Route("/v1/sessions/{sid}/query", query, methods=["POST"]),
     ]
     if debug:
-        routes.extend(debug_routes(store, call_log, feed, wm_log))
+        # `provider` (not the RecordingProvider façades) because the rate limit
+        # belongs to the KEY, which both façades share.
+        routes.extend(debug_routes(store, call_log, feed, wm_log, provider))
 
-    app = Starlette(routes=routes)
+    # THE RECOVERY MECHANISM. Everything else in this file makes a deferral
+    # correct and visible; this is what makes a deferred merge actually run.
+    # Without it `_pending` is drained only by the next push to the same
+    # session, so a burst that ends in a deferral leaves the working memory
+    # stale until someone happens to push again -- observed 2026-08-06 as a
+    # memory 13 minutes behind two landed pushes.
+    #
+    # The drain interval is the debounce floor: a deferral is answered no later
+    # than one interval after it becomes affordable. Opt out with
+    # SYNAPSE_DRAIN_DISABLED=1 -- tests that assert on exact merge counts want a
+    # service that only merges when pushed.
+    drain_enabled = os.environ.get("SYNAPSE_DRAIN_DISABLED") != "1"
+
+    async def _drain_loop() -> None:
+        while True:
+            await asyncio.sleep(interval_s)
+            try:
+                await drain_pending(
+                    store=store, synthesizer=synthesizer, pending=_pending,
+                    last_merge=_last_merge, affordable=_affordable,
+                    interval_s=interval_s, now=time.monotonic())
+            except Exception:
+                logger.exception("Pending drain tick failed; continuing.")
+
+    @asynccontextmanager
+    async def _lifespan(app):
+        task = asyncio.create_task(_drain_loop()) if drain_enabled else None
+        try:
+            yield
+        finally:
+            if task is not None:
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+
+    app = Starlette(routes=routes, lifespan=_lifespan)
     app.state.store = store          # test seam: no route reads it
     # test seam: lets a test confirm no CallLog exists at all when debug is
     # disabled (not merely that it's unreachable) -- no route reads this.

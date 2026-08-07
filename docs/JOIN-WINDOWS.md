@@ -1,5 +1,13 @@
 # Joining Synapse from a Snapdragon X Elite (Windows/ARM64)
 
+> **The packaged path is now three commands and needs no checkout** — install
+> (`& ([scriptblock]::Create((irm https://raw.githubusercontent.com/SinghSiddharth01/Synapse/main/install.ps1)))`),
+> configure (`synapse config set service.url http://<host-ip>:8899`, `synapse
+> config set user.contributor <you>`, `synapse config set client.distiller
+> npu`), run (`synapse up --shared-id <id>`). `install.ps1` handles the ARM64
+> interpreter trap itself. The rest of this file is the CHECKOUT walkthrough,
+> for working on Synapse itself or following the NPU runbook.
+
 Copy-paste runbook for the NPU machines. Everything here is **PowerShell** —
 `docs/JOIN.md` is the same journey in bash, and the two are meant to stay in
 step. If you are on macOS or Linux, use that one instead.

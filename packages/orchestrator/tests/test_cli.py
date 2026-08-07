@@ -218,8 +218,9 @@ def test_serve_wires_register_tools_unconditionally_with_a_live_resolver(
                        agent="claude-code", transcript_path="/tmp/t.jsonl",
                        pinned_at=datetime(2026, 8, 4, tzinfo=timezone.utc)),
     )
-    handler = lambda r: httpx.Response(200, json={"version": 2, "new_since": 1,
-                                                  "by_type": {"learning": 1}, "conflicts": 0})
+    def handler(r):
+        return httpx.Response(200, json={"version": 2, "new_since": 1,
+                                         "by_type": {"learning": 1}, "conflicts": 0})
     cli.main(["--state-dir", str(tmp_path)], transport=httpx.MockTransport(handler))
 
     assert len(register_tools_calls) == 2
@@ -1032,3 +1033,14 @@ def test_main_attaches_the_briefing_refresher_so_it_does_not_stay_a_boot_snapsho
 def cli_server_instructions(app) -> str | None:
     """The instructions string the next MCP client would receive."""
     return app.state.synapse_mcp._mcp_server.instructions
+
+
+def test_main_ctrl_c_exits_quietly(monkeypatch) -> None:
+    """Ctrl-C during boot or resync (before uvicorn's own SIGINT handling
+    exists) must not escape main() as a traceback: exit 130 (128+SIGINT)."""
+
+    async def _interrupted(args, *, transport=None):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "cmd_resync", _interrupted)
+    assert cli.main(["resync"]) == 130

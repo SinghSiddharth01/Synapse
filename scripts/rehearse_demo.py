@@ -433,8 +433,6 @@ def main() -> int:
             pre_answers.append((q, body.get("findings", [])))
             run_beat(f"beat 4c: query '{q[:28]}…'", code == 200 and "findings" in body,
                      f"{len(body.get('findings', []))} findings")
-        sum_before = sum(wm.get("by_type", {}).values())
-
         code, body = http("POST", f"{SVC}/v1/sessions/{sid}/findings",
                           json.loads((OUT / "demo-push3.json").read_text()))
         run_beat("beat 5a: push 3", code == 200 and body.get("accepted") == 2, str(body))

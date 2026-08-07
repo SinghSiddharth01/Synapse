@@ -19,6 +19,10 @@ packages = ["src/synapse_service"]
 
 [project.scripts]
 synapse-service = "synapse_service.cli:main"
+# The operator-facing lifecycle CLI (configure / up / health). synapse-service
+# stays the bare "just serve with whatever environment I was handed" entry —
+# supervisors and scripts/serve_local.py depend on that staying dumb.
+synapse-server = "synapse_service.server_cli:main"
 
 [tool.uv.sources]
 synapse-contracts = { workspace = true }

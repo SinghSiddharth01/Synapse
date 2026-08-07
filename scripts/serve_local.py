@@ -1229,7 +1229,7 @@ def main(argv: list[str] | None = None) -> int:
     print("  then start a NEW Claude Code session and approve the server.", flush=True)
     print("  Already registered and showing 'failed'? Just pick Reconnect in /mcp.", flush=True)
     print(flush=True)
-    print(f"  Tools: mcp__synapse__query · mcp__synapse__contribute", flush=True)
+    print("  Tools: mcp__synapse__query · mcp__synapse__contribute", flush=True)
     print(f"  Logs:  {STATE / 'logs'}", flush=True)
 
     if not args.service_url and args.host not in ("127.0.0.1", "localhost", "::1"):
@@ -1238,34 +1238,27 @@ def main(argv: list[str] | None = None) -> int:
         # orchestrator would have their findings stamped with MY binding — my
         # contributor, my agent session — so their own work would be suppressed
         # from them and credited to me.
-        # Printed as ONE unwrapped line per OS, deliberately. The previous
-        # version used backslash continuations, which are not pasteable into a
-        # chat window and presumed the teammate already had a checkout and a
-        # synced venv — the two things they are least likely to have. These
-        # lines install uv, clone, sync, and join, from nothing. `sh -s --` is
-        # load-bearing: it is what lets arguments through the pipe.
+        # The lifecycle is install -> configure -> up, three separate stages
+        # on the teammate's machine. Install takes NO arguments (that was the
+        # coupling: session identity used to travel through the installer);
+        # the URL is CONFIGURATION and the session join happens at RUN time.
         lan = _lan_address()
         raw = "https://raw.githubusercontent.com/SinghSiddharth01/Synapse/main"
         print(flush=True)
-        print("  Give a teammate ONE of these — it installs and joins in a "
-              "single paste:", flush=True)
+        print("  A teammate joins in three stages (install once, reconfigure "
+              "any time):", flush=True)
         print(flush=True)
-        print("  macOS / Linux:", flush=True)
-        print(f"    curl -LsSf {raw}/install.sh | sh -s -- --service-url "
-              f"http://{lan}:8899 --shared-id {shared_id} "
-              f"--contributor <their-name>", flush=True)
+        print("  1. install (macOS/Linux — Windows uses install.ps1, "
+              "same, no arguments):", flush=True)
+        print(f"       curl -LsSf {raw}/install.sh | sh", flush=True)
+        print("  2. configure:", flush=True)
+        print(f"       synapse config set service.url http://{lan}:8899",
+              flush=True)
+        print("       synapse config set user.contributor <their-name>",
+              flush=True)
+        print("  3. run:", flush=True)
+        print(f"       synapse up --shared-id {shared_id}", flush=True)
         print(flush=True)
-        print("  Windows (PowerShell):", flush=True)
-        print(f"    & ([scriptblock]::Create((irm {raw}/install.ps1))) "
-              f"-ServiceUrl http://{lan}:8899 -SharedId {shared_id} "
-              f"-Contributor <their-name>", flush=True)
-        print(flush=True)
-        print("  Already cloned and synced? Then just:", flush=True)
-        print(f"    uv run python scripts/serve_local.py --service-url "
-              f"http://{lan}:8899 --shared-id {shared_id} "
-              f"--contributor <their-name>", flush=True)
-        print(flush=True)
-        print("  Add --npu (or -Npu) if they have one.", flush=True)
         print("  They must NOT point Claude Code at your :8787 — one orchestrator "
               "per laptop, or their findings get stamped as yours.", flush=True)
 

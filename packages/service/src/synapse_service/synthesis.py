@@ -20,8 +20,7 @@ from datetime import datetime, timezone
 
 from pydantic import BaseModel, Field, ValidationError
 
-from synapse_contracts import (Attribution, Conflict, Finding, FindingStatus,
-                               FindingType, Provenance, SessionContext)
+from synapse_contracts import (Attribution, Conflict, Finding, FindingType, Provenance, SessionContext)
 from synapse_providers import ModelProvider
 
 from synapse_service.store import InMemoryStore
