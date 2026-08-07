@@ -143,10 +143,16 @@ def multi_strike(sl, monkeypatch):
 def test_the_shipped_threshold_tolerates_one_failure_and_dies_on_the_second(sl):
     """The CURRENT setting, pinned on its own so a change to it is deliberate.
 
-    ⟨2026-08-07⟩ `PROBE_TIMEOUT_S` is 55s because geniex serves one request at
-    a time: the probe queues behind a running generation, and a timeout
-    shorter than the generation tail restarts healthy hardware. So it has to
-    outlast the tail — 55s against a 35.1s measured worst case.
+    ⟨2026-08-07⟩ `PROBE_TIMEOUT_S` is 150s because geniex serves one request
+    at a time: the probe queues behind whatever the seam is working through,
+    and a timeout shorter than that restarts healthy hardware.
+
+    It has to clear a retry CHAIN, not a single call. 55s was tried first and
+    still struck three times in six minutes, each on a seam that came back on
+    its own during the backoff — because a response truncated at the token cap
+    returns unparseable JSON and the distiller immediately retries, so two
+    generations run back to back behind one probe. 2 attempts x a 500-token
+    response at 8-14 tok/s is ~72-124s.
 
     `DEATH_STRIKES` is 2, and the reason is NOT generation length. A 60s
     end-to-end budget would afford exactly one strike, and this was first
@@ -161,8 +167,12 @@ def test_the_shipped_threshold_tolerates_one_failure_and_dies_on_the_second(sl):
     assert sl.DEATH_STRIKES == 2
     # The load-bearing pair: a strike must cost longer than the seam's
     # slowest legitimate answer, or the rule restarts working hardware.
-    assert sl.PROBE_TIMEOUT_S > 35.1, "must outlast the measured generation tail"
-    assert sl.DEATH_STRIKES * (sl.PROBE_INTERVAL_S + sl.PROBE_TIMEOUT_S) <= 120
+    # 124s is the slow end of a two-attempt retry chain (2 x 500 tokens at
+    # 8 tok/s). Below it the supervisor restarts hardware that is working.
+    assert sl.PROBE_TIMEOUT_S > 124, "must outlast a full distiller retry chain"
+    # Detection is ~5min. Affordable only because a restart no longer loses
+    # work (loop.py re-queues uncharged) — revisit this bound if that changes.
+    assert sl.DEATH_STRIKES * (sl.PROBE_INTERVAL_S + sl.PROBE_TIMEOUT_S) <= 320
 
     clock = _Clock()
     seam = _Seam(alive=False)
@@ -1194,7 +1204,7 @@ def test_the_installed_stack_carries_the_same_supervision_numbers():
 
     # And the pair the fix turns on, asserted directly rather than only by
     # equality — so reverting BOTH copies together still fails here.
-    assert stack.PROBE_TIMEOUT_S > 35.1, "must outlast the measured generation tail"
+    assert stack.PROBE_TIMEOUT_S > 124, "must outlast a full distiller retry chain"
     assert stack.DEATH_STRIKES >= 2, (
         "instant failure flavours (refused/reset/non-200) never reach the "
         "timeout, so more than one strike is the only tolerance for them")

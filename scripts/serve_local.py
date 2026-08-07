@@ -115,9 +115,31 @@ MODEL_PORT = 18181
 # was wrong.
 #
 # Sized off the TAIL, never the mean: a timeout near the average strikes on
-# every above-average call. 55s is ~1.6x the 35.1s worst case actually
-# observed. The sample is small and a throttled NPU is slower still, so treat
-# 55 as the floor of what is defensible, not a target to trim towards.
+# every above-average call.
+#
+# ⟨CORRECTED 2026-08-07, second pass⟩ 55s was the first attempt and it was
+# STILL too short, because "the tail" is not one generation. A probe queues
+# behind the CHAIN the seam is working through, and the distiller retries: a
+# response truncated at the token cap comes back as unparseable JSON
+# ("finish_reason=length ... the JSON is TRUNCATED"), and attempt 2/2 runs
+# straight after attempt 1 with no gap. Measured live at 55s: longest single
+# generation 29.9s, yet a probe waited 49.9s — two generations, one wait — and
+# three strikes in six minutes each declared dead a seam that then "came back
+# on its own during the backoff delay", i.e. was never dead. That burned 2 of
+# the 3 restarts in the window; a fourth would have been GAVE_UP.
+#
+# So the figure to clear is a full retry CHAIN, not a call: 2 attempts x a
+# 500-token response (`response_reserve`) at the 8-14 tok/s this box actually
+# manages is ~72-124s. 150s clears the slow end with margin.
+#
+# And geniex logs only COMPLETED requests, so a generation long enough to
+# cause a strike is killed by the restart and never appears in geniex.log at
+# all. Sizing off durations read out of that file systematically under-reports
+# the tail — which is exactly how 55s looked sufficient.
+#
+# THIS IS THE SYMPTOM, NOT THE DISEASE. The chain exists because responses are
+# truncated at the token cap and retried. Make them fit and the chain, and
+# most of the need for a timeout this large, goes away.
 #
 # TWO strikes, NOT one, and the reason is not generation length. A 60s
 # end-to-end budget would afford exactly one strike at this timeout, and that
@@ -147,7 +169,7 @@ MODEL_PORT = 18181
 # is the one unambiguous failure here and it is now caught in ~5s, better than
 # the ~20s it was before.
 PROBE_INTERVAL_S = 5
-PROBE_TIMEOUT_S = 55.0
+PROBE_TIMEOUT_S = 150.0
 DEATH_STRIKES = 2
 # Attempt 1 immediately, attempt 2 after 30s, attempt 3 after 120s. A fourth
 # death inside RESTART_WINDOW_S gives up: a genuinely broken NPU on stage must
