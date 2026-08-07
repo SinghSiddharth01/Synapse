@@ -193,14 +193,14 @@ def test_producer_endpoint_routes_two_windows_of_one_product_separately(tmp_path
     state_dir = tmp_path / "state"
     for session, shared, pinned in (("conv-1", "sh-a", datetime(2026, 8, 6, tzinfo=timezone.utc)),
                                     ("conv-2", "sh-b", datetime(2026, 8, 7, tzinfo=timezone.utc))):
-        binding = SessionBinding(agent_session_id=session, shared_id=shared,
+        binding = SessionBinding(service_url="http://127.0.0.1:8899", agent_session_id=session, shared_id=shared,
                                  contributor="sid", agent="claude-code",
                                  transcript_path=f"/tmp/{session}.jsonl", pinned_at=pinned)
         write_binding(state_dir / "bindings" / "claude-code" / f"{session}.json", binding)
     # The legacy mirror, naming the LAST window to join — what the old
     # per-product resolver returned for every finding on this machine.
     write_binding(state_dir / "bindings" / "claude-code.json",
-                  SessionBinding(agent_session_id="conv-2", shared_id="sh-b",
+                  SessionBinding(service_url="http://127.0.0.1:8899", agent_session_id="conv-2", shared_id="sh-b",
                                  contributor="sid", agent="claude-code",
                                  transcript_path="/tmp/conv-2.jsonl",
                                  pinned_at=datetime(2026, 8, 7, tzinfo=timezone.utc)))
@@ -245,7 +245,7 @@ def test_producer_endpoint_falls_back_to_the_product_binding_for_an_unbound_wind
 
     state_dir = tmp_path / "state"
     write_binding(state_dir / "bindings" / "claude-code.json",
-                  SessionBinding(agent_session_id="as-sid", shared_id="local-dev",
+                  SessionBinding(service_url="http://127.0.0.1:8899", agent_session_id="as-sid", shared_id="local-dev",
                                  contributor="sid", agent="claude-code",
                                  transcript_path="/tmp/scratch.jsonl",
                                  pinned_at=datetime(2026, 8, 6, tzinfo=timezone.utc),
@@ -288,12 +288,12 @@ def test_producer_endpoint_routes_a_codex_conversation_by_its_own_binding(tmp_pa
     codex_uuid = "1c9b6d8e-27ac-4f1e-9f2c-8a2b1e6d4c11"
     state_dir = tmp_path / "state"
     write_binding(state_dir / "bindings" / "codex" / f"{codex_uuid}.json",
-                  SessionBinding(agent_session_id=codex_uuid, shared_id="sh-codex",
+                  SessionBinding(service_url="http://127.0.0.1:8899", agent_session_id=codex_uuid, shared_id="sh-codex",
                                  contributor="akhil", agent="codex",
                                  transcript_path="/tmp/rollout.jsonl",
                                  pinned_at=datetime(2026, 8, 6, tzinfo=timezone.utc)))
     write_binding(state_dir / "bindings" / "claude-code" / "conv-1.json",
-                  SessionBinding(agent_session_id="conv-1", shared_id="sh-claude",
+                  SessionBinding(service_url="http://127.0.0.1:8899", agent_session_id="conv-1", shared_id="sh-claude",
                                  contributor="akhil", agent="claude-code",
                                  transcript_path="/tmp/conv-1.jsonl",
                                  pinned_at=datetime(2026, 8, 7, tzinfo=timezone.utc)))

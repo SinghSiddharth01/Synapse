@@ -61,7 +61,7 @@ def test_join_binds_the_currently_detected_transcript(tmp_path) -> None:
     transcript = _make_transcript(root, cwd, "sess-1")
     state_dir = tmp_path / "state"
 
-    bindings = join_session("team-standup", "akhil", cwd, state_dir, projects_root=root)
+    bindings = join_session("team-standup", "akhil", cwd, state_dir, "http://127.0.0.1:8899", projects_root=root)
 
     assert len(bindings) == 1
     assert bindings[0].shared_id == "team-standup"
@@ -76,7 +76,7 @@ def test_join_with_nothing_live_binds_nothing(tmp_path) -> None:
     root = tmp_path / "projects"
     state_dir = tmp_path / "state"
 
-    bindings = join_session("team-standup", "akhil", cwd, state_dir, projects_root=root)
+    bindings = join_session("team-standup", "akhil", cwd, state_dir, "http://127.0.0.1:8899", projects_root=root)
 
     assert bindings == []
 
@@ -91,7 +91,7 @@ def test_joined_binding_wins_over_a_more_recently_written_transcript(tmp_path) -
     state_dir = tmp_path / "state"
     joined_transcript = _make_transcript(root, cwd, "sess-at-join-time")
 
-    join_session("team-standup", "aditya", cwd, state_dir, projects_root=root)
+    join_session("team-standup", "aditya", cwd, state_dir, "http://127.0.0.1:8899", projects_root=root)
 
     _make_transcript(root, cwd, "sess-appeared-later")  # a second, newer transcript
 
@@ -118,7 +118,7 @@ def test_join_pointing_at_a_since_deleted_transcript_falls_back_to_heuristic(tmp
     root = tmp_path / "projects"
     state_dir = tmp_path / "state"
     joined_transcript = _make_transcript(root, cwd, "sess-1")
-    join_session("team-standup", "aditya", cwd, state_dir, projects_root=root)
+    join_session("team-standup", "aditya", cwd, state_dir, "http://127.0.0.1:8899", projects_root=root)
 
     joined_transcript.unlink()
     live = _make_transcript(root, cwd, "sess-still-here")

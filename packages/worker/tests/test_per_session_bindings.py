@@ -74,7 +74,7 @@ def _set_age(path, seconds_ago: float) -> None:
 
 def _binding(session_id: str, shared_id: str, transcript, *, pinned_at, agent="claude-code",
              contributor="akhil", scope="session") -> SessionBinding:
-    return SessionBinding(
+    return SessionBinding(service_url="http://127.0.0.1:8899", 
         agent_session_id=session_id,
         shared_id=shared_id,
         contributor=contributor,
@@ -101,9 +101,9 @@ def test_two_joins_with_distinct_session_ids_produce_two_binding_files(tmp_path)
     transcript_a = _make_claude_transcript(root, cwd, SESSION_A)
     transcript_b = _make_claude_transcript(root, cwd, SESSION_B)
 
-    join_session("sh-1", "akhil", cwd, state_dir,
+    join_session("sh-1", "akhil", cwd, state_dir, "http://127.0.0.1:8899",
                  projects_root=root, agent_session_id=SESSION_A)
-    join_session("sh-1", "akhil", cwd, state_dir,
+    join_session("sh-1", "akhil", cwd, state_dir, "http://127.0.0.1:8899",
                  projects_root=root, agent_session_id=SESSION_B)
 
     path_a = binding_path_for_session(state_dir, "claude-code", SESSION_A)
@@ -130,7 +130,7 @@ def test_a_detected_join_writes_both_layouts_too(tmp_path) -> None:
     state_dir = tmp_path / "state"
     transcript = _make_claude_transcript(root, cwd, SESSION_A)
 
-    bindings = join_session("sh-1", "akhil", cwd, state_dir, projects_root=root)
+    bindings = join_session("sh-1", "akhil", cwd, state_dir, "http://127.0.0.1:8899", projects_root=root)
 
     assert [b.agent_session_id for b in bindings] == [SESSION_A]
     assert binding_path_for_session(state_dir, "claude-code", SESSION_A).is_file()
@@ -270,22 +270,44 @@ def test_scope_defaults_to_session_and_round_trips_when_machine(tmp_path) -> Non
     assert read_binding(machine).scope == "machine"
 
 
+def _legacy_binding_json(*, service_url: str | None) -> str:
+    """A binding file with no `scope`, optionally with no `service_url`."""
+    tail = f', "service_url": "{service_url}"' if service_url else ""
+    return ('{"agent_session_id": "%s", "shared_id": "sh-1", "contributor": "akhil",'
+            ' "agent": "claude-code", "transcript_path": "/tmp/t.jsonl",'
+            ' "pinned_at": "2026-08-06T10:00:00Z"%s}' % (SESSION_A, tail))
+
+
 def test_a_binding_file_written_before_scope_existed_still_loads(tmp_path) -> None:
-    """Additive, in the literal sense: the field is absent from every file on
-    every machine that has ever run this, and those files must keep loading."""
+    """`scope` is additive in the literal sense: absent from older files, and
+    those files must keep loading with the default."""
     path = binding_path_for_agent(tmp_path / "state", "claude-code")
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        '{"agent_session_id": "%s", "shared_id": "sh-1", "contributor": "akhil",'
-        ' "agent": "claude-code", "transcript_path": "/tmp/t.jsonl",'
-        ' "pinned_at": "2026-08-06T10:00:00Z"}' % SESSION_A,
-        encoding="utf-8",
-    )
+    path.write_text(_legacy_binding_json(service_url="http://127.0.0.1:8899"),
+                    encoding="utf-8")
 
     loaded = read_binding(path)
 
     assert loaded is not None
     assert loaded.scope == "session"
+
+
+def test_a_binding_written_before_service_url_deliberately_does_not_load(tmp_path) -> None:
+    """`service_url` is NOT additive, and that is the decision.
+
+    Unlike `scope`, a missing service cannot be defaulted: the whole failure
+    being fixed is a binding that names a session without naming the server
+    that minted it, and any default would be a guess at exactly the thing that
+    went wrong. Pre-first-release there is no install worth accommodating, so
+    an old pin fails validation, reads as "not joined", and one
+    `join_session(...)` from the agent writes a correct one. Pinned as a test
+    because a later reader will otherwise be tempted to make it optional.
+    """
+    path = binding_path_for_agent(tmp_path / "state", "claude-code")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_legacy_binding_json(service_url=None), encoding="utf-8")
+
+    assert read_binding(path) is None
 
 
 # ---------------------------------------------------------------------------
@@ -315,7 +337,7 @@ def test_join_prunes_per_session_bindings_whose_transcript_is_long_gone(tmp_path
     write_binding(legacy, _binding(SESSION_B, "sh-old", tmp_path / "deleted.jsonl",
                                    pinned_at=base))
 
-    join_session("sh-1", "akhil", cwd, state_dir,
+    join_session("sh-1", "akhil", cwd, state_dir, "http://127.0.0.1:8899",
                  projects_root=root, agent_session_id=SESSION_A)
 
     assert not dead_path.exists()
@@ -355,13 +377,13 @@ def test_a_recent_binding_survives_a_siblings_join_even_with_its_transcript_gone
     transcript_a = _make_claude_transcript(root, cwd, SESSION_A)
     _make_claude_transcript(root, cwd, SESSION_B)
 
-    join_session("sh-a", "akhil", cwd, state_dir,
+    join_session("sh-a", "akhil", cwd, state_dir, "http://127.0.0.1:8899",
                  projects_root=root, agent_session_id=SESSION_A)
     a_binding = binding_path_for_session(state_dir, "claude-code", SESSION_A)
     assert a_binding.is_file()
 
     transcript_a.unlink()
-    join_session("sh-b", "akhil", cwd, state_dir,
+    join_session("sh-b", "akhil", cwd, state_dir, "http://127.0.0.1:8899",
                  projects_root=root, agent_session_id=SESSION_B)
 
     assert a_binding.is_file()
@@ -385,9 +407,9 @@ def test_run_follows_its_own_binding(tmp_path) -> None:
     _set_age(transcript_a, 300)
     _set_age(transcript_b, 1)
 
-    join_session("sh-a", "akhil", cwd, state_dir,
+    join_session("sh-a", "akhil", cwd, state_dir, "http://127.0.0.1:8899",
                  projects_root=root, agent_session_id=SESSION_A)
-    join_session("sh-b", "akhil", cwd, state_dir,
+    join_session("sh-b", "akhil", cwd, state_dir, "http://127.0.0.1:8899",
                  projects_root=root, agent_session_id=SESSION_B)
 
     resolved_a = resolve_transcript(cwd, state_dir, agent_session_id=SESSION_A,
@@ -415,7 +437,7 @@ def test_an_unbound_session_id_refuses_rather_than_following_the_other_window(
     cwd.mkdir()
     state_dir = tmp_path / "state"
     _make_claude_transcript(root, cwd, SESSION_B)
-    join_session("sh-b", "akhil", cwd, state_dir,
+    join_session("sh-b", "akhil", cwd, state_dir, "http://127.0.0.1:8899",
                  projects_root=root, agent_session_id=SESSION_B)
 
     # The premise: without the argument there IS an answer.
@@ -446,9 +468,9 @@ def test_a_named_session_whose_transcript_vanished_refuses_the_heuristic(
     transcript_a = _make_claude_transcript(root, cwd, SESSION_A)
     transcript_b = _make_claude_transcript(root, cwd, SESSION_B)
 
-    join_session("sh-a", "akhil", cwd, state_dir,
+    join_session("sh-a", "akhil", cwd, state_dir, "http://127.0.0.1:8899",
                  projects_root=root, agent_session_id=SESSION_A)
-    join_session("sh-b", "akhil", cwd, state_dir,
+    join_session("sh-b", "akhil", cwd, state_dir, "http://127.0.0.1:8899",
                  projects_root=root, agent_session_id=SESSION_B)
     transcript_a.unlink()
 
@@ -478,9 +500,9 @@ def test_cli_run_resolution_threads_the_agent_session_id(tmp_path, monkeypatch) 
     transcript_a = _make_claude_transcript(root, cwd, SESSION_A)
     _make_claude_transcript(root, cwd, SESSION_B)
 
-    join_session("sh-a", "akhil", cwd, state_dir,
+    join_session("sh-a", "akhil", cwd, state_dir, "http://127.0.0.1:8899",
                  projects_root=root, agent_session_id=SESSION_A)
-    join_session("sh-b", "akhil", cwd, state_dir,
+    join_session("sh-b", "akhil", cwd, state_dir, "http://127.0.0.1:8899",
                  projects_root=root, agent_session_id=SESSION_B)
 
     monkeypatch.chdir(cwd)
@@ -657,7 +679,7 @@ def test_build_marks_a_transcript_run_as_unidentified(tmp_path, monkeypatch) -> 
     monkeypatch.chdir(cwd)
     monkeypatch.setenv("SYNAPSE_STATE_DIR", str(state_dir))
 
-    join_session("sh-a", "akhil", cwd, state_dir,
+    join_session("sh-a", "akhil", cwd, state_dir, "http://127.0.0.1:8899",
                  projects_root=root, agent_session_id=SESSION_A)
 
     resolved_args = argparse.Namespace(agent=None, agent_session_id=SESSION_A,
@@ -724,9 +746,9 @@ def test_two_codex_conversations_bind_separately_through_the_join_path(
     path_b = _make_codex_rollout(codex_root, "2026/08/06", "2026-08-06T11-00-00",
                                  CODEX_UUID_B, cwd)
 
-    [first] = join_session("sh-codex-a", "akhil", cwd, state_dir,
+    [first] = join_session("sh-codex-a", "akhil", cwd, state_dir, "http://127.0.0.1:8899",
                            agent_session_id=CODEX_UUID)
-    [second] = join_session("sh-codex-b", "akhil", cwd, state_dir,
+    [second] = join_session("sh-codex-b", "akhil", cwd, state_dir, "http://127.0.0.1:8899",
                            agent_session_id=CODEX_UUID_B)
 
     assert first.agent == second.agent == "codex"

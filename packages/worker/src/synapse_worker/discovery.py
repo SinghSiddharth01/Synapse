@@ -644,6 +644,7 @@ def _bind(
     shared_id: str,
     contributor: str,
     state_dir: Path,
+    service_url: str,
 ) -> SessionBinding:
     """Write one `SessionBinding` for one detected transcript.
 
@@ -667,6 +668,9 @@ def _bind(
         agent=transcript.agent,
         transcript_path=str(transcript.path),
         pinned_at=datetime.now(timezone.utc),
+        # Stamped at bind time from the service this client is pointed at. A
+        # shared_id is only meaningful relative to the server that minted it.
+        service_url=service_url,
     )
     write_binding(
         binding_path_for_session(state_dir, transcript.agent, transcript.session_id), binding
@@ -680,6 +684,7 @@ def join_session(
     contributor: str,
     cwd: Path,
     state_dir: Path,
+    service_url: str,
     *,
     projects_root: Path | None = None,
     agent_session_id: str | None = None,
@@ -760,7 +765,7 @@ def join_session(
                 agent_session_id, agent, projects_root=projects_root
             )
             if transcript is not None:
-                bound.append(_bind(transcript, shared_id, contributor, state_dir))
+                bound.append(_bind(transcript, shared_id, contributor, state_dir, service_url))
                 break
         else:
             # Returning [] rather than raising: this is the same "nothing
@@ -783,7 +788,7 @@ def join_session(
         transcript = find_live_transcript(cwd, projects_root, agent=agent)
         if transcript is None:
             continue
-        bound.append(_bind(transcript, shared_id, contributor, state_dir))
+        bound.append(_bind(transcript, shared_id, contributor, state_dir, service_url))
 
     if not bound:
         logger.warning(

@@ -261,7 +261,7 @@ def test_a_pinned_codex_binding_wins_over_the_heuristic(tmp_path) -> None:
 
     write_binding(
         binding_path_for_agent(state_dir, "codex"),
-        SessionBinding(
+        SessionBinding(service_url="http://127.0.0.1:8899", 
             agent_session_id=uuid,
             shared_id="team-standup",
             contributor="aditya",
@@ -299,7 +299,7 @@ def test_binding_storage_holds_independent_claude_code_and_codex_pins(tmp_path) 
 
     write_binding(
         binding_path_for_agent(state_dir, "claude-code"),
-        SessionBinding(
+        SessionBinding(service_url="http://127.0.0.1:8899", 
             agent_session_id="sess-1",
             shared_id="team-standup",
             contributor="akhil",
@@ -310,7 +310,7 @@ def test_binding_storage_holds_independent_claude_code_and_codex_pins(tmp_path) 
     )
     write_binding(
         binding_path_for_agent(state_dir, "codex"),
-        SessionBinding(
+        SessionBinding(service_url="http://127.0.0.1:8899", 
             agent_session_id=codex_uuid,
             shared_id="team-standup",
             contributor="akhil",
@@ -360,7 +360,7 @@ def test_join_binds_two_agents_at_once(tmp_path, monkeypatch) -> None:
         content=_codex_session_meta_line(str(cwd)) + "\n",
     )
 
-    bindings = join_session("team-standup", "akhil", cwd, tmp_path / "state")
+    bindings = join_session("team-standup", "akhil", cwd, tmp_path / "state", "http://127.0.0.1:8899")
 
     assert len(bindings) == 2
     by_agent = {b.agent: b for b in bindings}
@@ -389,7 +389,7 @@ def test_join_binds_only_the_live_agent_when_the_other_has_nothing(tmp_path, mon
     monkeypatch.setattr(discovery, "CODEX_SESSIONS", codex_root)
     _make_claude_transcript(claude_root, cwd, "sess-1")
 
-    bindings = join_session("team-standup", "akhil", cwd, tmp_path / "state")
+    bindings = join_session("team-standup", "akhil", cwd, tmp_path / "state", "http://127.0.0.1:8899")
 
     assert [b.agent for b in bindings] == ["claude-code"]
 
@@ -414,6 +414,6 @@ def test_join_does_not_bind_a_codex_session_from_a_different_repo(tmp_path, monk
         content=_codex_session_meta_line(str(secret_client_repo)) + "\n",
     )
 
-    bindings = join_session("team-standup", "akhil", repo_a, tmp_path / "state")
+    bindings = join_session("team-standup", "akhil", repo_a, tmp_path / "state", "http://127.0.0.1:8899")
 
     assert bindings == []

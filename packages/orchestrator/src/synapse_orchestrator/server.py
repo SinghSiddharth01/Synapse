@@ -577,6 +577,7 @@ def register_tools(server: FastMCP, *, resolve_binding, service_url: str, relay,
                     "(Claude Code exports it as CLAUDE_CODE_SESSION_ID), which is "
                     "exact and never consults modification times.")
         bindings = _worker_join_session(shared_id, who, here, Path(state_dir),
+                                        service_url,
                                         projects_root=projects_root,
                                         agent_session_id=agent_session_id)
         if not bindings:

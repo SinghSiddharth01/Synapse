@@ -65,7 +65,8 @@ def _bindings_dir(state_dir: Path) -> Path:
     return state_dir / "bindings"
 
 
-def _resolve_binding(state_dir: Path) -> LocalBinding | None:
+def _resolve_binding(state_dir: Path,
+                     expected_service_url: str | None = None) -> LocalBinding | None:
     """The orchestrator's current "primary" binding, read fresh from disk.
 
     One file per Agent PRODUCT (`bindings/claude-code.json`, `bindings/codex.json`
@@ -104,7 +105,12 @@ def _resolve_binding(state_dir: Path) -> LocalBinding | None:
     if not bindings_dir.is_dir():
         return None
     paths = sorted(bindings_dir.glob("*.json")) + sorted(bindings_dir.glob("*/*.json"))
-    found = [b for b in (read_binding(p) for p in paths) if b is not None]
+    # `expected_service_url` is what makes the binding's `service_url` load
+    # bearing rather than decorative: a pin for another server reads as
+    # UNSET here, so the orchestrator falls through to 'not joined' instead
+    # of forwarding every finding to a service that 404s the id.
+    found = [b for b in (read_binding(p, expected_service_url=expected_service_url)
+                         for p in paths) if b is not None]
     if not found:
         return None
     return max(found, key=lambda b: _pinned_at_key(b)).to_local_binding()
@@ -330,7 +336,15 @@ async def cmd_resync(args: argparse.Namespace, *,
     pushed (i.e. was ever recorded under a real Shared Session, across every
     session in the backlog, not just the one currently bound)."""
     state_dir = Path(args.state_dir)
-    binding = _resolve_binding(state_dir)
+    # Scoped to the service being resynced TO. ⟨2026-08-07⟩ Unscoped, this read
+    # the shared_id off a binding made against a DIFFERENT server and re-pushed
+    # the whole retained log at a service that had never minted it: Step 1 is
+    # create-or-return, so the id was not found, a fresh session was created,
+    # and 322 findings landed in two "(recovered by resync)" sessions while the
+    # real memory stayed on the other host. Resolving as unbound is the correct
+    # outcome — resync has nothing to say about a session this service does not
+    # own.
+    binding = _resolve_binding(state_dir, args.service_url)
     shared_id = binding.shared_id if binding is not None else None
     # STOPGAP (lifecycle spec, "Durability caveat"): the service's store is
     # in-memory, so a restart un-ends an ended session — and Step 1 below is
@@ -497,7 +511,10 @@ def _main(argv: list[str] | None = None, *,
     state_dir = Path(args.state_dir)
 
     def resolve_binding() -> LocalBinding | None:
-        return _resolve_binding(state_dir)
+        # Pinned to the service THIS orchestrator forwards to. A binding made
+        # against a different server reads as unset rather than resolving into
+        # a 404 at push time.
+        return _resolve_binding(state_dir, args.service_url)
 
     def resolve_binding_for_agent(agent: str) -> LocalBinding | None:
         return _resolve_binding_for_agent(state_dir, agent)

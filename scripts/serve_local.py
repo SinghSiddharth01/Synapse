@@ -1152,6 +1152,10 @@ def main(argv: list[str] | None = None) -> int:
         agent_session_id=f"as-{args.contributor}",
         shared_id=shared_id, contributor=args.contributor, agent="claude-code",
         transcript_path=str(scratch), pinned_at=datetime.now(timezone.utc),
+        # The service this binding's shared_id was minted on. `--service-url`
+        # points the client at a remote one; without stamping it here, flipping
+        # that flag would silently orphan the binding.
+        service_url=(args.service_url or SERVICE_URL),
         scope="machine"))
 
     orchestrator_env = {"SYNAPSE_BASE_URL": model_url,

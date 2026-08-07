@@ -481,6 +481,7 @@ def main(argv: list[str] | None = None) -> int:
         agent_session_id="as-demo", shared_id=shared_id, contributor="siddsing",
         agent="claude-code", transcript_path=str(DEMO / "transcripts"),
         pinned_at=datetime.now(timezone.utc),
+        service_url=SERVICE_URL,
     ))
     orchestrator = spawn("orchestrator", [
         str(BIN / "synapse-orchestrator"), "--port", "8787",

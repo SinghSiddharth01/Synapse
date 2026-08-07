@@ -64,7 +64,7 @@ def test_main_wires_resolve_binding_into_the_app_so_a_post_boot_join_takes_effec
         # with the SAME `app` object still in hand (no restart).
         write_binding(
             tmp_path / "bindings" / "claude-code.json",
-            SessionBinding(agent_session_id="as-1", shared_id="sh-late", contributor="aditya",
+            SessionBinding(service_url="http://127.0.0.1:8899", agent_session_id="as-1", shared_id="sh-late", contributor="aditya",
                            agent="claude-code", transcript_path="/tmp/t.jsonl",
                            pinned_at=datetime(2026, 8, 4, tzinfo=timezone.utc)),
         )
@@ -136,7 +136,7 @@ def test_serve_falls_back_to_unbound_session_with_no_binding(monkeypatch, tmp_pa
 def test_serve_uses_the_joined_session_when_a_binding_exists(monkeypatch, tmp_path, capsys) -> None:
     write_binding(
         tmp_path / "bindings" / "claude-code.json",
-        SessionBinding(
+        SessionBinding(service_url="http://127.0.0.1:8899", 
             agent_session_id="as-1",
             shared_id="sh-joined",
             contributor="aditya",
@@ -214,7 +214,7 @@ def test_serve_wires_register_tools_unconditionally_with_a_live_resolver(
     # generic/default string a mutated call could smuggle through instead.
     write_binding(
         tmp_path / "bindings" / "claude-code.json",
-        SessionBinding(agent_session_id="as-1", shared_id="sh-wired", contributor="aditya",
+        SessionBinding(service_url="http://127.0.0.1:8899", agent_session_id="as-1", shared_id="sh-wired", contributor="aditya",
                        agent="claude-code", transcript_path="/tmp/t.jsonl",
                        pinned_at=datetime(2026, 8, 4, tzinfo=timezone.utc)),
     )
@@ -234,7 +234,7 @@ def test_serve_wires_register_tools_unconditionally_with_a_live_resolver(
     # (server.py) observe a join that happens after registration, no restart.
     write_binding(
         tmp_path / "bindings" / "claude-code.json",
-        SessionBinding(agent_session_id="as-1", shared_id="sh-even-later", contributor="aditya",
+        SessionBinding(service_url="http://127.0.0.1:8899", agent_session_id="as-1", shared_id="sh-even-later", contributor="aditya",
                        agent="claude-code", transcript_path="/tmp/t.jsonl",
                        pinned_at=datetime(2026, 8, 5, tzinfo=timezone.utc)),
     )
@@ -364,7 +364,7 @@ def test_serve_discovers_a_codex_only_binding(monkeypatch, tmp_path, capsys) -> 
     briefing, egress to the fabricated 'unbound' session."""
     write_binding(
         tmp_path / "bindings" / "codex.json",
-        SessionBinding(
+        SessionBinding(service_url="http://127.0.0.1:8899", 
             agent_session_id="as-codex-1",
             shared_id="sh-codex",
             contributor="akhil",
@@ -386,13 +386,13 @@ def test_serve_picks_the_most_recently_joined_binding_when_several_exist(
 ) -> None:
     write_binding(
         tmp_path / "bindings" / "claude-code.json",
-        SessionBinding(agent_session_id="as-1", shared_id="sh-older", contributor="aditya",
+        SessionBinding(service_url="http://127.0.0.1:8899", agent_session_id="as-1", shared_id="sh-older", contributor="aditya",
                        agent="claude-code", transcript_path="/tmp/t.jsonl",
                        pinned_at=datetime(2026, 8, 1, tzinfo=timezone.utc)),
     )
     write_binding(
         tmp_path / "bindings" / "codex.json",
-        SessionBinding(agent_session_id="as-2", shared_id="sh-newer", contributor="akhil",
+        SessionBinding(service_url="http://127.0.0.1:8899", agent_session_id="as-2", shared_id="sh-newer", contributor="akhil",
                        agent="codex", transcript_path="/tmp/c.jsonl",
                        pinned_at=datetime(2026, 8, 4, tzinfo=timezone.utc)),
     )
@@ -419,7 +419,7 @@ def test_resync_with_nothing_pending_never_touches_the_network(tmp_path, capsys)
 def test_resync_reports_the_joined_session(tmp_path, capsys) -> None:
     write_binding(
         tmp_path / "bindings" / "claude-code.json",
-        SessionBinding(
+        SessionBinding(service_url="http://127.0.0.1:8899", 
             agent_session_id="as-1",
             shared_id="sh-joined",
             contributor="aditya",
@@ -450,7 +450,7 @@ def test_resync_still_honours_state_dir_given_before_the_subcommand(tmp_path, ca
     """The fix for the above must not break the form that already worked."""
     write_binding(
         tmp_path / "bindings" / "claude-code.json",
-        SessionBinding(agent_session_id="as-1", shared_id="sh-joined", contributor="aditya",
+        SessionBinding(service_url="http://127.0.0.1:8899", agent_session_id="as-1", shared_id="sh-joined", contributor="aditya",
                        agent="claude-code", transcript_path="/tmp/t.jsonl",
                        pinned_at=datetime(2026, 8, 4, tzinfo=timezone.utc)),
     )
@@ -467,7 +467,7 @@ def test_resync_fails_loudly_when_the_push_does_not_succeed(tmp_path, capsys) ->
     indistinguishable from success, with exit code 0 either way."""
     write_binding(
         tmp_path / "bindings" / "claude-code.json",
-        SessionBinding(agent_session_id="as-1", shared_id="sh-joined", contributor="aditya",
+        SessionBinding(service_url="http://127.0.0.1:8899", agent_session_id="as-1", shared_id="sh-joined", contributor="aditya",
                        agent="claude-code", transcript_path="/tmp/t.jsonl",
                        pinned_at=datetime(2026, 8, 4, tzinfo=timezone.utc)),
     )
@@ -675,7 +675,7 @@ def test_resync_recreates_and_synthesizes_each_session_the_log_names(tmp_path, c
     is a wasted call and not a defect."""
     write_binding(
         tmp_path / "bindings" / "claude-code.json",
-        SessionBinding(agent_session_id="as-1", shared_id="sh-joined",
+        SessionBinding(service_url="http://127.0.0.1:8899", agent_session_id="as-1", shared_id="sh-joined",
                        contributor="aditya", agent="claude-code",
                        transcript_path="/tmp/t.jsonl",
                        pinned_at=datetime(2026, 8, 4, tzinfo=timezone.utc)),
@@ -738,7 +738,7 @@ def test_resync_recreates_a_session_whose_findings_were_already_acked_before_a_r
     way -- the mutant's damage is entirely in skipping the recreate."""
     write_binding(
         tmp_path / "bindings" / "claude-code.json",
-        SessionBinding(agent_session_id="as-1", shared_id="sh-joined",
+        SessionBinding(service_url="http://127.0.0.1:8899", agent_session_id="as-1", shared_id="sh-joined",
                        contributor="aditya", agent="claude-code",
                        transcript_path="/tmp/t.jsonl",
                        pinned_at=datetime(2026, 8, 4, tzinfo=timezone.utc)),
@@ -1009,7 +1009,7 @@ def test_main_attaches_the_briefing_refresher_so_it_does_not_stay_a_boot_snapsho
             })
         return httpx.Response(200, json={"accepted": 1, "memory_version": 1})
 
-    write_binding(tmp_path / "bindings" / "claude-code.json", SessionBinding(
+    write_binding(tmp_path / "bindings" / "claude-code.json", SessionBinding(service_url="http://127.0.0.1:8899", 
         agent_session_id="as-1", shared_id="sh-1", contributor="me",
         agent="claude-code", transcript_path=str(tmp_path / "t.jsonl"),
         pinned_at=datetime.now(timezone.utc)))
@@ -1044,3 +1044,32 @@ def test_main_ctrl_c_exits_quietly(monkeypatch) -> None:
 
     monkeypatch.setattr(cli, "cmd_resync", _interrupted)
     assert cli.main(["resync"]) == 130
+
+
+# ---------------------------------------------------------------------------
+# a binding for another service must not resolve (2026-08-07)
+# ---------------------------------------------------------------------------
+
+def test_a_binding_for_another_service_does_not_resolve(tmp_path) -> None:
+    """The dormant-check trap: recording `service_url` on the binding is only
+    half the fix. If nothing PASSES the expectation down, a pin for another
+    server still resolves and every finding 404s at push time — which is the
+    failure this field exists to end, unchanged.
+
+    Measured: `service.url` moved 192.168.4.81 -> localhost on a live machine
+    and 431 findings queued against a session only the first host had.
+    """
+    from synapse_contracts import SessionBinding, write_binding
+
+    from synapse_orchestrator.cli import _resolve_binding
+
+    state = tmp_path / "state"
+    write_binding(state / "bindings" / "claude-code.json", SessionBinding(
+        agent_session_id="as-1", shared_id="sh-remote", contributor="sid",
+        agent="claude-code", transcript_path="/tmp/t.jsonl",
+        pinned_at=datetime(2026, 8, 7, tzinfo=timezone.utc),
+        service_url="http://192.168.4.81:8899"))
+
+    assert _resolve_binding(state, "http://192.168.4.81:8899") is not None
+    assert _resolve_binding(state, "http://localhost:8899") is None, \
+        "a pin for another service resolved; findings would 404 at push time"

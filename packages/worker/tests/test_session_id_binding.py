@@ -169,7 +169,7 @@ def test_codex_lookup_ignores_the_session_meta_cwd_filter(tmp_path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Spec Testing item 6: join_session(shared_id, agent_session_id=X) binds X
+# Spec Testing item 6: join_session(shared_id, "http://127.0.0.1:8899", agent_session_id=X) binds X
 # even when a more recently modified transcript exists.
 # ---------------------------------------------------------------------------
 
@@ -190,7 +190,7 @@ def test_join_with_an_explicit_session_id_beats_a_newer_transcript(tmp_path) -> 
     assert find_live_transcript(cwd, root).path == newer
 
     bindings = join_session(
-        "team-standup", "akhil", cwd, state_dir,
+        "team-standup", "akhil", cwd, state_dir, "http://127.0.0.1:8899",
         projects_root=root, agent_session_id="sess-explicit",
     )
 
@@ -220,7 +220,7 @@ def test_join_with_an_explicit_session_id_binds_across_project_slugs(tmp_path) -
     assert find_live_transcript(repo, root) is None  # the premise
 
     bindings = join_session(
-        "team-standup", "akhil", repo, state_dir,
+        "team-standup", "akhil", repo, state_dir, "http://127.0.0.1:8899",
         projects_root=root, agent_session_id="sess-in-the-home-slug",
     )
 
@@ -238,7 +238,7 @@ def test_join_with_an_explicit_codex_session_id_binds_codex(tmp_path) -> None:
     wanted = _make_codex_transcript(root, "2026/08/05", "2026-08-05T10-00-00", CODEX_UUID)
 
     bindings = join_session(
-        "team-standup", "akhil", cwd, state_dir,
+        "team-standup", "akhil", cwd, state_dir, "http://127.0.0.1:8899",
         projects_root=root, agent_session_id=CODEX_UUID,
     )
 
@@ -260,7 +260,7 @@ def test_join_with_an_unresolvable_session_id_binds_nothing_and_does_not_guess(t
     _make_claude_transcript(root, cwd, "sess-live-right-now")
 
     bindings = join_session(
-        "team-standup", "akhil", cwd, state_dir,
+        "team-standup", "akhil", cwd, state_dir, "http://127.0.0.1:8899",
         projects_root=root, agent_session_id="sess-that-does-not-exist",
     )
 
@@ -280,7 +280,7 @@ def test_join_without_an_explicit_session_id_is_unchanged(tmp_path) -> None:
     _set_age(older, 600)
     _set_age(newer, 1)
 
-    bindings = join_session("team-standup", "akhil", cwd, state_dir, projects_root=root)
+    bindings = join_session("team-standup", "akhil", cwd, state_dir, "http://127.0.0.1:8899", projects_root=root)
 
     assert [b.transcript_path for b in bindings] == [str(newer)]
 

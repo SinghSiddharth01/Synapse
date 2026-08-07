@@ -18,6 +18,7 @@ def _binding(**overrides) -> SessionBinding:
         agent="claude-code",
         transcript_path="/repo/transcript.jsonl",
         pinned_at=TS,
+        service_url="http://localhost:8899",
     )
     return SessionBinding(**{**base, **overrides})
 
@@ -123,3 +124,74 @@ def test_converts_to_local_binding_without_the_disk_only_fields() -> None:
     assert local.shared_id == session.shared_id
     assert local.contributor == session.contributor
     assert local.agent == session.agent
+
+
+# ---------------------------------------------------------------------------
+# which SERVICE the binding belongs to (2026-08-07)
+# ---------------------------------------------------------------------------
+#
+# A binding named a session but never the server that session lives on, while
+# `service.url` sat in config as global mutable state. Repointing it therefore
+# invalidated every binding on the machine silently: they kept resolving, kept
+# looking valid, and failed only at push time as a 404 from a service that had
+# never heard of the id. Measured on a live machine — `service.url` moved
+# 192.168.4.81 -> 192.168.4.44 -> localhost over one night and 431 findings
+# queued against a session only the first host had.
+
+
+def test_the_service_is_recorded_on_the_binding() -> None:
+    """The field exists and survives a disk round trip."""
+    assert _binding().service_url == "http://localhost:8899"
+
+
+def test_a_binding_without_a_service_is_refused() -> None:
+    """Required, not optional. Pre-first-release there is no legacy binding
+    worth accommodating, and an optional field would let a stale pin keep
+    masquerading as valid — which is the whole failure being fixed."""
+    import pytest
+    from pydantic import ValidationError
+
+    base = dict(agent_session_id="as-1", shared_id="team-standup",
+                contributor="aditya", agent="claude-code",
+                transcript_path="/repo/t.jsonl", pinned_at=TS)
+    with pytest.raises(ValidationError):
+        SessionBinding(**base)
+
+
+def test_reading_a_binding_for_another_service_refuses_and_says_both(tmp_path, caplog) -> None:
+    """The point of the whole change: turn a 404-at-push-time into a refusal
+    that names both URLs at read time."""
+    import logging
+
+    path = tmp_path / "b.json"
+    write_binding(path, _binding(service_url="http://192.168.4.81:8899"))
+
+    with caplog.at_level(logging.WARNING, logger="synapse_contracts.binding"):
+        got = read_binding(path, expected_service_url="http://localhost:8899")
+
+    assert got is None, "a binding for another service must not resolve"
+    message = " ".join(r.getMessage() for r in caplog.records)
+    assert "192.168.4.81:8899" in message, "the binding's service is not named"
+    assert "localhost:8899" in message, "the configured service is not named"
+
+
+def test_reading_a_binding_for_the_same_service_is_unaffected(tmp_path) -> None:
+    path = tmp_path / "b.json"
+    write_binding(path, _binding(service_url="http://localhost:8899"))
+    assert read_binding(path, expected_service_url="http://localhost:8899") is not None
+
+
+def test_service_urls_compare_ignoring_a_trailing_slash(tmp_path) -> None:
+    """`http://x:8899` and `http://x:8899/` are the same server. Refusing on
+    punctuation would be a worse bug than the one being fixed."""
+    path = tmp_path / "b.json"
+    write_binding(path, _binding(service_url="http://localhost:8899/"))
+    assert read_binding(path, expected_service_url="http://localhost:8899") is not None
+
+
+def test_no_expectation_means_no_check(tmp_path) -> None:
+    """Callers that genuinely do not know the service — `synapse health`
+    listing what is on disk — still read the binding."""
+    path = tmp_path / "b.json"
+    write_binding(path, _binding(service_url="http://192.168.4.81:8899"))
+    assert read_binding(path) is not None
