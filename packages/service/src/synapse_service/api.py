@@ -126,12 +126,11 @@ SYNTHESIS_REQUESTS_PER_HOUR = 20
 # Read off the Cirrascale console for Llama-3.3-70B on 2026-08-06.
 #
 # PER_MINUTE IS RECORDED HERE BUT DELIBERATELY NOT ENFORCED by `_affordable`
-# -- see the loop in `_affordable_from_ledger` for why. Short version: a burst
-# limit is what AIC100Provider's rotate-then-backoff is FOR, and pre-refusing
-# on it stalls the memory over traffic that would have cleared in seconds. It
-# stays here because the number is real and the next reader will want it
-# (and `_warn_if_the_key_pool_cannot_pay_for_the_budget`-style checks may want
-# it later); it is documentation of the ceiling, not a gate.
+# -- and as of 2026-08-07 NONE of these are gates. `affordable()` refuses only
+# on something OBSERVED: headers the provider sent, or a 429 it actually
+# returned. These numbers stay because they are real and the next reader will
+# want them -- they document the ceilings and size the key pool -- but a
+# ceiling nobody can verify at runtime is not allowed to stop work.
 SYNTHESIS_REQUESTS_PER_MINUTE = 5
 SYNTHESIS_REQUESTS_PER_DAY = 250
 MINUTE_S = 60.0
@@ -199,109 +198,58 @@ def _warn_if_the_key_pool_cannot_pay_for_the_budget(provider: ModelProvider) -> 
 
 def affordable(spend: list[tuple[float, int, str, int]], *,
                provider: Any, now: float | None = None) -> tuple[bool, str]:
-    """Whether one more synthesis round fits.
+    """Whether one more synthesis round should be attempted.
 
-    Two sources, in priority order.
+    ⟨REWRITTEN 2026-08-07⟩ This used to PREDICT exhaustion from a local ledger
+    and refuse in advance. It no longer does, on any dimension.
 
-    THE PROVIDER'S OWN HEADERS win when present. The local ledger is an
-    estimate built from ASSUMED_MERGE_TOKENS and ASSUMED_QUERY_TOKENS, and it
-    over-charges in one direction only -- a failed call is billed the assumed
-    cost, and nothing ever credits it back. On 2026-08-06 that drift refused
-    synthesis for an hour in which the dashboard recorded ONE request of
-    twenty. A number the gateway reported is not an estimate.
+    The prediction was wrong twice in one night, in both directions, and each
+    time it cost the thing the product exists to do. A x2 request charge halved
+    a 20/hour ceiling. A 25,000 token/hour figure -- read off a console once and
+    never re-checked -- stalled synthesis for 45 minutes while that same console
+    read 1 of 20 requests for the hour and 7 of 250 for the day. The ledger can
+    only ever be an estimate, because it is charged with ASSUMED_MERGE_TOKENS
+    whenever the provider reports nothing, never credited back, and -- probed
+    live on 2026-08-07 -- this gateway sends NO rate-limit headers at all, so
+    there is nothing to reconcile it against. An estimate that cannot be
+    corrected and is allowed to refuse work is strictly worse than no estimate.
 
-    THE LEDGER is the fallback, and it is not optional: `RateLimitSnapshot`
-    is empty until the first response, and stays empty if the gateway spells
-    its headers in a way `synapse_providers.ratelimit` does not yet know.
-    Empty must read as "no information", never as "no limit".
-    """
-    snapshot = getattr(provider, "last_rate_limit", None)
-    if snapshot is None:
-        return _affordable_from_ledger(spend, now=now)
+    So the two things that can refuse are both OBSERVED, never inferred:
 
-    # Reported exhaustion is decisive in the REFUSING direction, per dimension.
-    if snapshot.requests_remaining is not None and snapshot.requests_remaining < 1:
-        return False, ("provider reported 0 request(s) remaining"
-                       + (f", resets in {snapshot.reset_seconds:.0f}s"
-                          if snapshot.reset_seconds else ""))
-    if (snapshot.tokens_remaining is not None
-            and snapshot.tokens_remaining < ASSUMED_MERGE_TOKENS):
-        return False, (f"provider reported {snapshot.tokens_remaining} token(s) "
-                       f"remaining, below the {ASSUMED_MERGE_TOKENS} one round costs")
+      1. the provider REPORTED exhaustion in its headers (other gateways do;
+         this one does not, and then this branch simply never fires), and
+      2. a real 429 already happened and its cooldown has not elapsed --
+         `AIC100Provider.rate_limited_until`, armed where the 429 was received.
 
-    # Reported HEADROOM is decisive only for the dimensions actually reported.
-    # A gateway that sends request counts and no token counts must not buy a
-    # free pass on the token ceiling -- that is the dimension which binds first
-    # at ~6 merges/hour, and skipping it would put us straight back to
-    # discovering the limit as a 429.
-    if snapshot.requests_remaining is not None and snapshot.tokens_remaining is not None:
-        return True, ""
+    Everything else is attempted. If the attempt 429s, the provider rotates
+    keys, backs off and retries; if it still fails, `merge` leaves the findings
+    pending and the drain re-runs them on the next tick. A 429 costs ~36s and
+    recovers itself. A wrong prediction costs an hour and looks like a dead
+    product -- which is the failure this whole file has been chasing.
 
-    return _affordable_from_ledger(
-        spend, now=now,
-        skip_requests=snapshot.requests_remaining is not None,
-        skip_tokens=snapshot.tokens_remaining is not None)
-
-
-def _affordable_from_ledger(spend: list[tuple[float, int, str, int]], *,
-                            now: float | None = None,
-                            skip_requests: bool = False,
-                            skip_tokens: bool = False) -> tuple[bool, str]:
-    """The estimate, used for every dimension the provider did not report.
-
-    Requests are charged AS MADE (the fourth tuple element) rather than at two
-    per round. The old `* 2` assumed AIC100Provider's internal retry always
-    fires; it fires on failure, and pricing the happy path as a failure halved
-    a 20/hour ceiling to 10.
-
-    `skip_requests` / `skip_tokens` let `affordable()` hand back only the half
-    it could not answer from live headers, so a partial snapshot neither
-    overrides the ledger wholesale nor is ignored.
+    `spend` is still recorded and still passed here: it is what the brain page
+    reports and what a future reconciliation would correct against. It is no
+    longer allowed to decide.
     """
     now = time.monotonic() if now is None else now
-    while spend and spend[0][0] < now - DAY_S:
-        spend.pop(0)
 
-    def window(seconds: float) -> list[tuple[float, int, str, int]]:
-        return [e for e in spend if e[0] >= now - seconds]
+    snapshot = getattr(provider, "last_rate_limit", None)
+    if snapshot is not None:
+        if snapshot.requests_remaining is not None and snapshot.requests_remaining < 1:
+            return False, ("provider reported 0 request(s) remaining"
+                           + (f", resets in {snapshot.reset_seconds:.0f}s"
+                              if snapshot.reset_seconds else ""))
+        if (snapshot.tokens_remaining is not None
+                and snapshot.tokens_remaining < ASSUMED_MERGE_TOKENS):
+            return False, (f"provider reported {snapshot.tokens_remaining} token(s) "
+                           f"remaining, below the {ASSUMED_MERGE_TOKENS} one round costs")
 
-    hour = window(HOUR_S)
-    if not skip_tokens:
-        tokens_spent = sum(t for _, t, _c, _r in hour)
-        merges = [t for _, t, c, _r in hour if c == "synthesis"]
-        next_cost = max(merges[-5:] or [ASSUMED_MERGE_TOKENS])
-        if tokens_spent + next_cost > SYNTHESIS_TOKENS_PER_HOUR * SYNTHESIS_KEYS:
-            return False, (f"token budget: {tokens_spent}+{next_cost} would exceed "
-                           f"{SYNTHESIS_TOKENS_PER_HOUR * SYNTHESIS_KEYS}/hour across "
-                           f"{SYNTHESIS_KEYS} key(s) ({_spenders(hour)})")
+    # The reactive half: a 429 we actually received, not one we guessed at.
+    until = getattr(provider, "rate_limited_until", 0.0) or 0.0
+    if until > now:
+        return False, (f"rate limited by the provider; cooling down for "
+                       f"{until - now:.0f}s more, then the drain re-runs the merge")
 
-    if skip_requests:
-        return True, ""
-
-    # HOUR and DAY only -- deliberately NOT the per-minute limit.
-    #
-    # The 5/minute ceiling is a BURST limit, and the right tool for a burst is
-    # the backoff added to AIC100Provider (rotate every key, then wait the
-    # ~36s cooldown, then retry): a burst clears by itself in seconds. Refusing
-    # synthesis pre-emptively for it does not. Worse, `_spend` counts RETRIEVAL
-    # too, so five queries in a minute -- an ordinary thing for a team reading
-    # the memory -- would stop the memory being written at all, which is the
-    # exact "findings landed, memory unchanged" stall this whole change set
-    # exists to end. Measured against the real thing: the rehearsal's demo
-    # pace (two pushes, three queries, one push) trips 5/minute and never
-    # trips 20/hour.
-    #
-    # The hour and day figures are BUDGETS -- overrunning them means waiting up
-    # to an hour, which backoff cannot absorb -- so those stay pre-emptive.
-    for label, seconds, per_key_cap in (
-            ("hour", HOUR_S, SYNTHESIS_REQUESTS_PER_HOUR),
-            ("day", DAY_S, SYNTHESIS_REQUESTS_PER_DAY)):
-        entries = window(seconds)
-        made = sum(r for _, _t, _c, r in entries)
-        cap = per_key_cap * SYNTHESIS_KEYS
-        if made + 1 > cap:
-            return False, (f"request budget: {made} request(s) this {label} against "
-                           f"{cap}/{label} ({_spenders(entries)})")
     return True, ""
 
 
@@ -609,11 +557,9 @@ def build_app(provider: ModelProvider, *, debug: bool = True,
         it is testable without booting an app, and so the provider's reported
         headroom can override this app's guessed ledger.
 
-        Pricing still charges the NEXT round at the most expensive recent MERGE
-        rather than an average (see `_affordable_from_ledger`): merge cost grows
-        with the candidate listing, so an average lags the trend. Retrieval
-        rounds are excluded from that pricing but NOT from the ceilings -- those
-        belong to the key, and the key does not care who spent it.
+        `_spend` is still recorded -- the brain page reports it and a future
+        reconciliation would correct against it -- but as of 2026-08-07 it no
+        longer decides anything. See `affordable`.
         """
         return affordable(_spend, provider=provider)
 

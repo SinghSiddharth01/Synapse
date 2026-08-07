@@ -1,4 +1,23 @@
-"""`/query` spends the synthesis key, so `/query` is charged to the governor.
+"""`/query` spends the synthesis key, so `/query` is charged — but no longer gates.
+
+⟨REWRITTEN 2026-08-07⟩ Retrieval spend is still recorded against the same key
+ledger a merge is, tagged `retrieval`. What changed is what that recording is
+FOR. It used to let the ledger refuse the next merge IN ADVANCE, and that
+prediction was wrong twice in one night in both directions — most expensively a
+25,000 token/hour figure, read off a console once and never re-checked, that
+stalled synthesis for 45 minutes while the same console read 1 of 20 requests
+for the hour and 7 of 250 for the day. Probed live, this gateway sends no
+rate-limit headers at all, so the estimate can never be corrected against
+reality. `affordable()` now refuses only on something OBSERVED: headers a
+provider actually sent, or a 429 it actually returned.
+
+So every assertion here that read `deferred is True` because the LEDGER said so
+is gone — deleted rather than weakened, because the behaviour it pinned was
+removed on purpose. What remains is what is still true and still worth
+defending: a query never blocks, and a query never silently stops the memory
+being written.
+
+Original note, still true of the recording itself:
 
 The hole, as it stood (FLOW.md §1.5, confirmed at api.py:672-798 on
 2026-08-06 after W1 rewrote the query path's failure contract): `build_app`
@@ -101,41 +120,16 @@ def _query(client, sid, text="what breaks the pool?"):
 
 
 # --------------------------------------------------------------------------
-# The hole itself
+# what is still true  ⟨2026-08-07⟩
 # --------------------------------------------------------------------------
 
-def test_queries_alone_exhaust_the_key_and_the_governor_now_says_so(monkeypatch):
-    """THE REPRODUCTION. Queries and no pushes; the token ceiling is reached
-    by retrieval alone and the next merge is deferred rather than 429'd.
+def test_query_spend_no_longer_defers_a_merge(monkeypatch):
+    """THE demotion, observed through the real routes.
 
-    Before the fix this push came back `deferred: false, synthesized: true` —
-    the governor authorising a round from a budget retrieval had already
-    spent. Budget 12,000; four queries at 2,000 each is 8,000, and the next
-    merge is priced at ASSUMED_MERGE_TOKENS (4,000, nothing measured yet), so
-    the fifth thing the key is asked for does not fit."""
-    client, provider = _client(monkeypatch, tokens_per_hour=12_000,
-                               provider=SharedKeyProvider(query_tokens=2_000))
-    sid = _session(client)
-    client.post(f"/v1/sessions/{sid}/findings", json={"findings": [_finding("f-0")]})
-    provider.merge_tokens = 0                      # the merge above is not the point
-
-    for _ in range(4):
-        assert _query(client, sid).status_code == 200
-    assert provider.queries == 4
-
-    landed = client.post(f"/v1/sessions/{sid}/findings",
-                         json={"findings": [_finding("f-1")]}).json()
-    assert landed["deferred"] is True
-    assert landed["accepted"] == 1                 # queryable regardless
-    assert landed["pending"] == 1
-
-
-def test_the_deferral_reason_names_retrieval_as_the_spender(monkeypatch, caplog):
-    """The two deferral reasons are logged distinctly because their fixes
-    differ (ADR 0005 §7). A third spender needs the same treatment: an
-    operator reading "budget" while pushes are rare must be able to see that
-    the queries are what drained it, or the only available conclusion is that
-    the governor is broken."""
+    Three queries then a push. Under the old ledger this deferred — twenty
+    queries and no pushes could exhaust the key's hour and stop synthesis
+    outright. Reading the memory must never be able to stop it being written.
+    """
     client, _ = _client(monkeypatch, tokens_per_hour=10_000,
                         provider=SharedKeyProvider(query_tokens=3_000))
     sid = _session(client)
@@ -143,210 +137,38 @@ def test_the_deferral_reason_names_retrieval_as_the_spender(monkeypatch, caplog)
     for _ in range(3):
         _query(client, sid)
 
-    with caplog.at_level("WARNING", logger="synapse_service.api"):
-        client.post(f"/v1/sessions/{sid}/findings",
-                    json={"findings": [_finding("f-1")]})
+    landed = client.post(f"/v1/sessions/{sid}/findings",
+                         json={"findings": [_finding("f-1")]}).json()
 
-    budget = [r for r in caplog.records if "deferred on BUDGET" in r.getMessage()]
-    assert budget, "the push was deferred with nothing said about why"
-    assert "retrieval" in budget[0].getMessage()
+    assert landed["deferred"] is False, (
+        "query spend still refuses a merge in advance; the ledger is deciding again")
+    assert landed["synthesized"] is True, "the merge did not actually run"
 
 
-def test_queries_count_against_the_request_ceiling_too(monkeypatch):
-    """Tokens are not the only thing a key meters. The hosted key allows 20
-    REQUESTS/hour, and a retrieval round spends them from the same pool a
-    merge does.
-
-    ⟨2026-08-06⟩ The cap moved from 8 to 4 with the request charge. This used
-    to read `(len(_spend) + 1) * 2`, pricing EVERY round as though the
-    provider's internal retry had fired -- it fires only on failure -- so four
-    clean rounds were billed as eight and a 20/hour ceiling behaved like
-    10/hour. Requests are now counted as the provider actually makes them
-    (`last_request_count`), which also picks up key rotations and 429 backoff
-    attempts that the flat x2 never modelled. Four rounds against a cap of four
-    keeps this test asserting what it always meant: retrieval spends the
-    request budget.
-    """
-    client, _ = _client(monkeypatch, tokens_per_hour=10_000_000,
-                        requests_per_hour=4)
+def test_a_query_still_never_blocks(monkeypatch):
+    """Unchanged, and the reason the metering was scoped this way to begin
+    with: whatever the budget is doing, retrieval answers."""
+    client, _ = _client(monkeypatch, tokens_per_hour=1,
+                        provider=SharedKeyProvider(query_tokens=3_000))
     sid = _session(client)
     client.post(f"/v1/sessions/{sid}/findings", json={"findings": [_finding("f-0")]})
 
     for _ in range(3):
-        _query(client, sid)                        # 4 rounds on the ledger now
-
-    landed = client.post(f"/v1/sessions/{sid}/findings",
-                         json={"findings": [_finding("f-1")]}).json()
-    assert landed["deferred"] is True
-
-
-# --------------------------------------------------------------------------
-# What the fix must NOT do
-# --------------------------------------------------------------------------
-
-def test_cheap_queries_do_not_make_the_next_merge_look_cheap(monkeypatch):
-    """`_affordable` prices the next round at the dearest of the last five,
-    because merge cost trends upward and an average lags the trend. Retrieval
-    rounds are 3-4x cheaper: folding them into that window would price the
-    next 70B merge as if it were a ranking call, and the governor would
-    authorise a round the key cannot pay for — re-opening the failure from
-    inside the fix.
-
-    Budget 20,000. One real merge at 9,000, then five 500-token queries
-    (11,500 spent). Pricing the next merge off the merges says 9,000 →
-    20,500 > 20,000, deferred. Pricing it off the last five entries says 500
-    → 12,000, authorised. The assertion is which one happens."""
-    client, provider = _client(monkeypatch, tokens_per_hour=20_000,
-                               provider=SharedKeyProvider(merge_tokens=9_000,
-                                                          query_tokens=500))
-    sid = _session(client)
-    first = client.post(f"/v1/sessions/{sid}/findings",
-                        json={"findings": [_finding("f-1")]}).json()
-    assert first["deferred"] is False
-    for _ in range(5):
-        _query(client, sid)
-    assert provider.queries == 5
-
-    nxt = client.post(f"/v1/sessions/{sid}/findings",
-                      json={"findings": [_finding("f-2")]}).json()
-    assert nxt["deferred"] is True
-
-
-def test_a_query_that_reaches_no_model_is_not_charged(monkeypatch):
-    """The same discipline `_record_spend`'s ⟨CORRECTED⟩ note bought for
-    synthesis. `query_findings` returns before `provider.complete` when
-    nothing is visible to the asker, so there is no request and no charge —
-    otherwise a session nobody has pushed to could book the hour."""
-    client, provider = _client(monkeypatch, tokens_per_hour=5_000,
-                               provider=SharedKeyProvider(query_tokens=4_000))
-    sid = _session(client)
-
-    for _ in range(10):                            # 40,000 tokens, if charged
         assert _query(client, sid).status_code == 200
-    assert provider.queries == 0                   # nothing to rank, no call
-
-    landed = client.post(f"/v1/sessions/{sid}/findings",
-                         json={"findings": [_finding("f-1")]}).json()
-    assert landed["deferred"] is False
-    assert landed["synthesized"] is True
 
 
-def test_a_query_that_raised_is_still_charged(monkeypatch):
-    """A retrieval that burned the key and then failed is the most expensive
-    round there is, and W1's typed 503 makes it the most visible — charging it
-    is what stops an outage from looking free. That this can defer synthesis
-    during a retrieval outage is not a cost: the provider is SHARED, so a
-    ranking call that cannot complete is a merge that could not have
-    completed either.
-
-    Budget 10,000. One real merge at 4,000, then two failed queries at
-    ASSUMED_QUERY_TOKENS (1,500) each — 7,000 spent, next merge priced at
-    4,000, so 11,000 does not fit. Uncharged, the two outages are free and
-    8,000 fits comfortably: the arithmetic is chosen so this test can only
-    pass if the failure path charges."""
-    client, provider = _client(monkeypatch, tokens_per_hour=10_000,
-                               provider=SharedKeyProvider(fail_queries=True))
-    sid = _session(client)
-    assert client.post(f"/v1/sessions/{sid}/findings",
-                       json={"findings": [_finding("f-0")]}).json()["deferred"] is False
-
-    for _ in range(2):
-        assert _query(client, sid).status_code == 503
-    assert provider.queries == 2                   # the calls really went out
-
-    landed = client.post(f"/v1/sessions/{sid}/findings",
-                         json={"findings": [_finding("f-1")]}).json()
-    assert landed["deferred"] is True              # 2 x ASSUMED_QUERY_TOKENS
-
-
-def test_an_unparseable_ranking_is_charged_exactly_once(monkeypatch):
-    """⟨W3b review⟩ THE DOUBLE-CHARGE. `AIC100Provider` returns
-    `data=None, schema_valid=False` (aic100.py:291) after a successful HTTP
-    round whose output failed the schema twice. `result.data.get("ranked")`
-    used to sit INSIDE the same `try` as `on_usage(result.usage)`, so `.get`
-    on None raised, the handler fired `on_usage(None)` a second time, and one
-    retrieval booked TWO ledger entries — its real cost plus the assumed cost
-    of a failure that never happened.
-
-    Both ceilings are asserted, because the two count different things and the
-    bug hit both. `_affordable`'s request check counts ENTRIES
-    (`(len(_spend) + 1) * 2 > request_budget`), so a doubled entry burned 4 of
-    the key's 20 requests/hour for one query.
-
-    Arithmetic, tokens: budget 10,000, merge 4,000, two schema-failing queries
-    at 1,000 each. Charged once: 4,000 + 2,000 = 6,000, next merge priced at
-    4,000 → exactly 10,000, which fits. Charged twice: 4,000 + 2,000 + 2x1,500
-    assumed = 9,000 → 13,000, deferred. The test can only pass at one charge.
-    """
-    class SchemaFailProvider(SharedKeyProvider):
-        """A round that COMPLETED and reported usage, but whose output could
-        not be parsed. Not an exception — that is the other failure class, and
-        the one this bug was hiding behind."""
-
-        async def complete(self, messages, response_schema=None):
-            ranking = bool(response_schema
-                           and "ranked" in response_schema.get("properties", {}))
-            result = await super().complete(messages, response_schema)
-            if ranking:
-                return result.model_copy(update={"data": None,
-                                                 "schema_valid": False})
-            return result
-
-    client, provider = _client(monkeypatch, tokens_per_hour=10_000,
-                               requests_per_hour=8,
-                               provider=SchemaFailProvider(merge_tokens=4_000,
-                                                           query_tokens=1_000))
-    sid = _session(client)
-    assert client.post(f"/v1/sessions/{sid}/findings",
-                       json={"findings": [_finding("f-0")]}).json()["deferred"] is False
-
-    # Still a 503: an unusable ranking is the ABSENCE of an answer, never an
-    # empty one (decision 008). The fix changed what it costs, not what it means.
-    for _ in range(2):
-        assert _query(client, sid).status_code == 503
-    assert provider.queries == 2
-
-    landed = client.post(f"/v1/sessions/{sid}/findings",
-                         json={"findings": [_finding("f-1")]}).json()
-    assert landed["deferred"] is False, (
-        "the schema-failing query was charged more than once — 3 rounds on the "
-        "ledger for 3 real requests is the bound here")
-
-
-def test_metering_retrieval_never_blocks_a_query_only_the_merge(monkeypatch):
-    """The product decision, pinned. Charging `/query` deliberately lets query
-    traffic defer SYNTHESIS; it must not gate `/query` itself. A query is the
-    read path — the agent asking a question in front of an audience — and
-    turning a spent budget into "shared memory is unreachable" would trade a
-    lagging working memory for a broken one, and collide with W1's 503, which
-    means something specific and different."""
-    client, _ = _client(monkeypatch, tokens_per_hour=1)   # nothing is affordable
-    sid = _session(client)
-    client.post(f"/v1/sessions/{sid}/findings", json={"findings": [_finding("f-1")]})
-
-    for _ in range(5):
-        response = _query(client, sid)
-        assert response.status_code == 200
-        assert "findings" in response.json()
-
-
-def test_findings_stay_queryable_while_the_merge_is_deferred_on_query_spend(
-        monkeypatch):
-    """ADR 0005's promise, held under the new spender. Deferral must cost
-    freshness of the SYNTHESIZED memory and nothing else; if a query-drained
-    budget also hid findings this change would be trading one silent loss for
-    another."""
-    client, _ = _client(monkeypatch, tokens_per_hour=9_000,
+def test_findings_stay_queryable_and_the_memory_still_moves(monkeypatch):
+    """Nothing is lost by the demotion: the findings land, they are readable,
+    and the working memory advances rather than waiting on a guess."""
+    client, _ = _client(monkeypatch, tokens_per_hour=10_000,
                         provider=SharedKeyProvider(query_tokens=3_000))
     sid = _session(client)
     client.post(f"/v1/sessions/{sid}/findings", json={"findings": [_finding("f-0")]})
     for _ in range(3):
         _query(client, sid)
-
-    held = client.post(
-        f"/v1/sessions/{sid}/findings",
-        json={"findings": [_finding("f-9", "the decoder stalls on retry")]}).json()
-    assert held["deferred"] is True
+    before = client.post(f"/v1/sessions/{sid}/findings",
+                         json={"findings": [_finding("f-1")]}).json()["memory_version"]
 
     mark = client.get(f"/v1/sessions/{sid}/watermark?contributor=nobody").json()
     assert sum(mark["by_type"].values()) == 2
+    assert before >= 1

@@ -241,6 +241,15 @@ class AIC100Provider(ModelProvider):
         # of `complete()`, incremented in `_post_rotating`. `api._record_spend`
         # charges this instead of assuming a constant.
         self.last_request_count = 0
+        # REACTIVE cooldown deadline (time.monotonic), 0.0 when clear.
+        #
+        # The service's governor no longer predicts exhaustion -- it waits to be
+        # told. But `Synthesizer.merge` swallows every exception ("findings are
+        # landed, memory unchanged"), so a RateLimitedError never reaches the
+        # layer that decides whether to try again. The deadline is recorded HERE
+        # instead, where the 429 actually happened, and `affordable()` reads it
+        # off the provider it already holds.
+        self.rate_limited_until = 0.0
 
     @property
     def capabilities(self) -> ProviderCapabilities:
@@ -288,6 +297,15 @@ class AIC100Provider(ModelProvider):
             await _sleep(wait)
             slept += wait
 
+        # Arm the cooldown before raising: this is the only evidence a real
+        # limit was hit that survives `merge`'s exception swallow, and without
+        # it the drain would retry every tick against a window that is shut.
+        cooldown = snapshot.retry_after_seconds or RATE_LIMIT_DEFAULT_COOLDOWN_S
+        self.rate_limited_until = time.monotonic() + cooldown
+        logger.warning(
+            "Rate limited after %d attempt(s); holding off for %.0fs. Findings "
+            "keep landing and the drain re-runs the merge once this clears.",
+            attempts, cooldown)
         raise RateLimitedError(snapshot, attempts)
 
     def _record_rate_limit(self, resp: httpx.Response) -> RateLimitSnapshot:
@@ -313,6 +331,15 @@ class AIC100Provider(ModelProvider):
                        response_schema: dict[str, Any] | None = None) -> ModelResult:
         started = time.perf_counter()
         self.last_request_count = 0
+        # REACTIVE cooldown deadline (time.monotonic), 0.0 when clear.
+        #
+        # The service's governor no longer predicts exhaustion -- it waits to be
+        # told. But `Synthesizer.merge` swallows every exception ("findings are
+        # landed, memory unchanged"), so a RateLimitedError never reaches the
+        # layer that decides whether to try again. The deadline is recorded HERE
+        # instead, where the 429 actually happened, and `affordable()` reads it
+        # off the provider it already holds.
+        self.rate_limited_until = 0.0
         async with self._client() as client:
             if response_schema is None:
                 resp = await self._post_rotating(client, f"{self.base_url}/chat/completions", {
