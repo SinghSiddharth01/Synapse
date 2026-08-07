@@ -814,3 +814,98 @@ async def test_two_loops_on_one_state_dir_do_not_clobber_each_others_state(tmp_p
 
     # A fresh process over the same state dir resumes A's position, not B's.
     assert loop_for(SESSION_A, ta).follower.state.offsets.get(str(ta)) == offsets_a[str(ta)]
+
+
+# ---------------------------------------------------------------------------
+# migrating the pre-namespacing root state
+# ---------------------------------------------------------------------------
+
+_PINNED = datetime(2026, 8, 6, tzinfo=timezone.utc)
+
+
+def _root_state(state_dir: Path, transcript: Path, *, deferred_id: str) -> None:
+    """What an install written before per-conversation namespacing leaves at
+    the state_dir ROOT: a follower position, an open turn, and a rate-limited
+    backlog."""
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "follow-state.json").write_text(
+        json.dumps({"offsets": {str(transcript): 41}, "sizes": {str(transcript): 41}}),
+        encoding="utf-8")
+    (state_dir / "pending-events.json").write_text(json.dumps([{
+        "agent_session_id": SESSION_A, "role": "user", "kind": "text",
+        "content": "half a turn nobody has segmented yet",
+        "ts": "2026-08-06T00:00:00Z"}]), encoding="utf-8")
+    (state_dir / "deferred-segments.json").write_text(json.dumps([{
+        "id": deferred_id, "agent_session_id": SESSION_A, "events": [],
+        "started_at": "2026-08-06T00:00:00Z", "ended_at": "2026-08-06T00:01:00Z"}]),
+        encoding="utf-8")
+
+
+def _loop_over(tmp_path: Path, state_dir: Path, session: str):
+    transcript = tmp_path / f"{session}.jsonl"
+    transcript.touch()
+    binding = LocalBinding(agent_session_id=session, shared_id="sh-1",
+                           contributor="akhil", agent="claude-code")
+    return WorkerLoop(
+        transcript=transcript,
+        distiller=Distiller(FakeProvider(scripts=[]), binding,
+                            load_pack_by_name("v4-condense"), ["text"], "labelled"),
+        producer=Producer(state_dir / "wal", FileSink(tmp_path / "up.jsonl")),
+        binding=binding,
+        state_dir=state_dir,
+        budget_tokens=5000,
+    ), transcript
+
+
+def test_pre_upgrade_root_state_is_adopted_not_abandoned(tmp_path) -> None:
+    """Upgrading must not throw away the rate limiter's backlog.
+
+    Before this, the loop simply looked in the new per-session directory, found
+    nothing, and started empty — silently discarding up to
+    `max_deferred_segments` segments whose transcript bytes are already behind
+    the follower's offset, so nothing could ever re-read them. The open turn in
+    pending-events went the same way.
+
+    Asserted on the RESTORED OBJECTS, not just on file placement: a migration
+    that moved the files but left the loop starting empty would pass a
+    file-existence check and still lose the work."""
+    state_dir = tmp_path / "state"
+    transcript = tmp_path / f"{SESSION_A}.jsonl"
+    _root_state(state_dir, transcript, deferred_id="seg-owed")
+    write_binding(binding_path_for_session(state_dir, "claude-code", SESSION_A),
+                  _binding(SESSION_A, "sh-1", transcript, pinned_at=_PINNED))
+
+    loop, _ = _loop_over(tmp_path, state_dir, SESSION_A)
+
+    assert [s.id for s in loop._deferred] == ["seg-owed"], "the backlog was dropped"
+    assert loop.segmenter.pending_events == 1, "the open turn was dropped"
+    assert loop.follower.state.offsets.get(str(transcript)) == 41, "the position was lost"
+
+    # Moved, not copied — so a later run cannot adopt them a second time.
+    for name in ("follow-state.json", "pending-events.json", "deferred-segments.json"):
+        assert not (state_dir / name).exists(), f"{name} was left at the root"
+        assert (loop.session_state_dir / name).is_file()
+
+
+def test_root_state_is_left_alone_when_it_could_belong_to_another_conversation(
+    tmp_path,
+) -> None:
+    """The root files carry no agent_session_id — that is why they had to move.
+    On a machine with several conversations bound there is no way to tell whose
+    they are, and adopting them would feed one conversation's half-turn into
+    another's segmenter to be stamped with the wrong id: the exact
+    misattribution the namespacing exists to prevent, and worse than the loss
+    it would avoid. So this refuses, and leaves the evidence on disk."""
+    state_dir = tmp_path / "state"
+    transcript = tmp_path / f"{SESSION_A}.jsonl"
+    _root_state(state_dir, transcript, deferred_id="seg-whose")
+    for session in (SESSION_A, SESSION_B):
+        write_binding(binding_path_for_session(state_dir, "claude-code", session),
+                      _binding(session, "sh-1", transcript, pinned_at=_PINNED))
+
+    loop, _ = _loop_over(tmp_path, state_dir, SESSION_A)
+
+    assert loop._deferred == [], "adopted a backlog that may be another conversation's"
+    assert loop.segmenter.pending_events == 0
+    for name in ("follow-state.json", "pending-events.json", "deferred-segments.json"):
+        assert (state_dir / name).is_file(), f"{name} was consumed despite the ambiguity"
