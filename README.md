@@ -9,7 +9,7 @@
 [![Release](https://img.shields.io/github/v/release/SinghSiddharth01/Synapse?include_prereleases&label=release)](https://github.com/SinghSiddharth01/Synapse/releases/latest)
 [![License: MIT](https://img.shields.io/github/license/SinghSiddharth01/Synapse)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue)](pyproject.toml)
-[![Platforms](https://img.shields.io/badge/runs%20on-macOS%20·%20Linux%20·%20Windows%2FARM64-8A2BE2)](docs/JOIN-WINDOWS.md)
+[![Platforms](https://img.shields.io/badge/runs%20on-Windows%2FARM64%20·%20macOS%20·%20Linux-8A2BE2)](docs/JOIN-WINDOWS.md)
 
 [**Quickstart**](#quickstart) · [**How it works**](#how-it-works) · [**Installation**](#installation) · [**MCP tools**](#the-mcp-tools) · [**Docs**](https://SinghSiddharth01.github.io/Synapse/) · [**Contributing**](docs/contributing.md)
 
@@ -35,6 +35,16 @@ Synapse closes that gap without changing anyone's workflow. A lightweight **Edge
 
 Install the client, point it at your team's service, and start it. No clone, no build.
 
+**Windows / Snapdragon X Elite** — the primary target: on-device distillation runs on the Hexagon NPU.
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/SinghSiddharth01/Synapse/main/install.ps1)))
+synapse config set service.url http://<your-team-host>:8899
+synapse up
+```
+
+**macOS / Linux**
+
 ```bash
 curl -LsSf https://raw.githubusercontent.com/SinghSiddharth01/Synapse/main/install.sh | sh
 synapse config set service.url http://<your-team-host>:8899
@@ -43,13 +53,21 @@ synapse up
 
 One machine per team also runs the service:
 
+```powershell
+# Windows
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/SinghSiddharth01/Synapse/main/install.ps1))) -Component server
+synapse-server configure --keys C:\path\to\keys.txt
+synapse-server up
+```
+
 ```bash
+# macOS / Linux
 curl -LsSf https://raw.githubusercontent.com/SinghSiddharth01/Synapse/main/install.sh | sh -s -- server
 synapse-server configure --keys /path/to/keys.txt
 synapse-server up
 ```
 
-`synapse up` prints the `claude mcp add` line for Claude Code and the lines a teammate needs to join you. Windows equivalents and the full three-stage story are in [Installation](#installation).
+`synapse up` prints the `claude mcp add` line for Claude Code and the lines a teammate needs to join you. The full three-stage story is in [Installation](#installation).
 
 ## How it works
 
@@ -122,18 +140,8 @@ CI builds both bundles on every release, so **nobody clones this repo to use Syn
 The installer uses what already exists: `uv` is installed only if missing (with a warning if it is old), Python 3.12+ is downloaded by uv only if the machine has none, and GenieX is only ever considered on Snapdragon (ARM64 Windows) hardware — never installed where it cannot run.
 
 <table>
-<tr><th width="50%">macOS / Linux</th><th width="50%">Windows (PowerShell)</th></tr>
+<tr><th width="50%">Windows (PowerShell)</th><th width="50%">macOS / Linux</th></tr>
 <tr valign="top"><td>
-
-```bash
-# client
-curl -LsSf https://raw.githubusercontent.com/SinghSiddharth01/Synapse/main/install.sh | sh
-
-# server
-curl -LsSf https://raw.githubusercontent.com/SinghSiddharth01/Synapse/main/install.sh | sh -s -- server
-```
-
-</td><td>
 
 ```powershell
 # client
@@ -143,18 +151,28 @@ curl -LsSf https://raw.githubusercontent.com/SinghSiddharth01/Synapse/main/insta
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/SinghSiddharth01/Synapse/main/install.ps1))) -Component server
 ```
 
+</td><td>
+
+```bash
+# client
+curl -LsSf https://raw.githubusercontent.com/SinghSiddharth01/Synapse/main/install.sh | sh
+
+# server
+curl -LsSf https://raw.githubusercontent.com/SinghSiddharth01/Synapse/main/install.sh | sh -s -- server
+```
+
 </td></tr>
 </table>
 
-`sh -s --` and `[scriptblock]::Create` are load-bearing — they are the only forms that let an argument through the pipe, since `irm … | iex` cannot take one.
+`[scriptblock]::Create` and `sh -s --` are load-bearing — they are the only forms that let an argument through the pipe, since `irm … | iex` cannot take one.
 
-| macOS / Linux | Windows | Effect |
+| Windows | macOS / Linux | Effect |
 |---|---|---|
-| `client` \| `server` | `-Component client\|server` | Which package to install (default `client`) |
-| `--tag <tag>` | `-Tag <tag>` | Install a specific release instead of the latest |
-| `--local <dir>` | `-Local <dir>` | Install from a local bundle or checkout instead of GitHub |
-| `--update` | `-Update` | Reinstall over an existing install, picking up new versions |
-| `-h`, `--help` | `-?` | Usage |
+| `-Component client\|server` | `client` \| `server` | Which package to install (default `client`) |
+| `-Tag <tag>` | `--tag <tag>` | Install a specific release instead of the latest |
+| `-Local <dir>` | `--local <dir>` | Install from a local bundle or checkout instead of GitHub |
+| `-Update` | `--update` | Reinstall over an existing install, picking up new versions |
+| `-?` | `-h`, `--help` | Usage |
 
 > [!NOTE]
 > Install no longer takes `--purpose`, `--shared-id`, `--service-url` or `--contributor`. Those were installer flags in an earlier design; configuration and session lifecycle are separate stages now, and the installer will tell you so if you pass one.
@@ -269,16 +287,16 @@ or `/mcp` from inside the session. The tools appear as `mcp__synapse__query`, `m
 
 Copied into `~/.claude/{skills,commands,agents}/` — existing entries are *moved aside*, never deleted:
 
-```bash
-# macOS / Linux
-mkdir -p ~/.claude/skills
-cp -r packs/claude-code/skills/synapse-shared-memory ~/.claude/skills/
-```
-
 ```powershell
 # Windows
 New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\.claude\skills" | Out-Null
 Copy-Item -Recurse -Force packs\claude-code\skills\synapse-shared-memory "$env:USERPROFILE\.claude\skills\"
+```
+
+```bash
+# macOS / Linux
+mkdir -p ~/.claude/skills
+cp -r packs/claude-code/skills/synapse-shared-memory ~/.claude/skills/
 ```
 
 Restart Claude Code afterwards. This matters more than it looks: without the pack the agent *has* the tools but rarely reaches for them.
