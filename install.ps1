@@ -71,7 +71,24 @@ if ($Component -eq 'uninstall') {
     Step "U2  remove installed tools"
     $removed = $false
     if (Get-Command uv -ErrorAction SilentlyContinue) {
-        $tools = (& uv tool list 2>$null) -join "`n"
+        # ANSI IS STRIPPED BEFORE MATCHING. `uv tool list` colours its output
+        # even when that output is captured rather than written to a console,
+        # so each line arrives as ESC[1msynapse-cli v0.1.0ESC[0m and the
+        # anchored ^ below can never match past the escape sequence.
+        #
+        # Observed 2026-08-07 on Windows: this step reported "no synapse uv
+        # tools installed" while `uv tool list` plainly listed both, removed
+        # nothing, and the script still printed "Uninstalled." A user
+        # following the documented uninstall keeps both tools and all three
+        # shims, and is told the opposite -- the failure is invisible unless
+        # you go and check.
+        #
+        # Stripping rather than `--color never`: that flag exists in current
+        # uv, but an older one would reject it, and an unknown flag fails
+        # exactly the same silent way this comment exists to describe.
+        # [char]27 rather than a literal escape keeps this file pure ASCII,
+        # which test_install_ps1_is_pure_ascii requires.
+        $tools = ((& uv tool list 2>$null) -join "`n") -replace "$([char]27)\[[0-9;]*m", ""
         foreach ($tool in @('synapse-cli', 'synapse-service')) {
             if ($tools -match "(?m)^$([regex]::Escape($tool)) ") {
                 & uv tool uninstall $tool

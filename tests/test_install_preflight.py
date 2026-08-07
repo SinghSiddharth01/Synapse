@@ -353,3 +353,87 @@ def test_install_sh_help_needs_no_stdin():
     done = subprocess.run([str(INSTALL_SH), "--help"], capture_output=True, text=True,
                           cwd=str(REPO), stdin=subprocess.DEVNULL)
     assert done.returncode == 0
+
+
+# --------------------------------------------------------------------------
+# U2: the uninstaller has to SEE the tools it is meant to remove
+# --------------------------------------------------------------------------
+
+@needs_posix_shell
+def test_uninstall_removes_tools_even_when_uv_colours_its_output(tmp_path):
+    """Reproduced on Windows 2026-08-07: the uninstaller reported "no synapse
+    uv tools installed" while `uv tool list` plainly listed both, removed
+    nothing, and still printed "Uninstalled."
+
+    `uv tool list` emits ANSI colour, so each line is
+    ESC[1msynapse-cli v0.1.0ESC[0m and the anchored `^synapse-cli ` match can
+    never get past the escape sequence. uv normally drops colour when it sees
+    a pipe, which is why the sh side had not been bitten yet -- but that is an
+    assumption about a tool we do not control, and when it fails it fails as
+    SILENT SUCCESS: the user is told the thing was uninstalled and keeps every
+    tool and shim.
+
+    So the stub below colours unconditionally, which is exactly the case the
+    anchored match cannot survive. Everything the script would otherwise reach
+    out and touch is stubbed: `uv` records instead of uninstalling, `lsof`
+    reports nothing so U1 cannot kill a developer's live stack, and
+    SYNAPSE_HOME plus --keep-config keep it away from a real ~/.synapse."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    calls = tmp_path / "uninstall-calls.txt"
+
+    esc = chr(27)
+    (bin_dir / "uv").write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "tool" ] && [ "$2" = "list" ]; then\n'
+        f'  printf "{esc}[1msynapse-cli v0.1.0{esc}[0m\n- synapse\n"\n'
+        f'  printf "{esc}[1msynapse-service v0.1.0{esc}[0m\n- synapse-server\n"\n'
+        '  exit 0\n'
+        'fi\n'
+        'if [ "$1" = "tool" ] && [ "$2" = "uninstall" ]; then\n'
+        f'  echo "$3" >> "{calls.as_posix()}"\n'
+        '  exit 0\n'
+        'fi\n'
+        'exit 0\n', encoding="utf-8")
+    # U1 must find nothing: a test that kills whatever holds :8787 would take
+    # a running stack down with it.
+    (bin_dir / "lsof").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    for stub in ("uv", "lsof"):
+        (bin_dir / stub).chmod(0o755)
+
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir.as_posix()}:{os.environ.get('PATH', '')}",
+        "SYNAPSE_HOME": (tmp_path / "synapse-home").as_posix(),
+    }
+    done = subprocess.run(
+        [POSIX_SHELL, str(INSTALL_SH), "uninstall", "--keep-config"],
+        capture_output=True, text=True, cwd=str(REPO), env=env,
+        stdin=subprocess.DEVNULL, timeout=120)
+
+    assert done.returncode == 0, done.stderr
+    assert calls.is_file(), (
+        "uv tool uninstall was never called -- the tools were not detected:\n"
+        + done.stdout)
+    uninstalled = calls.read_text(encoding="utf-8").split()
+    assert sorted(uninstalled) == ["synapse-cli", "synapse-service"], uninstalled
+    # And it must not claim success while having done nothing. Matched on U2's
+    # own wording, not on "nothing to remove" -- U3 says that too, about the
+    # config directory, so the looser check fails even when U2 worked.
+    assert "no synapse uv tools installed" not in done.stdout, done.stdout
+    assert "removed   synapse-cli" in done.stdout, done.stdout
+
+
+def test_both_installers_strip_ansi_before_matching_uv_output():
+    """The PowerShell half cannot be executed on Linux CI, so its fix is
+    pinned by source: neither installer may match `uv tool list` output
+    without stripping ANSI first. Weaker than the behavioural test above and
+    deliberately narrow -- it asserts the stripping exists, not that it
+    works."""
+    ps1 = (REPO / "install.ps1").read_text(encoding="utf-8")
+    sh = INSTALL_SH.read_text(encoding="utf-8")
+
+    assert "[char]27" in ps1 and "[0-9;]*m" in ps1, (
+        "install.ps1 must strip ANSI from `uv tool list` before matching")
+    assert "[0-9;]*m" in sh, (
+        "install.sh must strip ANSI from `uv tool list` before matching")

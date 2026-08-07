@@ -134,9 +134,24 @@ if [ "$COMPONENT" = "uninstall" ]; then
 
   step "U2  remove installed tools"
   REMOVED=0
+  # ANSI is stripped before matching. `uv tool list` colours its output, and
+  # the anchored ^ below cannot match past an escape sequence: the line
+  # arrives as ESC[1msynapse-cli v0.1.0ESC[0m and the tool is never seen.
+  # Reproduced on the PowerShell side 2026-08-07, where this exact pattern
+  # reported "no synapse uv tools installed" against two installed tools,
+  # removed nothing, and still printed "Uninstalled."
+  #
+  # uv drops colour when it detects a pipe, so this path is usually already
+  # plain -- but "usually" is doing load-bearing work there: CLICOLOR_FORCE,
+  # a future default, or a wrapper on PATH each put it back, and the failure
+  # is silent success. Costs one sed; removes the assumption.
+  # CSI is the whole ESC-bracket prefix, built with printf so that neither the
+  # escape byte nor a doubled bracket appears literally in this file: the
+  # POSIX check forbids `[[` (a bashism) and would flag `\[[0-9;]*m`.
+  CSI=$(printf '\033[')
   if command -v "$UV" >/dev/null 2>&1; then
     for TOOL in synapse-cli synapse-service; do
-      if "$UV" tool list 2>/dev/null | grep -q "^$TOOL "; then
+      if "$UV" tool list 2>/dev/null | sed "s/${CSI}[0-9;]*m//g" | grep -q "^$TOOL "; then
         "$UV" tool uninstall "$TOOL" < /dev/null
         say "  removed   $TOOL"
         REMOVED=1
