@@ -14,6 +14,7 @@ import os
 import time
 from collections import Counter
 from collections.abc import Mapping
+from typing import Any
 
 from pydantic import ValidationError
 from starlette.applications import Starlette
@@ -91,6 +92,17 @@ MERGE_MIN_INTERVAL_S = float(os.environ.get("SYNAPSE_MERGE_MIN_INTERVAL_S", 60))
 # everything spending that key is counted against them.
 SYNTHESIS_TOKENS_PER_HOUR = 25_000
 SYNTHESIS_REQUESTS_PER_HOUR = 20
+
+# The dashboard enforces THREE request ceilings; the governor modelled one.
+# Read off the Cirrascale console for Llama-3.3-70B on 2026-08-06.
+# MERGE_MIN_INTERVAL_S=60 happens to keep ONE session under the per-minute
+# limit, but it is per-session state -- several sessions merging at once could
+# breach 5/min while `_affordable` saw nothing wrong.
+SYNTHESIS_REQUESTS_PER_MINUTE = 5
+SYNTHESIS_REQUESTS_PER_DAY = 250
+MINUTE_S = 60.0
+HOUR_S = 3600.0
+DAY_S = 86_400.0
 SYNTHESIS_KEYS = int(os.environ.get("SYNAPSE_SYNTHESIS_KEYS", 1))
 
 # What one round is assumed to cost before we have measured one. Replaced by
@@ -149,6 +161,105 @@ def _warn_if_the_key_pool_cannot_pay_for_the_budget(provider: ModelProvider) -> 
             "will defer merges the pool could afford. Raise it to %d.",
             type(provider).__name__, len(pool), SYNTHESIS_KEYS, len(pool),
         )
+
+
+def affordable(spend: list[tuple[float, int, str, int]], *,
+               provider: Any, now: float | None = None) -> tuple[bool, str]:
+    """Whether one more synthesis round fits.
+
+    Two sources, in priority order.
+
+    THE PROVIDER'S OWN HEADERS win when present. The local ledger is an
+    estimate built from ASSUMED_MERGE_TOKENS and ASSUMED_QUERY_TOKENS, and it
+    over-charges in one direction only -- a failed call is billed the assumed
+    cost, and nothing ever credits it back. On 2026-08-06 that drift refused
+    synthesis for an hour in which the dashboard recorded ONE request of
+    twenty. A number the gateway reported is not an estimate.
+
+    THE LEDGER is the fallback, and it is not optional: `RateLimitSnapshot`
+    is empty until the first response, and stays empty if the gateway spells
+    its headers in a way `synapse_providers.ratelimit` does not yet know.
+    Empty must read as "no information", never as "no limit".
+    """
+    snapshot = getattr(provider, "last_rate_limit", None)
+    if snapshot is None:
+        return _affordable_from_ledger(spend, now=now)
+
+    # Reported exhaustion is decisive in the REFUSING direction, per dimension.
+    if snapshot.requests_remaining is not None and snapshot.requests_remaining < 1:
+        return False, ("provider reported 0 request(s) remaining"
+                       + (f", resets in {snapshot.reset_seconds:.0f}s"
+                          if snapshot.reset_seconds else ""))
+    if (snapshot.tokens_remaining is not None
+            and snapshot.tokens_remaining < ASSUMED_MERGE_TOKENS):
+        return False, (f"provider reported {snapshot.tokens_remaining} token(s) "
+                       f"remaining, below the {ASSUMED_MERGE_TOKENS} one round costs")
+
+    # Reported HEADROOM is decisive only for the dimensions actually reported.
+    # A gateway that sends request counts and no token counts must not buy a
+    # free pass on the token ceiling -- that is the dimension which binds first
+    # at ~6 merges/hour, and skipping it would put us straight back to
+    # discovering the limit as a 429.
+    if snapshot.requests_remaining is not None and snapshot.tokens_remaining is not None:
+        return True, ""
+
+    return _affordable_from_ledger(
+        spend, now=now,
+        skip_requests=snapshot.requests_remaining is not None,
+        skip_tokens=snapshot.tokens_remaining is not None)
+
+
+def _affordable_from_ledger(spend: list[tuple[float, int, str, int]], *,
+                            now: float | None = None,
+                            skip_requests: bool = False,
+                            skip_tokens: bool = False) -> tuple[bool, str]:
+    """The estimate, used for every dimension the provider did not report.
+
+    Requests are charged AS MADE (the fourth tuple element) rather than at two
+    per round. The old `* 2` assumed AIC100Provider's internal retry always
+    fires; it fires on failure, and pricing the happy path as a failure halved
+    a 20/hour ceiling to 10.
+
+    `skip_requests` / `skip_tokens` let `affordable()` hand back only the half
+    it could not answer from live headers, so a partial snapshot neither
+    overrides the ledger wholesale nor is ignored.
+    """
+    now = time.monotonic() if now is None else now
+    while spend and spend[0][0] < now - DAY_S:
+        spend.pop(0)
+
+    def window(seconds: float) -> list[tuple[float, int, str, int]]:
+        return [e for e in spend if e[0] >= now - seconds]
+
+    hour = window(HOUR_S)
+    if not skip_tokens:
+        tokens_spent = sum(t for _, t, _c, _r in hour)
+        merges = [t for _, t, c, _r in hour if c == "synthesis"]
+        next_cost = max(merges[-5:] or [ASSUMED_MERGE_TOKENS])
+        if tokens_spent + next_cost > SYNTHESIS_TOKENS_PER_HOUR * SYNTHESIS_KEYS:
+            return False, (f"token budget: {tokens_spent}+{next_cost} would exceed "
+                           f"{SYNTHESIS_TOKENS_PER_HOUR * SYNTHESIS_KEYS}/hour across "
+                           f"{SYNTHESIS_KEYS} key(s) ({_spenders(hour)})")
+
+    if skip_requests:
+        return True, ""
+
+    for label, seconds, per_key_cap in (
+            ("minute", MINUTE_S, SYNTHESIS_REQUESTS_PER_MINUTE),
+            ("hour", HOUR_S, SYNTHESIS_REQUESTS_PER_HOUR),
+            ("day", DAY_S, SYNTHESIS_REQUESTS_PER_DAY)):
+        entries = window(seconds)
+        made = sum(r for _, _t, _c, r in entries)
+        cap = per_key_cap * SYNTHESIS_KEYS
+        if made + 1 > cap:
+            return False, (f"request budget: {made} request(s) this {label} against "
+                           f"{cap}/{label} ({_spenders(entries)})")
+    return True, ""
+
+
+def _spenders(entries: list[tuple[float, int, str, int]]) -> str:
+    counts = Counter(c for _, _t, c, _r in entries)
+    return ", ".join(f"{n} {c}" for c, n in sorted(counts.items()))
 
 
 def _missing(body: dict, *required: str) -> JSONResponse | None:
@@ -283,7 +394,13 @@ def build_app(provider: ModelProvider, *, debug: bool = True,
     # and must be summed across everything, while merge PRICING must still
     # look only at merges -- a run of cheap queries must not convince
     # `_affordable` that the next 70B merge is cheap.
-    _spend: list[tuple[float, int, str]] = []
+    # ⟨2026-08-06⟩ The fourth element is requests ACTUALLY MADE, counted by the
+    # provider (AIC100Provider.last_request_count) rather than assumed. The old
+    # `* 2` in `_affordable` priced every round as a failed one -- the internal
+    # schema retry fires only on failure -- and so halved a 20/hour ceiling to
+    # 10. It also missed key rotations and backoff attempts, which are real
+    # requests against the same quota.
+    _spend: list[tuple[float, int, str, int]] = []
 
     # The arrival summary's memo (W5, decisions/004). Closure scope like the
     # debounce state above and for the same reason: two apps in one test
@@ -322,7 +439,15 @@ def build_app(provider: ModelProvider, *, debug: bool = True,
         tokens = ASSUMED_MERGE_TOKENS
         if usage is not None:
             tokens = max(1, usage.input_tokens + usage.output_tokens)
-        _spend.append((time.monotonic(), tokens, "synthesis"))
+        # `requests` is what the round actually cost the key, counted by the
+        # provider as it made them rather than assumed.
+        #
+        # Read off the SYNTHESIS façade, not the shared inner provider:
+        # `synthesis_provider` and `retrieval_provider` are two
+        # RecordingProviders over one object, and the inner counter is
+        # whichever component called most recently.
+        requests = max(1, getattr(synthesis_provider, "last_request_count", 1))
+        _spend.append((time.monotonic(), tokens, "synthesis", requests))
 
     def _record_query_spend(usage) -> None:
         """Charge a retrieval round to the SAME key ledger (W3b).
@@ -373,44 +498,21 @@ def build_app(provider: ModelProvider, *, debug: bool = True,
         tokens = ASSUMED_QUERY_TOKENS
         if usage is not None:
             tokens = max(1, usage.input_tokens + usage.output_tokens)
-        _spend.append((time.monotonic(), tokens, "retrieval"))
+        requests = max(1, getattr(retrieval_provider, "last_request_count", 1))
+        _spend.append((time.monotonic(), tokens, "retrieval", requests))
 
     def _affordable() -> tuple[bool, str]:
-        """Whether one more synthesis round fits the hour's remaining budget.
+        """Thin wrapper: the policy lives in the module-level `affordable` so
+        it is testable without booting an app, and so the provider's reported
+        headroom can override this app's guessed ledger.
 
-        Charges the NEXT round at the most expensive recent MERGE rather than
-        an average: merge cost grows with the candidate listing, so an average
-        lags the trend and the governor would keep authorising rounds the key
-        can no longer pay for. Retrieval rounds are excluded from that pricing
-        on purpose -- they are several times cheaper, and letting a run of
-        queries drag `next_cost` down would price the next 70B merge as if it
-        were a ranking call. They are NOT excluded from the ceilings: those
+        Pricing still charges the NEXT round at the most expensive recent MERGE
+        rather than an average (see `_affordable_from_ledger`): merge cost grows
+        with the candidate listing, so an average lags the trend. Retrieval
+        rounds are excluded from that pricing but NOT from the ceilings -- those
         belong to the key, and the key does not care who spent it.
-
-        Requests are checked at 2 per round because AIC100Provider retries once
-        internally, and a failing round -- the expensive kind -- always takes
-        that retry. True of retrieval too: it passes a `response_schema`, which
-        is the branch that retries.
         """
-        cutoff = time.monotonic() - 3600
-        while _spend and _spend[0][0] < cutoff:
-            _spend.pop(0)
-        tokens_spent = sum(t for _, t, _c in _spend)
-        merges = [t for _, t, c in _spend if c == "synthesis"]
-        next_cost = max(merges[-5:] or [ASSUMED_MERGE_TOKENS])
-        token_budget = SYNTHESIS_TOKENS_PER_HOUR * SYNTHESIS_KEYS
-        request_budget = SYNTHESIS_REQUESTS_PER_HOUR * SYNTHESIS_KEYS
-        if tokens_spent + next_cost > token_budget:
-            spenders = Counter(c for _, _t, c in _spend)
-            return False, (f"token budget: {tokens_spent}+{next_cost} would exceed "
-                           f"{token_budget}/hour across {SYNTHESIS_KEYS} key(s) "
-                           f"({', '.join(f'{n} {c}' for c, n in sorted(spenders.items()))})")
-        if (len(_spend) + 1) * 2 > request_budget:
-            spenders = Counter(c for _, _t, c in _spend)
-            return False, (f"request budget: {len(_spend)} round(s) this hour against "
-                           f"{request_budget}/hour, 2 requests each worst case "
-                           f"({', '.join(f'{n} {c}' for c, n in sorted(spenders.items()))})")
-        return True, ""
+        return affordable(_spend, provider=provider)
 
     def _session_or_404(sid: str):
         return store.get_session(sid)
