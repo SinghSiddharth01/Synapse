@@ -47,8 +47,9 @@ logger = logging.getLogger(__name__)
 # retrying past that burns NPU time that the next Segment needs.
 MAX_ATTEMPTS = 2
 
-# Appended to the SECOND attempt only. See the call site for why a retry has to
-# change the prompt to be a retry at all.
+# Appended to the SECOND attempt only, and only when the first attempt's
+# failure was MALFORMED — see RETRY_NUDGES below for the other two shapes, and
+# the call site for why a retry has to change the prompt to be a retry at all.
 RETRY_NUDGE = {
     "role": "user",
     "content": (
@@ -81,6 +82,53 @@ _VALID_TYPES = {t.value for t in FindingType}
 DROP_OVER_BUDGET = "over-budget"
 DROP_DEGENERATE = "degenerate-repetition"
 DROP_MALFORMED = "malformed"
+
+# The retry has to speak to the failure it just watched, for the same reason
+# the three reasons exist at all. Telling a response that was cut off at
+# max_tokens "that was not valid JSON" asks for the same too-long reply again —
+# and at temperature 0 that is exactly what comes back. Observed live on
+# 2026-08-07: one segment truncated at the 500-token cap on attempt 1/2 and
+# again, identically, on 2/2, spending two full-cap generations to fail once.
+# (Two back-to-back full-cap generations is also the longest wait a liveness
+# probe can queue behind — see decisions/005 — so a retry that cannot succeed
+# is paid for twice.)
+#
+# Both nudges below are worded MECHANICALLY, in the pack's own vocabulary
+# ("notes"), and never ask the model to judge importance or durability: the
+# shipped pack sets judges_durability = false — something else decides what
+# matters, afterwards — and a nudge that said "keep the most durable" would
+# countermand the pack inside its own context.
+NUDGE_OVER_BUDGET = {
+    "role": "user",
+    "content": (
+        "Your previous reply was cut off at the response length limit before "
+        'the JSON closed. Reply with ONLY the JSON object — {"findings": '
+        "[...]} — and make it fit: at most three notes, one sentence each. "
+        "Stop after three notes and close the JSON. No other text."
+    ),
+}
+# A loop is not a length problem — asking for a shorter reply would be the
+# same category error in the other direction. Name the loop, and offer the
+# empty object explicitly: a small model with nothing to report loops
+# precisely because every continuation looks equally unhelpful, and
+# {"findings": []} is the exit it was never told it had. The exit can also
+# eat a segment the loop was hiding, so taking it is never silent — see the
+# warning at the bottom of distil().
+NUDGE_DEGENERATE = {
+    "role": "user",
+    "content": (
+        "Your previous reply repeated the same text over and over and was not "
+        'valid JSON. Reply with ONLY the JSON object — {"findings": [...]} — '
+        "and if there is nothing to record from the transcript, reply with "
+        'exactly {"findings": []}.'
+    ),
+}
+# Total over classify_drop's range, so the selection below can never KeyError.
+RETRY_NUDGES = {
+    DROP_OVER_BUDGET: NUDGE_OVER_BUDGET,
+    DROP_DEGENERATE: NUDGE_DEGENERATE,
+    DROP_MALFORMED: RETRY_NUDGE,
+}
 
 # Shingle width for the repetition measure. 6 words is long enough that ordinary
 # English (and ordinary JSON key sequences) do not repeat a shingle by accident,
@@ -327,6 +375,9 @@ class Distiller:
         messages = build_messages(segment, self.pack, self.kinds, self.render_style)
 
         parsed: dict[str, Any] | None = None
+        # Re-picked below from why the previous attempt failed; the default only
+        # exists because attempt 1 has no previous failure to read.
+        retry_nudge = RETRY_NUDGE
         for attempt in range(1, MAX_ATTEMPTS + 1):
             stats.attempts = attempt
             # Resending byte-identical messages to a temperature-0 model cannot
@@ -334,8 +385,10 @@ class Distiller:
             # was observed reproducing the first failure exactly. So the second
             # attempt changes the prompt, which is the only lever available
             # without varying temperature (a config-level property here).
-            # aic100.py states the same principle for the same reason.
-            attempt_messages = messages if attempt == 1 else messages + [RETRY_NUDGE]
+            # aic100.py states the same principle for the same reason. And the
+            # change has to address the failure: see RETRY_NUDGES for why one
+            # nudge cannot serve all three drop reasons.
+            attempt_messages = messages if attempt == 1 else messages + [retry_nudge]
             result = await self.provider.complete(
                 messages=attempt_messages, response_schema=RESPONSE_SCHEMA
             )
@@ -368,6 +421,7 @@ class Distiller:
                 raw, result.usage.output_tokens, getattr(self.provider, "max_tokens", None)
             )
             stats.drop_reasons.append(reason)
+            retry_nudge = RETRY_NUDGES[reason]
             # The raw text is the rest of the diagnosis — truncated mid-object,
             # prose wrapped around the JSON, or the repetition a small model
             # falls into near its context ceiling all look identical without it,
@@ -388,7 +442,20 @@ class Distiller:
             )
             return [], stats
 
-        return self._to_findings(parsed, segment, stats), stats
+        findings = self._to_findings(parsed, segment, stats)
+        if not findings and stats.drop_reasons and stats.drop_reasons[-1] == DROP_DEGENERATE:
+            # NUDGE_DEGENERATE sanctions {"findings": []}, and a loop can be
+            # hiding a segment that had real findings in it — this is the one
+            # branch where the reason-aware retry can LOSE work the generic one
+            # might have recovered. It stays an accepted success (an empty
+            # findings list is a legitimate answer), but never a silent one.
+            logger.warning(
+                "Distiller: segment %s recovered EMPTY on the retry after a "
+                "degenerate attempt — if this line is frequent, the loop nudge "
+                "is eating segments, not saving them",
+                segment.id,
+            )
+        return findings, stats
 
     def _to_findings(
         self, parsed: dict[str, Any], segment: Segment, stats: DistillStats

@@ -33,6 +33,10 @@ from synapse_distiller.distiller import (
     DROP_MALFORMED,
     DROP_OVER_BUDGET,
     MAX_ATTEMPTS,
+    NUDGE_DEGENERATE,
+    NUDGE_OVER_BUDGET,
+    RETRY_NUDGE,
+    RETRY_NUDGES,
     classify_drop,
     distinct_shingle_ratio,
     is_degenerate,
@@ -242,3 +246,112 @@ async def test_a_recovered_segment_records_the_reason_for_the_failed_attempt_onl
     assert [f.text for f in findings] == ["recovered"]
     assert stats.dropped_malformed == 1
     assert stats.drop_reasons == [DROP_DEGENERATE]
+
+
+# --- the retry answers the failure it just watched -------------------------------
+#
+# One nudge used to serve all three reasons, and for over-budget it could not
+# work even in principle: "your reply was not valid JSON" asks a temperature-0
+# model for the same too-long reply, which truncates at the same cap. Observed
+# live on 2026-08-07 — one segment failed 1/2 and 2/2 both over-budget,
+# identically, spending two full-cap generations (the longest wait a liveness
+# probe can queue behind) to change nothing.
+
+
+class _RecordingCappedProvider(_CappedProvider):
+    """Records the messages each complete() call received, so a test can assert
+    WHICH nudge the retry carried — the same shape test_distiller.py uses to
+    pin that the retry differs from the first attempt at all."""
+
+    def __init__(self, scripts, *, max_tokens: int) -> None:
+        super().__init__(scripts, max_tokens=max_tokens)
+        self.seen: list[list[dict]] = []
+
+    async def complete(self, messages, response_schema=None):
+        self.seen.append(list(messages))
+        return await super().complete(messages, response_schema)
+
+
+RECOVERY = {"findings": [{"type": "learning", "text": "recovered"}]}
+
+
+async def test_an_over_budget_retry_asks_for_a_shorter_reply_not_a_reparse() -> None:
+    """The live failure. A response cut at the cap retried with a nudge that
+    never mentions length reproduces the truncation exactly; the retry must ask
+    for LESS, not for better syntax."""
+    segment = load_segment("seg-001")
+    at_the_cap = TRUNCATED + "x" * (EFFECTIVE_MAX_TOKENS * 4)
+    provider = _RecordingCappedProvider(
+        [at_the_cap, RECOVERY], max_tokens=EFFECTIVE_MAX_TOKENS
+    )
+
+    findings, stats = await Distiller(provider, BINDING).distil(segment)
+
+    assert [f.text for f in findings] == ["recovered"]
+    assert stats.drop_reasons == [DROP_OVER_BUDGET]
+    assert provider.seen[1][-1] == NUDGE_OVER_BUDGET
+    assert provider.seen[1][-1] != RETRY_NUDGE
+    assert provider.seen[1][:-1] == provider.seen[0], "only the nudge is added"
+
+
+async def test_a_degenerate_retry_names_the_loop_and_offers_the_empty_object() -> None:
+    """Not the length nudge — a loop below the cap is not a length problem, and
+    asking a looping model to be shorter is the same category error the
+    three-way classification exists to prevent, mirrored."""
+    segment = load_segment("seg-001")
+    provider = _RecordingCappedProvider(
+        [LOOPED, RECOVERY], max_tokens=EFFECTIVE_MAX_TOKENS
+    )
+
+    findings, stats = await Distiller(provider, BINDING).distil(segment)
+
+    assert [f.text for f in findings] == ["recovered"]
+    assert stats.drop_reasons == [DROP_DEGENERATE]
+    assert provider.seen[1][-1] == NUDGE_DEGENERATE
+
+
+async def test_a_malformed_retry_keeps_the_original_nudge() -> None:
+    segment = load_segment("seg-001")
+    provider = _RecordingCappedProvider(
+        [PROSE, RECOVERY], max_tokens=EFFECTIVE_MAX_TOKENS
+    )
+
+    findings, stats = await Distiller(provider, BINDING).distil(segment)
+
+    assert [f.text for f in findings] == ["recovered"]
+    assert stats.drop_reasons == [DROP_MALFORMED]
+    assert provider.seen[1][-1] == RETRY_NUDGE
+
+
+async def test_an_empty_recovery_after_a_degenerate_attempt_is_never_silent(
+    caplog,
+) -> None:
+    """NUDGE_DEGENERATE sanctions {"findings": []}, and that exit can eat a
+    segment the loop was hiding. It stays an accepted success — but the one
+    branch where this change can LOSE work must be measurable from the log,
+    not assumed away."""
+    segment = load_segment("seg-001")
+    provider = _RecordingCappedProvider(
+        [LOOPED, {"findings": []}], max_tokens=EFFECTIVE_MAX_TOKENS
+    )
+
+    with caplog.at_level(logging.WARNING, logger="synapse_distiller.distiller"):
+        findings, stats = await Distiller(provider, BINDING).distil(segment)
+
+    assert findings == []
+    assert stats.drop_reasons == [DROP_DEGENERATE]
+    assert any("recovered EMPTY" in r.getMessage() for r in caplog.records)
+
+
+async def test_the_nudge_table_is_total_over_the_classifier_and_actually_three() -> None:
+    """Same trap as the three-labels test above: a mapping whose values were all
+    the same message would pass every per-branch test while restoring exactly
+    the one-nudge behaviour this file exists to rule out. And it must cover
+    every reason `classify_drop` can return, or the selection KeyErrors on the
+    failure path — the one path that must never raise."""
+    assert set(RETRY_NUDGES) == {DROP_OVER_BUDGET, DROP_DEGENERATE, DROP_MALFORMED}
+    contents = [n["content"] for n in RETRY_NUDGES.values()]
+    assert len(set(contents)) == 3
+    # Whatever else each nudge says, the shape of the required reply is stated
+    # in all three — the retry is still asking for the same contract.
+    assert all('{"findings": [' in c for c in contents)

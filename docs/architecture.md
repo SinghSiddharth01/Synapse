@@ -144,8 +144,12 @@ overruns immediately, and nothing validates that pairing at startup.
 
 Two attempts per segment, with a corrective nudge appended on attempt 2 only —
 temperature is 0.0, so a byte-identical retry cannot help — then the segment is
-dropped (`distiller/distiller.py:46,128-136,173-177`). `assert_prompt_conditioned`
-runs before anything is read from the response (`distiller/distiller.py:144-146`).
+dropped. The nudge is selected by why attempt 1 failed: `classify_drop`'s reason
+indexes `RETRY_NUDGES`, so an over-budget response is asked to fit, a repetition
+loop is named and offered `{"findings": []}`, and only plain-malformed gets the
+generic reparse nudge (`distiller/distiller.py`: `MAX_ATTEMPTS`, `RETRY_NUDGES`,
+`distil()`). `assert_prompt_conditioned` runs before anything is read from the
+response.
 
 Attribution is stamped **here, in the worker**, from its own LocalBinding. The
 orchestrator preserves it as sent and does not re-stamp: re-stamping picked one
