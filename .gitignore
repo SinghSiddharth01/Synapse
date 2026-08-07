@@ -43,3 +43,6 @@ site/
 # npm workspace for the debug GUI build (animejs is inlined into debug.py;
 # the checkout never needs node_modules at runtime).
 node_modules/
+
+# Claude
+.claude/
