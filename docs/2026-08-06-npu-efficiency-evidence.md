@@ -21,6 +21,14 @@ The purpose here is to replace that prohibition with numbers, or — where a
 number still cannot be obtained — to say precisely why, so nobody has to guess
 on stage.
 
+> **Read this first.** No watt, joule, or energy figure was measured. The power
+> measurement was attempted, the harness built (`scripts/measure_power.py`), and
+> then dropped — see §7.1. Everything below is throughput, variance, rate limits
+> and cost. The efficiency argument that survives is **determinism** (§2.2), not
+> energy, and it is stronger evidence than the energy number would have been on
+> its own because it is ours, measured today, and reproduces an independent
+> earlier result on a different workload.
+
 ---
 
 ## 1. Findings that change the demo narrative
@@ -374,7 +382,7 @@ Ordered by how well each survives a hostile question.
 | 2 | **Rate-limit headroom**: 20 req/h hosted vs unlimited local, against a measured 80 segments/h demand | **Measured**, in-repo | Hardest to argue with; no external citation needed |
 | 3 | **Prefill 1041 tok/s vs decode ~14 tok/s** — the workload is decode-bound, and triage-before-LLM avoids the expensive half entirely | **Measured today**, R²=0.997 | A real optimization result, and it is ours |
 | 4 | **Compiled QAIRT bundle prefills 5.3x faster than GGUF on the same NPU** | **Measured today** | Justifies the production model choice with a number |
-| 5 | **Energy per finding, NPU vs CPU** | **PENDING** — §7.1 | The headline, once the charger is out |
+| 5 | ~~Energy per finding, NPU vs CPU~~ | **NOT MEASURED — do not present** (§7.1) | Harness exists; the measurement was dropped. Say "we did not measure it" if asked, never a figure |
 | 6 | **$760/dev/yr vs a frontier-model counterfactual** | Derived from measured workload + published prices | Only with the counterfactual stated aloud (§5.3) |
 | 7 | **MobileNetV2 14.8x NPU speedup, p95/p50 1.07 vs 3.5** | Measured 2026-07-30 | True and striking — but say it is a vision workload |
 | 8 | **Privacy**: raw transcript never leaves the device | Architectural, not a number | The `verbatim_overlap` metric is itself flagged unreliable |
@@ -383,7 +391,9 @@ Ordered by how well each survives a hostile question.
 case on their own.** That was not true this morning.
 
 **Do not present:** any tokens/sec claim that implies NPU speed superiority; any
-energy number until §7 is done; any recall figure from `measure_recall.py`
+energy, watt, joule or "power efficiency" number **at all** — none was measured
+(§7.1), and the honest answer to a judge asking is "we built the harness and ran
+out of window"; any recall figure from `measure_recall.py`
 (*"no number from it belongs in a demo"*, `scripts/measure_recall.py:19-28`); the
 privacy table from the Aug 6 eval log (*"Do not demo this table"*, that log's own
 output at `:110`).
@@ -392,20 +402,36 @@ output at `:110`).
 
 ## 7. What is still missing
 
-### 7.1 Power — BLOCKED on a physical action
+### 7.1 Power — NOT MEASURED, and deliberately so
 
-The instrument is identified and validated: the embedded controller reports
-whole-system draw in milliwatts via WMI `root\wmi BatteryStatus.DischargeRate`
-(observed reading 5599 mW on this box). Sampling harness is written and tested.
+**No energy figure was obtained, and none is claimed anywhere in this document.**
+The prohibition in `scripts/run_npu_eval.py:165` still stands and should be
+treated as still standing: *"Power is unmeasured — do not claim efficiency from
+this run."*
 
-**It only reports while the machine is on battery.** Plugged in, the field reads
-0 and `PowerOnline` is `True`. Every attempt so far has been on charger, so no
-energy figure exists yet.
+This is a decision, not an oversight. The instrument was identified and
+validated — the embedded controller reports whole-system draw in milliwatts via
+WMI `root\wmi BatteryStatus.DischargeRate` (observed at 5599 mW on this box) —
+and `scripts/measure_power.py` is written, committed and tested. What it needs is
+the machine on battery: plugged in, `DischargeRate` reads 0 and `PowerOnline` is
+`True`, so the harness refuses rather than recording a column of zeros that would
+read like data. Every window available for this work was on mains, and rather
+than estimate a number or run one on a charger and hope, the measurement was
+dropped.
 
-To obtain it: unplug the charger, then run idle baseline → NPU → GPU → CPU under
-identical sustained distillation load, sampling at 1 Hz throughout. Energy per
-segment = mean power delta × wall time. ~30 minutes. The sampler runs during the
-baseline as well as the workloads, so its own cost cancels in the delta.
+**The case does not depend on it.** §1b, §2.2, §3, §5.4 and KPIs 1–4 in §6 are
+all measured, all ours, and none of them are energy figures. That was not true
+before this work started: the efficiency argument rested entirely on an unmeasured
+power claim, and it now rests on determinism, rate-limit headroom, and the
+prefill/decode asymmetry instead.
+
+**If someone wants the number later**, it is roughly 30 minutes: unplug the
+charger, `uv run python scripts/measure_power.py`, and it runs idle baseline →
+NPU → GPU → CPU under identical sustained load, sampling at 1 Hz. Energy per
+segment is the mean power delta against the baseline times wall time; the sampler
+runs during the baseline too, so its own cost cancels. The one published figure
+to check the result against is arXiv:2606.11257's 315 J/query on NPU vs 1251 on
+CPU — same chip (§4.1).
 
 ### 7.2 The ~8 second GGUF stall
 
