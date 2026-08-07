@@ -1,0 +1,10 @@
+# Shell scripts MUST be LF whatever the checkout platform.
+# core.autocrlf=true on Windows was giving install.sh CRLF endings, which
+# `dash -n` refuses to parse ("line 79: Syntax error: word unexpected") —
+# so a Windows developer could commit an installer nobody on Linux can run,
+# and the three install-preflight tests failed on every Windows checkout.
+*.sh text eol=lf
+
+# Windows-native scripts keep CRLF.
+*.ps1 text eol=crlf
+*.bat text eol=crlf

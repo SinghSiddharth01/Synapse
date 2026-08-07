@@ -212,11 +212,24 @@ def test_install_sh_is_executable_and_posix():
     assert not re.search(r"^\s*local\s", code, flags=re.MULTILINE)
 
 
-@pytest.mark.skipif(shutil.which("dash") is None and shutil.which("sh") is None,
-                    reason="no POSIX shell to parse with")
+# The shell every test below RUNS install.sh with, rather than exec'ing the
+# file. A shebang plus the exec bit is how Linux starts it and how the curl
+# one-liner will; Windows has neither, so `subprocess.run([str(INSTALL_SH)…])`
+# raises `[WinError 193] %1 is not a valid Win32 application` and two tests
+# failed on every Windows checkout for reasons that had nothing to do with the
+# installer. Naming the interpreter explicitly is what
+# `test_install_sh_parses_under_a_posix_shell` already did; the other two now
+# do the same, and `test_install_sh_is_executable_and_posix` still asserts the
+# shebang and the exec bit so the real launch path stays covered.
+POSIX_SHELL = shutil.which("dash") or shutil.which("sh")
+needs_posix_shell = pytest.mark.skipif(
+    POSIX_SHELL is None, reason="no POSIX shell to run install.sh with")
+
+
+@needs_posix_shell
 def test_install_sh_parses_under_a_posix_shell():
-    shell = shutil.which("dash") or shutil.which("sh")
-    done = subprocess.run([shell, "-n", str(INSTALL_SH)], capture_output=True, text=True)
+    done = subprocess.run([POSIX_SHELL, "-n", str(INSTALL_SH)],
+                          capture_output=True, text=True)
     assert done.returncode == 0, done.stderr
 
 
@@ -230,24 +243,27 @@ def test_install_sh_never_touches_git():
     assert "git clone" not in code
 
 
+@needs_posix_shell
 def test_install_sh_refuses_configure_flags():
     """Install and configuration are SEPARATE STAGES. The old installer took
     --service-url/--shared-id/--purpose and started the stack; every one of
     those must now be a loud refusal that names the right stage."""
     for flag in ("--service-url", "--shared-id", "--purpose", "--contributor"):
-        done = subprocess.run([str(INSTALL_SH), flag, "x"], capture_output=True,
+        done = subprocess.run([POSIX_SHELL, str(INSTALL_SH), flag, "x"],
+                              capture_output=True,
                               text=True, cwd=str(REPO), stdin=subprocess.DEVNULL)
         assert done.returncode == 1, flag
         assert "not an installer flag" in done.stderr, flag
         assert "synapse config set service.url" in done.stderr, flag
 
 
+@needs_posix_shell
 def test_install_sh_advertises_both_one_liners():
     """The curl and scriptblock one-liners are the deliverable: a teammate
     installs with one paste and NO arguments — joining happens later, at run
     time, through `synapse config set` + `synapse up`."""
-    done = subprocess.run([str(INSTALL_SH), "--help"], capture_output=True, text=True,
-                          cwd=str(REPO))
+    done = subprocess.run([POSIX_SHELL, str(INSTALL_SH), "--help"],
+                          capture_output=True, text=True, cwd=str(REPO))
     assert done.returncode == 0
     assert "install.sh | sh" in done.stdout
     assert "scriptblock]::Create" in done.stdout

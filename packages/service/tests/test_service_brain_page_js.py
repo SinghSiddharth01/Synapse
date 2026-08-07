@@ -51,7 +51,14 @@ def _run_scenario(script: str, tmp_path: Path) -> dict:
     js_file = tmp_path / "brain_scenario.js"
     js_file.write_text(combined, encoding="utf-8")
     result = subprocess.run(  # noqa: S603 - fixed argv, no shell, test-only
-        ["node", str(js_file)], capture_output=True, text=True, timeout=15
+        # `encoding` explicitly, not just `text=True`: node always writes
+        # UTF-8, but `text=True` decodes with `locale.getpreferredencoding()`,
+        # which is cp1252 on Windows. The page is full of em-dashes, so every
+        # one came back as U+FFFD and `assert empty["contributors"] == "—"`
+        # failed as `'—' == '�'` on every Windows checkout while Linux CI
+        # stayed green.
+        ["node", str(js_file)], capture_output=True, text=True,
+        encoding="utf-8", timeout=15
     )
     assert result.returncode == 0, (
         f"driver failed:\nstdout={result.stdout}\nstderr={result.stderr}"
