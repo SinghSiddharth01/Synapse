@@ -147,3 +147,86 @@ def test_empty_input_yields_nothing() -> None:
 
     assert segmenter.drain() == []
     assert segmenter.drain(flush_incomplete=True) == []
+
+
+# ---------------------------------------------------------------------------
+# emitting a still-open turn once it is past the budget (2026-08-07)
+# ---------------------------------------------------------------------------
+#
+# The hold exists so a half-written turn is not distilled into a half finding.
+# But it was unconditional, and in a long agentic turn nothing could end it:
+# a turn closes on a USER TEXT event, and the idle flush measures time since
+# the transcript last grew — which every tool result resets. So neither trigger
+# could fire while the agent worked, and events piled up for the whole turn.
+# Measured on a live session: 19 -> 46 events held across eight minutes, then
+# 16 findings in one burst the moment the human stopped typing.
+#
+# The fix rests on two things already true. An assistant message is FINAL the
+# moment it lands in the transcript — holding it buys no extra completeness.
+# And content past a budget boundary is already emitted as an independent
+# sub-segment: "Sub-segments are not merged back together anywhere: each is
+# distilled independently and deduplication is synthesis's job, service-side."
+# So full chunks go now, and only the open tail is held.
+
+
+def _long_turn(budget: int, messages: int) -> list[AgentEvent]:
+    body = "\n".join(f"line {i} of a long assistant message" for i in range(40))
+    events = [ev("user", "text", "start the work", 0)]
+    for i in range(messages):
+        events.append(ev("assistant", "text", body, i + 1))
+    return events
+
+
+def test_a_still_open_turn_past_the_budget_emits_its_full_chunks() -> None:
+    """The latency fix. No turn boundary, no idle flush — and work still ships."""
+    segmenter = Segmenter(budget_tokens=100, agent_session_id="sess-1")
+    segmenter.add(_long_turn(100, messages=6))
+
+    segments = segmenter.drain()          # turn is still open
+
+    assert segments, "an open turn past the budget must not be held whole"
+    assert segmenter.pending_events > 0, "the open tail must stay pending"
+
+
+def test_the_tail_is_held_so_a_half_written_message_is_not_distilled() -> None:
+    """The half-turn protection the hold exists for is preserved: only the
+    chunk still being written stays back."""
+    segmenter = Segmenter(budget_tokens=100, agent_session_id="sess-1")
+    events = _long_turn(100, messages=6)
+    segmenter.add(events)
+
+    emitted = segmenter.drain()
+
+    # Compared by CONTENT LENGTH, not event count: `_split_oversized` cuts one
+    # long message into several parts, so the emitted event count is larger
+    # than the input's while carrying strictly less of the turn.
+    shipped = sum(len(e.content) for s in emitted for e in s.events)
+    total = sum(len(e.content) for e in events)
+    assert shipped < total, "everything shipped; nothing was held back"
+    assert segmenter.pending_events > 0, "the chunk still being written must stay"
+
+
+def test_a_short_open_turn_is_still_held_whole() -> None:
+    """Unchanged for the ordinary case: under the budget there is nothing to
+    gain by emitting early, and a half turn is exactly what must not ship."""
+    segmenter = Segmenter(budget_tokens=100_000, agent_session_id="sess-1")
+    segmenter.add([ev("user", "text", "hi", 0), ev("assistant", "text", "short", 1)])
+
+    assert segmenter.drain() == []
+    assert segmenter.pending_events == 2
+
+
+def test_nothing_is_lost_across_an_early_emit_and_a_later_close() -> None:
+    """Every event ends up in exactly one segment across the two drains."""
+    segmenter = Segmenter(budget_tokens=100, agent_session_id="sess-1")
+    events = _long_turn(100, messages=6)
+    segmenter.add(events)
+
+    first = segmenter.drain()
+    segmenter.add([ev("user", "text", "next question", 99)])
+    second = segmenter.drain()
+
+    shipped = [e.content for s in (first + second) for e in s.events]
+    for original in events:
+        assert any(original.content.startswith(c[:40]) or c.startswith(original.content[:40])
+                   for c in shipped), "an event vanished between drains"
