@@ -709,7 +709,7 @@ _EMPTY = _Empty()
 
 
 _PAGE = """<!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -754,6 +754,32 @@ _PAGE = """<!doctype html>
     --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
     --mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
   }
+  :root[data-theme="light"] {
+    color-scheme: light;
+    --canvas: #ffffff;
+    --surface-1: #f5f6f8;
+    --surface-2: #eaecf0;
+    --surface-3: #dde0e6;
+    --hairline: rgba(11, 13, 18, 0.13);
+    --hairline-soft: rgba(11, 13, 18, 0.06);
+    --ink: #0b0d12;
+    --ink-muted: #4c515a;
+    --ink-subtle: #878c95;
+    --cyan: #0b9ba0;
+    --cyan-deep: #0d8f94;
+    --green: #008a63;
+    --amber: #8f6400;
+    --red: #d5271b;
+    --red-text: #c22318;
+    --purple: #6d34ae;
+    --purple-bright: #7d1bd0;
+    --purple-text: #6d34ae;
+    --blue: #1355c9;
+    --blue-text: #1a56c4;
+    --copper: #a85e1e;
+    --copper-dim: #c99a68;
+  }
+  :root[data-theme="light"] .stat.fold { box-shadow: none; }
   * { box-sizing: border-box; }
   body {
     margin: 0;
@@ -823,6 +849,22 @@ _PAGE = """<!doctype html>
   .tabs a:hover { color: var(--ink); background: var(--surface-2); }
   .tabs a[aria-current="page"] { color: var(--cyan); background: rgba(20, 198, 203, 0.12); }
   .tabs a:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+  .tool {
+    display: inline-flex; align-items: center; gap: 7px;
+    margin-left: auto;
+    padding: 6px 12px; border-radius: var(--radius-sm);
+    background: var(--surface-2); color: var(--ink);
+    border: 1px solid var(--hairline);
+    font: 600 12.5px var(--sans); cursor: pointer;
+    transition: background-color 130ms;
+  }
+  .tool:hover { background: var(--surface-3); }
+  .tool:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+  .tool svg { width: 15px; height: 15px; display: block; }
+  .tool .stroke-ic { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+  #theme-btn .ic-sun { display: none; }
+  :root[data-theme="light"] #theme-btn .ic-sun { display: block; }
+  :root[data-theme="light"] #theme-btn .ic-moon { display: none; }
   main { padding: 28px 32px 64px; }
   @media (max-width: 900px) {
     .shell { flex-direction: column; }
@@ -1056,6 +1098,7 @@ _PAGE = """<!doctype html>
     <a id="tab-log" href="/debug/log" aria-current="page">Log</a>
     <a id="tab-memory" href="/debug/memory">Memory</a>
   </nav>
+  <button class="tool" id="theme-btn" type="button" aria-label="toggle theme (T)"><svg class="ic-moon" viewBox="0 0 20 20" aria-hidden="true"><path class="stroke-ic" d="M16.5 12.2A7 7 0 0 1 7.8 3.5a7 7 0 1 0 8.7 8.7z"/></svg><svg class="ic-sun" viewBox="0 0 20 20" aria-hidden="true"><circle class="stroke-ic" cx="10" cy="10" r="3.6"/><path class="stroke-ic" d="M10 1.8v2.1M10 16.1v2.1M1.8 10h2.1M16.1 10h2.1M4.2 4.2l1.5 1.5M14.3 14.3l1.5 1.5M15.8 4.2l-1.5 1.5M5.7 14.3l-1.5 1.5"/></svg><span>Theme</span></button>
 </header>
 <main>
   <section class="stats" aria-label="service pipeline: ingest to query, in order">
@@ -1456,6 +1499,43 @@ _PAGE = """<!doctype html>
   refresh();
   setInterval(refresh, 1000);
 })();
+
+
+
+
+
+(function () {
+  "use strict";
+  // Light/dark toggle: T key or the topbar button. Guarded throughout so the
+  // headless test DOM (no documentElement, no localStorage) never notices.
+  try {
+    var root = document.documentElement;
+    if (!root || !root.setAttribute) return;
+    var KEY = "synapse-theme";
+    function apply(t) {
+      root.setAttribute("data-theme", t);
+      try { localStorage.setItem(KEY, t); } catch (e) { /* private mode */ }
+    }
+    function flip() {
+      apply(root.getAttribute("data-theme") === "light" ? "dark" : "light");
+    }
+    try {
+      if (typeof localStorage !== "undefined") {
+        var stored = localStorage.getItem(KEY);
+        if (stored === "light" || stored === "dark") root.setAttribute("data-theme", stored);
+      }
+    } catch (e) { /* storage unavailable */ }
+    var btn = document.getElementById("theme-btn");
+    if (btn && btn.addEventListener) btn.addEventListener("click", flip);
+    if (typeof document.addEventListener === "function") {
+      document.addEventListener("keydown", function (ev) {
+        var tag = ev.target && ev.target.tagName;
+        if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+        if (ev.key === "t" || ev.key === "T") flip();
+      });
+    }
+  } catch (e) { /* theme chrome is optional everywhere */ }
+})();
 </script>
 </body>
 </html>
@@ -1472,7 +1552,7 @@ _PAGE = """<!doctype html>
 # measure is named there, in the same size type as everything it can.
 
 _BRAIN_PAGE = """<!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1517,6 +1597,32 @@ _BRAIN_PAGE = """<!doctype html>
     --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
     --mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
   }
+  :root[data-theme="light"] {
+    color-scheme: light;
+    --canvas: #ffffff;
+    --surface-1: #f5f6f8;
+    --surface-2: #eaecf0;
+    --surface-3: #dde0e6;
+    --hairline: rgba(11, 13, 18, 0.13);
+    --hairline-soft: rgba(11, 13, 18, 0.06);
+    --ink: #0b0d12;
+    --ink-muted: #4c515a;
+    --ink-subtle: #878c95;
+    --cyan: #0b9ba0;
+    --cyan-deep: #0d8f94;
+    --green: #008a63;
+    --amber: #8f6400;
+    --red: #d5271b;
+    --red-text: #c22318;
+    --purple: #6d34ae;
+    --purple-bright: #7d1bd0;
+    --purple-text: #6d34ae;
+    --blue: #1355c9;
+    --blue-text: #1a56c4;
+    --copper: #a85e1e;
+    --copper-dim: #c99a68;
+  }
+  :root[data-theme="light"] .stat.fold { box-shadow: none; }
   * { box-sizing: border-box; }
   body {
     margin: 0;
@@ -1591,6 +1697,22 @@ _BRAIN_PAGE = """<!doctype html>
   .tabs a:hover { color: var(--ink); background: var(--surface-2); }
   .tabs a[aria-current="page"] { color: var(--cyan); background: rgba(20, 198, 203, 0.12); }
   .tabs a:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+  .tool {
+    display: inline-flex; align-items: center; gap: 7px;
+    margin-left: auto;
+    padding: 6px 12px; border-radius: var(--radius-sm);
+    background: var(--surface-2); color: var(--ink);
+    border: 1px solid var(--hairline);
+    font: 600 12.5px var(--sans); cursor: pointer;
+    transition: background-color 130ms;
+  }
+  .tool:hover { background: var(--surface-3); }
+  .tool:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+  .tool svg { width: 15px; height: 15px; display: block; }
+  .tool .stroke-ic { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+  #theme-btn .ic-sun { display: none; }
+  :root[data-theme="light"] #theme-btn .ic-sun { display: block; }
+  :root[data-theme="light"] #theme-btn .ic-moon { display: none; }
   main { padding: 28px 32px 64px; max-width: 1500px; }
   @media (max-width: 900px) {
     .shell { flex-direction: column; }
@@ -1867,6 +1989,7 @@ _BRAIN_PAGE = """<!doctype html>
     <a id="tab-log" href="/debug/log">Log</a>
     <a id="tab-memory" href="/debug/memory">Memory</a>
   </nav>
+  <button class="tool" id="theme-btn" type="button" aria-label="toggle theme (T)"><svg class="ic-moon" viewBox="0 0 20 20" aria-hidden="true"><path class="stroke-ic" d="M16.5 12.2A7 7 0 0 1 7.8 3.5a7 7 0 1 0 8.7 8.7z"/></svg><svg class="ic-sun" viewBox="0 0 20 20" aria-hidden="true"><circle class="stroke-ic" cx="10" cy="10" r="3.6"/><path class="stroke-ic" d="M10 1.8v2.1M10 16.1v2.1M1.8 10h2.1M16.1 10h2.1M4.2 4.2l1.5 1.5M14.3 14.3l1.5 1.5M15.8 4.2l-1.5 1.5M5.7 14.3l-1.5 1.5"/></svg><span>Theme</span></button>
 </header>
 <main>
   <section class="identity">
@@ -2376,6 +2499,43 @@ _BRAIN_PAGE = """<!doctype html>
   refresh();
   setInterval(refresh, 1000);
 })();
+
+
+
+
+
+(function () {
+  "use strict";
+  // Light/dark toggle: T key or the topbar button. Guarded throughout so the
+  // headless test DOM (no documentElement, no localStorage) never notices.
+  try {
+    var root = document.documentElement;
+    if (!root || !root.setAttribute) return;
+    var KEY = "synapse-theme";
+    function apply(t) {
+      root.setAttribute("data-theme", t);
+      try { localStorage.setItem(KEY, t); } catch (e) { /* private mode */ }
+    }
+    function flip() {
+      apply(root.getAttribute("data-theme") === "light" ? "dark" : "light");
+    }
+    try {
+      if (typeof localStorage !== "undefined") {
+        var stored = localStorage.getItem(KEY);
+        if (stored === "light" || stored === "dark") root.setAttribute("data-theme", stored);
+      }
+    } catch (e) { /* storage unavailable */ }
+    var btn = document.getElementById("theme-btn");
+    if (btn && btn.addEventListener) btn.addEventListener("click", flip);
+    if (typeof document.addEventListener === "function") {
+      document.addEventListener("keydown", function (ev) {
+        var tag = ev.target && ev.target.tagName;
+        if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+        if (ev.key === "t" || ev.key === "T") flip();
+      });
+    }
+  } catch (e) { /* theme chrome is optional everywhere */ }
+})();
 </script>
 </body>
 </html>
@@ -2613,7 +2773,13 @@ _HOME_PAGE = """<!doctype html>
     margin-bottom: 16px;
     background: linear-gradient(90deg, var(--sec-c, var(--cyan)), transparent);
   }
-  .slide .sub { color: var(--ink-subtle); font-size: 15.5px; margin: 0 0 28px; max-width: 78ch; }
+  .slide .sub { color: var(--ink-muted); font-size: 17px; margin: 0 0 28px; max-width: 80ch; }
+  .hw {
+    font-style: normal; font: 650 0.82em var(--mono);
+    padding: 1px 9px; border-radius: 999px; border: 1px solid; white-space: nowrap;
+  }
+  .hw-npu { color: var(--copper); border-color: rgba(224, 154, 90, 0.45); background: rgba(224, 154, 90, 0.1); }
+  .hw-ai100 { color: var(--cyan); border-color: rgba(20, 198, 203, 0.45); background: rgba(20, 198, 203, 0.1); }
   .s-why    { --sec-c: var(--red-text); }
   .s-arch   { --sec-c: var(--cyan); }
   .s-pipe   { --sec-c: var(--copper); }
@@ -2669,11 +2835,12 @@ _HOME_PAGE = """<!doctype html>
   .net .impulse.back { fill: var(--cyan); }
   .net .impulse.syn { fill: var(--green); }
   .net .chip { fill: var(--surface-1); stroke: rgba(20, 198, 203, 0.4); }
-  .net text { font: 600 14px var(--mono); letter-spacing: 0.05em; fill: var(--ink); }
-  .net text.sub2 { font-weight: 400; font-size: 12px; letter-spacing: 0.02em; fill: var(--ink-subtle); }
+  .net text { font: 650 16px var(--mono); letter-spacing: 0.05em; fill: var(--ink); }
+  .net text.sub2 { font-weight: 500; font-size: 13.5px; letter-spacing: 0.02em; fill: var(--ink-muted); }
+  .net text.sub3 { font-weight: 600; font-size: 13.5px; letter-spacing: 0.02em; fill: var(--copper); }
   .net text.core-label { fill: var(--cyan); letter-spacing: 0.14em; }
-  .net text.chip-label { fill: var(--cyan); letter-spacing: 0.1em; font-size: 13px; }
-  .net-caption { margin: 12px 0 0; text-align: center; color: var(--ink-subtle); font-size: 14px; }
+  .net text.chip-label { fill: var(--cyan); letter-spacing: 0.1em; font-size: 15px; }
+  .net-caption { margin: 14px 0 0; text-align: center; color: var(--ink-muted); font-size: 15.5px; }
 
   /* ── why: the problem, drawn instead of claimed ── */
   .why-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
@@ -2685,35 +2852,43 @@ _HOME_PAGE = """<!doctype html>
   }
   .why-panel.bad { border-top: 2px solid var(--red-text); }
   .why-panel.good { border-top: 2px solid var(--green); }
-  .why-panel h3 { margin: 0 0 2px; font-size: 18px; font-weight: 650; letter-spacing: -0.015em; }
+  .why-panel h3 { margin: 0 0 4px; font-size: 21px; font-weight: 650; letter-spacing: -0.015em; }
   .why-panel.bad h3 { color: var(--red-text); }
   .why-panel.good h3 { color: var(--green); }
-  .why-panel .cap { margin: 0 0 10px; color: var(--ink-subtle); font-size: 13px; }
+  .why-panel .cap { margin: 0 0 12px; color: var(--ink-muted); font-size: 15px; }
   .why-panel svg { width: 100%; height: auto; display: block; }
-  .why-panel .wire { fill: none; stroke: var(--ink-subtle); stroke-width: 1.5; opacity: 0.75; }
-  .why-panel .wire.hot { stroke: var(--cyan); opacity: 0.9; }
-  .why-panel .wire.good { stroke: var(--green); opacity: 0.9; }
-  .why-panel .relay { fill: none; stroke: var(--amber); stroke-width: 1.4; stroke-dasharray: 5 6; opacity: 0.8; }
+  .why-panel .wire { fill: none; stroke: var(--ink-subtle); stroke-width: 2; opacity: 0.8; }
+  .why-panel .wire.hot { stroke: var(--cyan); opacity: 0.95; stroke-width: 2.2; }
+  .why-panel .wire.good { stroke: var(--green); opacity: 0.95; stroke-width: 2.2; }
+  .why-panel .relay { fill: none; stroke: var(--amber); stroke-width: 2; stroke-dasharray: 6 7; opacity: 0.85; }
   .why-panel .aget { fill: var(--copper); }
-  .why-panel .aname { font: 600 12.5px var(--mono); fill: var(--ink); }
-  .why-panel .anote { font: 500 11.5px var(--sans); fill: var(--ink-subtle); }
-  .why-panel .anote.warn { fill: var(--amber); font-weight: 600; }
-  .why-panel .deadx { stroke: var(--red-text); stroke-width: 3; stroke-linecap: round; }
+  .why-panel .aname { font: 650 16px var(--mono); fill: var(--ink); }
+  .why-panel .anote { font: 600 14.5px var(--sans); fill: var(--ink-muted); }
+  .why-panel .anote.warn { fill: var(--amber); font-weight: 650; }
+  .why-panel .deadx { stroke: var(--red-text); stroke-width: 4; stroke-linecap: round; }
   .why-panel .hub { fill: var(--cyan); }
-  .why-panel .hub-halo { fill: none; stroke: var(--cyan); stroke-width: 1.3; opacity: 0.45; }
-  .why-panel .hub-ring { fill: none; stroke: var(--cyan); stroke-width: 1.2; opacity: 0; }
-  .why-panel .hubname { font: 650 11px var(--mono); fill: var(--cyan); letter-spacing: 0.08em; }
+  .why-panel .hub-halo { fill: none; stroke: var(--cyan); stroke-width: 1.5; opacity: 0.45; }
+  .why-panel .hub-ring { fill: none; stroke: var(--cyan); stroke-width: 1.4; opacity: 0; }
+  .why-panel .hubname { font: 650 14px var(--mono); fill: var(--cyan); letter-spacing: 0.08em; }
   .why-panel .pulse { fill: var(--cyan); opacity: 0; }
-  .why-panel .tick { stroke: var(--green); stroke-width: 2.6; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+  .why-panel .tick { stroke: var(--green); stroke-width: 3.2; fill: none; stroke-linecap: round; stroke-linejoin: round; }
   .why-panel .relaydot { fill: var(--amber); opacity: 0; }
   .why-note {
-    margin: 16px 0 0; padding: 18px 24px;
-    background: var(--surface-1);
-    border: 1px solid var(--hairline);
-    border-left: 3px solid var(--copper);
+    margin: 16px 0 0; padding: 20px 26px;
+    background: linear-gradient(150deg, rgba(224, 154, 90, calc(var(--wash) + 0.05)), transparent 55%), var(--surface-1);
+    border: 1px solid rgba(224, 154, 90, 0.4);
     border-radius: var(--radius);
-    color: var(--ink-muted); font-size: 15px; line-height: 1.65; font-weight: 500;
+    color: var(--ink-muted); font-size: 16.5px; line-height: 1.7; font-weight: 500;
   }
+  .why-note .ex-tag {
+    display: inline-block; margin: 0 0 10px;
+    font: 650 12px var(--sans); letter-spacing: 0.12em; text-transform: uppercase;
+    color: var(--copper);
+    padding: 3px 12px; border-radius: 999px;
+    border: 1px solid rgba(224, 154, 90, 0.45); background: rgba(224, 154, 90, 0.1);
+  }
+  .why-note h4 { margin: 0 0 8px; font-size: 20px; font-weight: 650; letter-spacing: -0.015em; color: var(--ink); }
+  .why-note p { margin: 0; }
   .why-note b { color: var(--ink); font-weight: 650; }
 
   /* ── architecture: end to end, with a today/allows switch ── */
@@ -2735,23 +2910,26 @@ _HOME_PAGE = """<!doctype html>
   }
   .arch-wrap svg { width: 100%; height: auto; display: block; }
   .arch .box { fill: var(--canvas); stroke: var(--hairline); }
-  .arch .box.svc { stroke: rgba(20, 198, 203, 0.5); }
+  .arch .box.svc { stroke: rgba(20, 198, 203, 0.5); stroke-width: 1.5; }
   .arch .box.cld { stroke: rgba(20, 198, 203, 0.35); }
   .arch .box.dev { stroke: var(--copper-dim); }
-  .arch .lane { fill: var(--surface-2); }
-  .arch text { font: 600 13px var(--sans); fill: var(--ink); }
-  .arch text.t-mono { font: 600 12px var(--mono); letter-spacing: 0.06em; }
-  .arch text.t-sub { font-weight: 500; font-size: 11.5px; fill: var(--ink-subtle); }
+  .arch .mini { fill: var(--surface-2); stroke: transparent; }
+  .arch .mini.prov { stroke: rgba(224, 154, 90, 0.5); }
+  .arch .mini.prov-alt { stroke: rgba(178, 182, 189, 0.35); }
+  .arch text { font: 600 15px var(--sans); fill: var(--ink); }
+  .arch text.t-mono { font: 650 13.5px var(--mono); letter-spacing: 0.06em; }
+  .arch text.t-sub { font-weight: 500; font-size: 13px; fill: var(--ink-muted); }
+  .arch text.t-faint { font-weight: 500; font-size: 12.5px; fill: var(--ink-subtle); }
   .arch text.t-cyan { fill: var(--cyan); }
   .arch text.t-copper { fill: var(--copper); }
   .arch text.t-green { fill: var(--green); }
-  .arch .flow { fill: none; stroke-width: 1.6; }
-  .arch .flow.in { stroke: var(--copper); opacity: 0.8; }
-  .arch .flow.syn { stroke: var(--cyan); opacity: 0.8; }
-  .arch .flow.out { stroke: var(--green); stroke-dasharray: 4 5; opacity: 0.8; }
-  .arch .ah { stroke-width: 1.6; stroke-linecap: round; fill: none; }
+  .arch .flow { fill: none; stroke-width: 1.8; }
+  .arch .flow.in { stroke: var(--copper); opacity: 0.85; }
+  .arch .flow.syn { stroke: var(--cyan); opacity: 0.85; }
+  .arch .flow.out { stroke: var(--green); stroke-dasharray: 4 5; opacity: 0.85; }
+  .arch .ah { stroke-width: 1.8; stroke-linecap: round; fill: none; }
   .arch .plug-node { fill: var(--surface-2); stroke: var(--hairline); }
-  .arch .plug-t { font: 600 11px var(--mono); fill: var(--ink-muted); }
+  .arch .plug-t { font: 600 12.5px var(--mono); fill: var(--ink-muted); }
   .arch .g-allows { opacity: 0; transition: opacity 400ms; }
   .arch .ghost { stroke-dasharray: 5 5; }
   .arch[data-view="allows"] .g-allows { opacity: 1; }
@@ -2760,6 +2938,31 @@ _HOME_PAGE = """<!doctype html>
   .arch .plug-any .plug-node, .arch .plug-any .plug-t { transition: stroke 400ms, fill 400ms; }
   .arch[data-view="allows"] .plug-any .plug-node { stroke: rgba(20, 198, 203, 0.55); }
   .arch[data-view="allows"] .plug-any .plug-t { fill: var(--cyan); }
+  /* the five service stages are clickable; focus lights one and dims the rest */
+  .arch .lane-g { cursor: pointer; }
+  .arch .lane-g rect { fill: var(--surface-2); stroke: rgba(20, 198, 203, 0.18); transition: stroke 200ms, opacity 200ms; }
+  .arch .lane-g .lic { fill: none; stroke: var(--cyan); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  .arch .lane-g:hover rect { stroke: rgba(20, 198, 203, 0.55); }
+  .arch[data-focus] .lane-g { opacity: 0.45; }
+  .arch[data-focus="log"] .lane-g[data-lane="log"],
+  .arch[data-focus="fold"] .lane-g[data-lane="fold"],
+  .arch[data-focus="retrieve"] .lane-g[data-lane="retrieve"],
+  .arch[data-focus="synth"] .lane-g[data-lane="synth"],
+  .arch[data-focus="memory"] .lane-g[data-lane="memory"] { opacity: 1; }
+  .arch[data-focus="log"] .lane-g[data-lane="log"] rect,
+  .arch[data-focus="fold"] .lane-g[data-lane="fold"] rect,
+  .arch[data-focus="retrieve"] .lane-g[data-lane="retrieve"] rect,
+  .arch[data-focus="synth"] .lane-g[data-lane="synth"] rect,
+  .arch[data-focus="memory"] .lane-g[data-lane="memory"] rect { stroke: var(--cyan); }
+  #arch-detail {
+    margin: 12px 0 0; padding: 14px 20px;
+    background: rgba(20, 198, 203, calc(var(--wash) - 0.02));
+    border: 1px solid rgba(20, 198, 203, 0.3);
+    border-radius: var(--radius-sm);
+    color: var(--ink-muted); font-size: 15.5px; line-height: 1.6; font-weight: 500;
+    min-height: 52px;
+  }
+  #arch-detail b { color: var(--cyan); font-weight: 650; }
 
   /* ── pipeline + division of labor, one composition ── */
   .pipe { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 14px; }
@@ -2780,75 +2983,82 @@ _HOME_PAGE = """<!doctype html>
     opacity: 0.85;
   }
   .pipe-card:last-child::after { display: none; }
-  .pipe-card .k { font: 650 14px var(--mono); letter-spacing: 0.1em; margin-bottom: 3px; color: var(--stage); }
-  .pipe-card .where { font-size: 12px; color: var(--ink-subtle); margin-bottom: 10px; }
+  .pipe-card .k { font: 650 15.5px var(--mono); letter-spacing: 0.1em; margin-bottom: 4px; color: var(--stage); }
+  .pipe-card .where { font-size: 13.5px; color: var(--ink-muted); margin-bottom: 12px; }
   .pipe-card:nth-child(2) { --stage: var(--copper); }
   .pipe-card:nth-child(3) { --stage: var(--cyan); }
   .pipe-card:nth-child(4) { --stage: var(--green); }
-  .pipe-card p { margin: 0; color: var(--ink-muted); font-size: 14px; line-height: 1.6; font-weight: 500; }
+  .pipe-card p { margin: 0; color: var(--ink-muted); font-size: 15px; line-height: 1.62; font-weight: 500; }
   .curated {
-    margin: 14px 0 0; padding: 16px 22px;
+    margin: 14px 0 0; padding: 18px 24px;
     background: linear-gradient(135deg, rgba(20, 198, 203, calc(var(--wash) + 0.06)), transparent 60%), var(--surface-1);
     border: 1px solid rgba(20, 198, 203, 0.35);
     border-radius: var(--radius);
-    color: var(--ink-muted); font-size: 15px; line-height: 1.65; font-weight: 500;
+    color: var(--ink-muted); font-size: 16px; line-height: 1.68; font-weight: 500;
   }
   .curated b { color: var(--cyan); font-weight: 650; }
-  .split { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 14px; }
-  .split-card {
-    display: flex; gap: 14px; align-items: flex-start;
-    background: linear-gradient(150deg, rgba(224, 154, 90, calc(var(--wash) + 0.08)), transparent 55%), var(--surface-1);
-    border: 1px solid rgba(224, 154, 90, 0.4);
+  .retrv {
+    margin-top: 14px;
+    background: linear-gradient(140deg, rgba(0, 202, 142, calc(var(--wash) + 0.06)), transparent 55%), var(--surface-1);
+    border: 1px solid rgba(0, 202, 142, 0.38);
     border-radius: var(--radius);
-    padding: 18px 20px;
+    padding: 20px 24px;
   }
-  .split-card.cloud {
-    background: linear-gradient(150deg, rgba(20, 198, 203, calc(var(--wash) + 0.08)), transparent 55%), var(--surface-1);
-    border-color: rgba(20, 198, 203, 0.4);
+  .retrv h3 { margin: 0 0 4px; font-size: 20px; font-weight: 650; letter-spacing: -0.015em; color: var(--green); }
+  .retrv .rsub { margin: 0 0 14px; color: var(--ink-muted); font-size: 14.5px; }
+  .retrv-cols { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; }
+  .rcol {
+    background: var(--canvas);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius-sm);
+    padding: 14px 16px;
   }
-  .split-card h3 { margin: 0 0 2px; font-size: 17px; font-weight: 650; color: var(--copper); }
-  .split-card.cloud h3 { color: var(--cyan); }
-  .split-card .where { font: 12px var(--mono); color: var(--ink-subtle); margin-bottom: 8px; }
-  .split-card p { margin: 0; color: var(--ink-muted); font-size: 13.5px; line-height: 1.6; font-weight: 500; }
-  .split-card .sic { flex-shrink: 0; width: 30px; height: 30px; margin-top: 3px; color: var(--copper); }
-  .split-card.cloud .sic { color: var(--cyan); }
-  .split-card .sic svg { width: 100%; height: 100%; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+  .rcol .rk { font: 650 13px var(--mono); letter-spacing: 0.08em; color: var(--green); margin-bottom: 6px; }
+  .rcol p { margin: 0; color: var(--ink-muted); font-size: 14px; line-height: 1.6; font-weight: 500; }
 
-  /* ── use cases, iconified ── */
+  /* ── use cases: each takes its own hue, each carries a real scenario ── */
   .cases { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; }
   .case {
-    display: flex; gap: 14px; align-items: flex-start;
-    background: var(--surface-1);
+    --case-c: var(--blue-text);
+    --case-rgb: 110, 166, 255;
+    display: flex; flex-direction: column; gap: 0;
+    background: linear-gradient(160deg, rgba(var(--case-rgb), calc(var(--wash) - 0.02)), transparent 45%), var(--surface-1);
     border: 1px solid var(--hairline);
+    border-top: 2px solid var(--case-c);
     border-radius: var(--radius);
     padding: 18px 20px;
-    transition: border-color 140ms, transform 140ms;
+    transition: border-color 140ms, transform 140ms, box-shadow 140ms;
   }
-  .case:hover { border-color: rgba(24, 104, 242, 0.5); transform: translateY(-2px); }
+  .case:hover {
+    border-color: rgba(var(--case-rgb), 0.55);
+    transform: translateY(-3px);
+    box-shadow: 0 0 42px -18px rgba(var(--case-rgb), 0.5);
+  }
+  .case.c-red    { --case-c: var(--red-text);    --case-rgb: 230, 43, 30; }
+  .case.c-blue   { --case-c: var(--blue-text);   --case-rgb: 24, 104, 242; }
+  .case.c-purple { --case-c: var(--purple-text); --case-rgb: 123, 66, 188; }
+  .case.c-cyan   { --case-c: var(--cyan);        --case-rgb: 20, 198, 203; }
+  .case.c-amber  { --case-c: var(--amber);       --case-rgb: 224, 154, 90; }
+  .case.c-green  { --case-c: var(--green);       --case-rgb: 0, 202, 142; }
+  .case-head { display: flex; gap: 13px; align-items: center; margin-bottom: 10px; }
   .case .cic {
-    flex-shrink: 0; width: 40px; height: 40px; border-radius: 10px;
+    flex-shrink: 0; width: 42px; height: 42px; border-radius: 11px;
     display: flex; align-items: center; justify-content: center;
-    background: rgba(24, 104, 242, calc(var(--wash) + 0.02));
-    border: 1px solid rgba(24, 104, 242, 0.3);
-    color: var(--blue-text);
+    background: rgba(var(--case-rgb), calc(var(--wash) + 0.04));
+    border: 1px solid rgba(var(--case-rgb), 0.4);
+    color: var(--case-c);
   }
-  .case .cic svg { width: 21px; height: 21px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
-  .case b { display: block; font-size: 15.5px; font-weight: 650; margin-bottom: 3px; color: var(--ink); letter-spacing: -0.01em; }
-  .case span { color: var(--ink-muted); font-size: 13.5px; line-height: 1.55; font-weight: 500; }
-  .aha {
-    margin-top: 16px;
-    background: linear-gradient(140deg, rgba(0, 202, 142, calc(var(--wash) + 0.08)), transparent 55%), var(--surface-1);
-    border: 1px solid rgba(0, 202, 142, 0.38);
-    border-radius: 20px;
-    padding: 30px 36px;
+  .case .cic svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+  .case b { display: block; font-size: 17px; font-weight: 650; color: var(--ink); letter-spacing: -0.012em; }
+  .case .gist { display: block; color: var(--ink-muted); font-size: 13.5px; line-height: 1.45; font-weight: 500; margin-top: 2px; }
+  .case .scen {
+    margin: auto 0 0; padding: 11px 14px;
+    background: var(--canvas);
+    border-left: 2px solid var(--case-c);
+    border-radius: 7px;
+    color: var(--ink-muted); font-size: 14px; line-height: 1.6; font-weight: 500;
   }
-  .aha .setup { color: var(--ink-muted); font-size: 15.5px; line-height: 1.65; font-weight: 500; margin: 0 0 12px; max-width: 62ch; }
-  .aha .quote {
-    font-size: clamp(26px, 2.6vw, 38px); font-weight: 700; letter-spacing: -0.024em; line-height: 1.18;
-    color: var(--ink); margin: 0 0 10px;
-  }
-  .aha .quote .said { color: var(--green); }
-  .aha .receipt { color: var(--ink-subtle); font-size: 14px; margin: 0; }
+  .case .scen b { display: inline; font-size: inherit; color: var(--ink); font-weight: 650; }
 
   /* ── proof + run it ── */
   .band { display: grid; grid-template-columns: 1.3fr 1fr 1fr; gap: 14px; }
@@ -2915,19 +3125,20 @@ _HOME_PAGE = """<!doctype html>
   .prov-row .st::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--ink-subtle); }
   .prov-row.live .st { color: var(--cyan); }
   .prov-row.live .st::before { background: var(--cyan); }
+  .gh-row { margin-top: 16px; display: flex; justify-content: center; }
   .gh-card {
-    display: flex; align-items: center; gap: 14px;
+    display: flex; align-items: center; gap: 16px;
     background: var(--surface-1);
     border: 1px solid var(--hairline);
     border-radius: var(--radius);
-    padding: 16px 20px;
+    padding: 18px 26px;
     text-decoration: none; color: inherit;
-    transition: border-color 140ms;
+    transition: border-color 140ms, transform 140ms;
   }
-  .gh-card:hover { border-color: rgba(20, 198, 203, 0.5); }
-  .gh-card svg { width: 26px; height: 26px; fill: currentColor; flex-shrink: 0; }
-  .gh-card b { display: block; font-size: 14.5px; font-weight: 650; }
-  .gh-card span { display: block; font: 12px var(--mono); color: var(--ink-subtle); margin-top: 2px; }
+  .gh-card:hover { border-color: rgba(20, 198, 203, 0.5); transform: translateY(-2px); }
+  .gh-card svg { width: 30px; height: 30px; fill: currentColor; flex-shrink: 0; }
+  .gh-card b { display: block; font-size: 16.5px; font-weight: 650; }
+  .gh-card span { display: block; font: 13.5px var(--mono); color: var(--ink-subtle); margin-top: 3px; }
 
   .footer {
     margin-top: 104px; padding-top: 24px;
@@ -2936,35 +3147,68 @@ _HOME_PAGE = """<!doctype html>
   }
   .footer b { color: var(--ink-muted); font-weight: 600; }
 
-  /* ── slides mode ── */
+  /* ── slides mode: full-bleed, content fills the room, chrome hides ── */
   body[data-mode="slides"] aside { display: none; }
+  body[data-mode="slides"] .topbar {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 60;
+    background: var(--canvas);
+    border-bottom: 1px solid var(--hairline-soft);
+    transform: translateY(-100%);
+    transition: transform 220ms ease;
+  }
+  body[data-mode="slides"] .topbar.peek, body[data-mode="slides"] .topbar:hover { transform: translateY(0); }
   body[data-mode="slides"] main {
-    max-width: 1360px;
-    height: calc(100dvh - 59px);
-    padding: 0 64px 44px;
+    max-width: 1720px;
+    height: 100dvh;
+    padding: 20px 72px 48px;
     display: flex; align-items: center;
     overflow: hidden;
   }
-  body[data-mode="slides"] .slide { display: none; width: 100%; max-height: 100%; overflow-y: auto; margin: 0; padding: 8px 4px; scrollbar-width: thin; }
+  body[data-mode="slides"] .slide { display: none; width: 100%; max-height: 100%; overflow-y: auto; margin: 0; padding: 8px 6px; scrollbar-width: thin; }
   body[data-mode="slides"] .slide.on { display: block; }
   body[data-mode="slides"] .footer, body[data-mode="slides"] .scroll-only { display: none; }
-  body[data-mode="slides"] .hero .kicker { margin-bottom: 12px; }
-  body[data-mode="slides"] .hero h1 { font-size: clamp(40px, 4.2vw, 58px); margin-bottom: 14px; }
-  body[data-mode="slides"] .hero .tagline { font-size: 16.5px; margin-bottom: 20px; }
-  body[data-mode="slides"] .net { max-width: 850px; margin: 18px auto 0; }
-  body[data-mode="slides"] .net-caption { margin-top: 6px; font-size: 12.5px; }
-  body[data-mode="slides"] .slide h2 { font-size: clamp(26px, 2.4vw, 34px); }
-  body[data-mode="slides"] .slide .sub { margin-bottom: 20px; }
-  body[data-mode="slides"] .band-card { padding: 14px 18px; }
-  body[data-mode="slides"] .band-card.hero-stat { padding: 20px 22px; }
-  body[data-mode="slides"] .band-card.hero-stat .num { font-size: clamp(38px, 3.2vw, 50px); }
-  body[data-mode="slides"] .band-card .what { font-size: 12.5px; line-height: 1.55; }
-  body[data-mode="slides"] .run { margin-top: 14px; }
-  body[data-mode="slides"] .term { font-size: 12.5px; padding: 16px 18px; }
-  body[data-mode="slides"] .providers { padding: 14px 18px 4px; }
-  body[data-mode="slides"] .providers .phead { margin-bottom: 6px; }
-  body[data-mode="slides"] .prov-row { padding: 6px 0; }
-  body[data-mode="slides"] .gh-card { padding: 12px 18px; }
+  body[data-mode="slides"] .hero .kicker { font-size: 14px; margin-bottom: 16px; }
+  body[data-mode="slides"] .hero h1 { font-size: clamp(48px, 5vw, 74px); margin-bottom: 18px; }
+  body[data-mode="slides"] .hero .tagline { font-size: 20px; max-width: 58ch; margin-bottom: 24px; }
+  body[data-mode="slides"] .btn { font-size: 16px; padding: 13px 26px; }
+  body[data-mode="slides"] .net { max-width: 1150px; margin: 26px auto 0; }
+  body[data-mode="slides"] .net-caption { font-size: 16px; }
+  body[data-mode="slides"] .slide h2 { font-size: clamp(34px, 3.1vw, 46px); }
+  body[data-mode="slides"] .slide .sub { font-size: 18.5px; margin-bottom: 24px; }
+  body[data-mode="slides"] .slide-eyebrow { font-size: 13.5px; }
+  body[data-mode="slides"] .why-panel h3 { font-size: 24px; }
+  body[data-mode="slides"] .why-panel .cap { font-size: 16px; }
+  body[data-mode="slides"] .why-panel svg { max-height: 38dvh; width: auto; max-width: 100%; margin: 0 auto; display: block; }
+  body[data-mode="slides"] .why-note { font-size: 17px; padding: 16px 24px; }
+  body[data-mode="slides"] .why-note h4 { font-size: 21px; }
+  body[data-mode="slides"] .cases { gap: 18px; grid-template-columns: 1fr 1fr; }
+  body[data-mode="slides"] .case { padding: 22px 26px; }
+  body[data-mode="slides"] .band-card { min-height: 205px; display: flex; flex-direction: column; justify-content: center; }
+  body[data-mode="slides"] .case .scen { line-height: 1.66; }
+  body[data-mode="slides"] .band { gap: 18px; }
+  body[data-mode="slides"] .band-card { padding: 24px 26px; }
+  body[data-mode="slides"] .gh-card { padding: 22px 30px; }
+  body[data-mode="slides"] .gh-card b { font-size: 18px; }
+  body[data-mode="slides"] .gh-card span { font-size: 14.5px; }
+  body[data-mode="slides"] #arch-caption { font-size: 15.5px; }
+  body[data-mode="slides"] .arch-wrap svg { max-height: 56dvh; width: auto; max-width: 100%; margin: 0 auto; }
+  body[data-mode="slides"] #arch-detail { font-size: 17px; }
+  body[data-mode="slides"] .pipe-card .k { font-size: 17px; }
+  body[data-mode="slides"] .pipe-card .where { font-size: 14.5px; }
+  body[data-mode="slides"] .pipe-card p { font-size: 16px; }
+  body[data-mode="slides"] .curated { font-size: 17.5px; }
+  body[data-mode="slides"] .retrv h3 { font-size: 22px; }
+  body[data-mode="slides"] .retrv .rsub { font-size: 15.5px; }
+  body[data-mode="slides"] .rcol p { font-size: 15px; }
+  body[data-mode="slides"] .case b { font-size: 20px; }
+  body[data-mode="slides"] .case .gist { font-size: 15.5px; }
+  body[data-mode="slides"] .case .scen { font-size: 16px; }
+  body[data-mode="slides"] .band-card .num { font-size: 38px; }
+  body[data-mode="slides"] .band-card.hero-stat .num { font-size: clamp(56px, 5vw, 84px); }
+  body[data-mode="slides"] .band-card .what { font-size: 16px; line-height: 1.64; }
+  body[data-mode="slides"] .band-card.hero-stat .what { font-size: 17.5px; }
+  body[data-mode="slides"] .run { display: none; }
+  body[data-mode="slides"] .gh-row { margin-top: 22px; }
   #hud {
     display: none;
     position: fixed; left: 0; right: 0; bottom: 10px; z-index: 40;
@@ -2999,12 +3243,11 @@ _HOME_PAGE = """<!doctype html>
   @media (max-width: 760px) {
     main { padding: 44px 20px 64px; }
     .slide { margin-top: 72px; }
-    .why-grid, .pipe, .band, .split, .cases, .run { grid-template-columns: 1fr; }
+    .why-grid, .pipe, .band, .cases, .run, .retrv-cols { grid-template-columns: 1fr; }
     .band-card.hero-stat, .band-card.wide { grid-column: auto; }
     .pipe-card::after { display: none; }
-    .net text { font-size: 17px; }
-    .net text.sub2 { display: none; }
-    .aha { padding: 24px 20px; }
+    .net text { font-size: 18px; }
+    .net text.sub2, .net text.sub3 { display: none; }
   }
   @media (prefers-reduced-motion: reduce) {
     html { scroll-behavior: auto; }
@@ -3084,12 +3327,15 @@ _HOME_PAGE = """<!doctype html>
         <circle class="impulse back" id="ax3-ret" r="3.2"/>
         <circle class="impulse back" id="ax4-ret" r="3.2"/>
 
-        <text x="155" y="48" text-anchor="middle">sid · claude-code</text>
-        <text x="155" y="66" text-anchor="middle" class="sub2">agent + edge worker · NPU</text>
-        <text x="130" y="262" text-anchor="middle">aditya · claude-code</text>
-        <text x="130" y="280" text-anchor="middle" class="sub2">agent + edge worker · NPU</text>
-        <text x="155" y="387" text-anchor="middle">akhil · codex</text>
-        <text x="155" y="405" text-anchor="middle" class="sub2">agent + edge worker · NPU</text>
+        <text x="155" y="30" text-anchor="middle">sid · claude-code</text>
+        <text x="155" y="50" text-anchor="middle" class="sub2">agent + edge worker</text>
+        <text x="155" y="68" text-anchor="middle" class="sub3">Qwen3-4B · Hexagon NPU</text>
+        <text x="130" y="260" text-anchor="middle">aditya · claude-code</text>
+        <text x="130" y="280" text-anchor="middle" class="sub2">agent + edge worker</text>
+        <text x="130" y="298" text-anchor="middle" class="sub3">Qwen3-4B · Hexagon NPU</text>
+        <text x="155" y="373" text-anchor="middle">akhil · codex</text>
+        <text x="155" y="393" text-anchor="middle" class="sub2">agent + edge worker</text>
+        <text x="155" y="411" text-anchor="middle" class="sub2">Claude Haiku · Anthropic API</text>
 
         <text x="600" y="268" text-anchor="middle" class="core-label">SYNAPSE SERVICE</text>
         <text x="600" y="288" text-anchor="middle" class="sub2">one shared memory · curated</text>
@@ -3101,11 +3347,11 @@ _HOME_PAGE = """<!doctype html>
   <section class="slide s-why" data-reveal id="s-why">
     <span class="slide-eyebrow">The problem</span>
     <h2>Every agent is brilliant. Every team is blind.</h2>
-    <p class="sub">every engineer has a coding agent; no agent can see what another session already learned, decided, or ruled out</p>
+    <p class="sub">Every engineer has a coding agent. No agent can see what another session already learned, decided, or ruled out.</p>
     <div class="why-grid">
       <div class="why-panel bad">
         <h3>Without Synapse</h3>
-        <p class="cap">three agents, three explorations, the same dead end · sharing is a human copy-paste</p>
+        <p class="cap">Three agents, three explorations, the same dead end. Sharing is a human copy-paste.</p>
         <svg viewBox="0 0 560 330" aria-label="three agents independently explore to the same dead end while a human relays notes manually">
           <path class="wire" id="wx-p1" d="M70 70 C 180 40, 320 80, 448 138"/>
           <path class="wire" id="wx-p2" d="M70 165 C 190 150, 330 155, 446 158"/>
@@ -3128,7 +3374,7 @@ _HOME_PAGE = """<!doctype html>
       </div>
       <div class="why-panel good">
         <h3>With Synapse</h3>
-        <p class="cap">one exploration lands once · the curated memory tells everyone else</p>
+        <p class="cap">One exploration lands once. The curated memory tells everyone else.</p>
         <svg viewBox="0 0 560 330" aria-label="one agent finds the dead end, the finding lands in the shared curated memory, and the other agents know instantly">
           <path class="wire" id="ww-p1" d="M70 70 C 170 36, 330 50, 452 96"/>
           <path class="wire hot" id="ww-f1" d="M70 70 C 150 120, 250 160, 342 178"/>
@@ -3154,103 +3400,157 @@ _HOME_PAGE = """<!doctype html>
         </svg>
       </div>
     </div>
-    <p class="why-note scroll-only">A systems engineer writes MATLAB; a software engineer ports it to C++. Every bug found on one side needs a manual message before the other's agent knows. <b>Synapse removes the relay step.</b> It's like joining the same Google Doc: real-time shared context, but for coding agents. Save time: never re-research what a teammate's agent already found. Save tokens: never re-run the same exploration twice.</p>
+    <div class="why-note">
+      <span class="ex-tag">Example</span>
+      <h4>MATLAB on one desk, C++ on the other</h4>
+      <p>A systems engineer writes MATLAB; a software engineer ports it to C++. Every bug found on one side needs a manual message before the other's agent knows. <b>Synapse removes the relay step.</b> It's like joining the same Google Doc: real-time shared context, but for coding agents. Save time: never re-research what a teammate's agent already found. Save tokens: never re-run the same exploration twice.</p>
+    </div>
   </section>
 
   <section class="slide s-arch" data-reveal id="s-arch">
     <span class="slide-eyebrow">Architecture</span>
     <h2>End to end: edge, service, cloud.</h2>
-    <p class="sub">the whole workflow on one diagram; flip the switch to see what the same seams allow beyond the demo</p>
+    <p class="sub">The whole workflow on one diagram. Flip the switch to see what the same seams allow, and click any service stage to unpack it.</p>
     <div class="arch-top">
       <div class="seg" role="group" aria-label="architecture view">
         <button id="arch-today" type="button" aria-pressed="true">Running today</button>
         <button id="arch-allows" type="button" aria-pressed="false">What it allows</button>
       </div>
-      <p id="arch-caption">Three edge workers distil on the Hexagon NPU; one service folds findings into a curated working memory; synthesis runs on Cloud AI 100.</p>
+      <p id="arch-caption">Running now: sid and aditya distil with Qwen3-4B on the Hexagon NPU, akhil runs the same worker on Claude Haiku through the Anthropic API, and synthesis runs Llama-3.3-70B on Cloud AI 100.</p>
     </div>
     <div class="arch-wrap">
       <div class="arch" id="arch" data-view="today">
-      <svg viewBox="0 0 1240 480">
-        <rect class="box dev" x="30" y="30" width="264" height="88" rx="10"/>
-        <text x="52" y="63">sid · coding agent</text>
-        <text class="t-sub" x="52" y="84">edge worker · Hexagon NPU · distil</text>
-        <rect class="box dev" x="30" y="140" width="264" height="88" rx="10"/>
-        <text x="52" y="173">aditya · coding agent</text>
-        <text class="t-sub" x="52" y="194">edge worker · Hexagon NPU · distil</text>
-        <rect class="box dev" x="30" y="250" width="264" height="88" rx="10"/>
-        <text x="52" y="283">akhil · coding agent</text>
-        <text class="t-sub" x="52" y="304">edge worker · Hexagon NPU · distil</text>
+      <svg viewBox="0 0 1240 620">
+        <rect class="box dev" x="20" y="24" width="348" height="150" rx="12"/>
+        <text x="40" y="52">sid</text>
+        <text class="t-faint" x="70" y="52">· Snapdragon X Elite</text>
+        <rect class="mini" x="38" y="66" width="312" height="28" rx="7"/>
+        <text class="t-sub" x="50" y="85">Claude Code agent</text>
+        <path class="ah" stroke="var(--green)" d="M328 88 v10 m0 -10 l-4 4 m4 -4 l4 4 m-4 6 l-4 -4 m4 4 l4 -4"/>
+        <rect class="mini" x="38" y="100" width="312" height="28" rx="7"/>
+        <text class="t-sub" x="50" y="119">Synapse MCP · orchestrator</text>
+        <rect class="mini prov" x="38" y="134" width="312" height="28" rx="7"/>
+        <text class="t-sub" x="50" y="153">worker → GenieX · <tspan class="t-copper">Qwen3-4B on Hexagon NPU</tspan></text>
+
+        <rect class="box dev" x="20" y="190" width="348" height="150" rx="12"/>
+        <text x="40" y="218">aditya</text>
+        <text class="t-faint" x="98" y="218">· Snapdragon X Elite</text>
+        <rect class="mini" x="38" y="232" width="312" height="28" rx="7"/>
+        <text class="t-sub" x="50" y="251">Claude Code agent</text>
+        <path class="ah" stroke="var(--green)" d="M328 254 v10 m0 -10 l-4 4 m4 -4 l4 4 m-4 6 l-4 -4 m4 4 l4 -4"/>
+        <rect class="mini" x="38" y="266" width="312" height="28" rx="7"/>
+        <text class="t-sub" x="50" y="285">Synapse MCP · orchestrator</text>
+        <rect class="mini prov" x="38" y="300" width="312" height="28" rx="7"/>
+        <text class="t-sub" x="50" y="319">worker → GenieX · <tspan class="t-copper">Qwen3-4B on Hexagon NPU</tspan></text>
+
+        <rect class="box dev" x="20" y="356" width="348" height="150" rx="12"/>
+        <text x="40" y="384">akhil</text>
+        <text class="t-faint" x="90" y="384">· any laptop, no NPU</text>
+        <rect class="mini" x="38" y="398" width="312" height="28" rx="7"/>
+        <text class="t-sub" x="50" y="417">Codex agent</text>
+        <path class="ah" stroke="var(--green)" d="M328 420 v10 m0 -10 l-4 4 m4 -4 l4 4 m-4 6 l-4 -4 m4 4 l4 -4"/>
+        <rect class="mini" x="38" y="432" width="312" height="28" rx="7"/>
+        <text class="t-sub" x="50" y="451">Synapse MCP · orchestrator</text>
+        <rect class="mini prov-alt" x="38" y="466" width="312" height="28" rx="7"/>
+        <text class="t-sub" x="50" y="485">worker → Anthropic API · Claude Haiku</text>
+
         <g class="g-allows">
-          <rect class="box dev ghost" x="30" y="360" width="264" height="66" rx="10"/>
-          <text class="t-sub" x="52" y="388">+ any teammate's machine</text>
-          <text class="t-sub" x="52" y="408">any OS · no NPU required</text>
+          <rect class="box dev ghost" x="20" y="516" width="348" height="34" rx="10"/>
+          <text class="t-faint" x="40" y="538">+ any teammate's machine · any OS · any provider</text>
         </g>
 
-        <path class="flow in" d="M294 74 C 360 74, 380 120, 430 150"/>
-        <path class="flow in" d="M294 184 C 340 184, 380 184, 430 184"/>
-        <path class="flow in" d="M294 294 C 360 294, 380 250, 430 218"/>
-        <path class="ah" stroke="var(--copper)" d="M430 184 l-9 -5 m9 5 l-9 5"/>
-        <text class="t-copper t-mono" x="352" y="152" text-anchor="middle">findings</text>
-        <path class="flow out" d="M430 246 C 380 280, 350 320, 294 322"/>
-        <text class="t-green t-mono" x="372" y="316" text-anchor="middle">answers</text>
+        <path class="flow in" d="M368 148 C 415 148, 425 190, 462 220"/>
+        <path class="flow in" d="M368 314 C 410 314, 425 300, 462 280"/>
+        <path class="flow in" d="M368 480 C 425 480, 432 400, 464 330"/>
+        <path class="ah" stroke="var(--copper)" d="M462 280 l-10 -4 m10 4 l-10 6"/>
+        <text class="t-copper t-mono" x="412" y="258" text-anchor="middle">findings</text>
+        <path class="flow out" d="M462 118 C 425 102, 405 108, 370 112"/>
+        <path class="flow out" d="M464 152 C 432 200, 415 240, 370 246"/>
+        <text class="t-green t-mono" x="410" y="96" text-anchor="middle">ask · answers</text>
 
-        <rect class="box svc" x="432" y="86" width="300" height="236" rx="12"/>
-        <text class="t-cyan t-mono" x="582" y="118" text-anchor="middle" style="letter-spacing:0.12em">SYNAPSE SERVICE</text>
-        <rect class="lane" x="456" y="136" width="252" height="34" rx="7"/>
-        <text class="t-sub" x="468" y="158">session log · append-only</text>
-        <rect class="lane" x="456" y="178" width="252" height="34" rx="7"/>
-        <text class="t-sub" x="468" y="200">the fold · deterministic triage</text>
-        <rect class="lane" x="456" y="220" width="252" height="34" rx="7"/>
-        <text class="t-sub" x="468" y="242">working memory · curated</text>
-        <rect class="lane" x="456" y="262" width="252" height="34" rx="7"/>
-        <text class="t-sub" x="468" y="284">MCP retrieval · pull-only</text>
+        <rect class="box svc" x="466" y="40" width="330" height="466" rx="14"/>
+        <text class="t-cyan t-mono" x="631" y="72" text-anchor="middle" style="letter-spacing:0.12em;font-size:15px">SYNAPSE SERVICE</text>
+        <g class="lane-g" data-lane="log" tabindex="0">
+          <rect x="486" y="90" width="290" height="66" rx="8"/>
+          <path class="lic" d="M502 112 h18 M502 120 h18 M502 128 h12"/>
+          <text x="532" y="118">Session log</text>
+          <text class="t-faint" x="532" y="140">append-only · provenance kept</text>
+        </g>
+        <g class="lane-g" data-lane="fold" tabindex="0">
+          <rect x="486" y="164" width="290" height="66" rx="8"/>
+          <path class="lic" d="M502 186 h20 l-7 9 v9 h-6 v-9 z"/>
+          <text x="532" y="192">The fold · triage</text>
+          <text class="t-faint" x="532" y="214">deterministic view · no LLM</text>
+        </g>
+        <g class="lane-g" data-lane="retrieve" tabindex="0">
+          <rect x="486" y="238" width="290" height="66" rx="8"/>
+          <circle class="lic" cx="510" cy="264" r="7"/>
+          <path class="lic" d="M515 269 l8 8"/>
+          <text x="532" y="266">Retrieval</text>
+          <text class="t-faint" x="532" y="288">embeddings · ranked · suppression-aware</text>
+        </g>
+        <g class="lane-g" data-lane="synth" tabindex="0">
+          <rect x="486" y="312" width="290" height="66" rx="8"/>
+          <path class="lic" d="M502 350 c8 0 8 -12 16 -12 M502 338 c8 0 8 12 16 12 M514 334 l4 4 l-4 4 M514 346 l4 4 l-4 4"/>
+          <text x="532" y="340">Synthesis scheduler</text>
+          <text class="t-faint" x="532" y="362">debounced · spend-governed</text>
+        </g>
+        <g class="lane-g" data-lane="memory" tabindex="0">
+          <rect x="486" y="386" width="290" height="66" rx="8"/>
+          <path class="lic" d="M503 410 l8 -5 l8 5 l-8 5 z M503 418 l8 5 l8 -5"/>
+          <text x="532" y="414">Working memory</text>
+          <text class="t-faint" x="532" y="436">curated · versioned · attributed</text>
+        </g>
+        <text class="t-faint" x="631" y="484" text-anchor="middle">every route GET-only · raw transcripts never arrive</text>
 
-        <path class="flow syn" d="M732 168 C 800 168, 830 168, 896 168"/>
-        <path class="ah" stroke="var(--cyan)" d="M896 168 l-9 -5 m9 5 l-9 5"/>
-        <path class="flow syn" d="M896 226 C 830 226, 800 226, 732 226"/>
-        <path class="ah" stroke="var(--cyan)" d="M732 226 l9 -5 m-9 5 l9 5"/>
-        <text class="t-cyan t-mono" x="814" y="152" text-anchor="middle">merge round</text>
-        <text class="t-cyan t-mono" x="814" y="252" text-anchor="middle">rewritten memory</text>
+        <path class="flow syn" d="M796 210 C 850 210, 860 210, 902 210"/>
+        <path class="ah" stroke="var(--cyan)" d="M902 210 l-10 -5 m10 5 l-10 5"/>
+        <path class="flow syn" d="M902 300 C 860 300, 850 300, 796 300"/>
+        <path class="ah" stroke="var(--cyan)" d="M796 300 l10 -5 m-10 5 l10 5"/>
+        <text class="t-cyan t-mono" x="830" y="190" text-anchor="middle">merge round</text>
+        <text class="t-cyan t-mono" x="828" y="336" text-anchor="middle">rewritten memory</text>
 
-        <rect class="box cld" x="898" y="118" width="312" height="158" rx="12"/>
-        <text class="t-cyan t-mono" x="1054" y="150" text-anchor="middle" style="letter-spacing:0.1em">CLOUD AI 100</text>
-        <text x="1054" y="180" text-anchor="middle">Llama-3.3-70B synthesis</text>
-        <text class="t-sub" x="1054" y="204" text-anchor="middle">dedup · conflicts · lineage</text>
-        <text class="t-sub" x="1054" y="224" text-anchor="middle">the curator of the shared memory</text>
+        <rect class="box cld" x="904" y="150" width="316" height="210" rx="14"/>
+        <text class="t-cyan t-mono" x="1062" y="184" text-anchor="middle" style="letter-spacing:0.1em;font-size:15px">CLOUD AI 100</text>
+        <text x="1062" y="216" text-anchor="middle">Llama-3.3-70B · synthesis</text>
+        <text class="t-sub" x="1062" y="242" text-anchor="middle">dedup · conflicts · lineage</text>
+        <text class="t-sub" x="1062" y="264" text-anchor="middle">the curator of the shared memory</text>
         <g class="g-allows">
-          <text class="t-sub" x="1054" y="254" text-anchor="middle">or any provider below · or nothing at all</text>
+          <text class="t-faint" x="1062" y="296" text-anchor="middle">swappable: any provider below,</text>
+        <text class="t-faint" x="1062" y="316" text-anchor="middle">up to a frontier model</text>
         </g>
 
         <g class="plug plug-live">
-          <rect class="plug-node" x="120" y="443" width="176" height="30" rx="8"/>
-          <text class="plug-t" x="208" y="462" text-anchor="middle">NPU · GenieX</text>
+          <rect class="plug-node" x="60" y="576" width="200" height="34" rx="9"/>
+          <text class="plug-t" x="160" y="598" text-anchor="middle">NPU · GenieX · Qwen3-4B</text>
         </g>
         <g class="plug plug-live">
-          <rect class="plug-node" x="316" y="443" width="176" height="30" rx="8"/>
-          <text class="plug-t" x="404" y="462" text-anchor="middle">Cloud AI 100</text>
+          <rect class="plug-node" x="280" y="576" width="200" height="34" rx="9"/>
+          <text class="plug-t" x="380" y="598" text-anchor="middle">Cloud AI 100 · 70B</text>
+        </g>
+        <g class="plug plug-live">
+          <rect class="plug-node" x="500" y="576" width="200" height="34" rx="9"/>
+          <text class="plug-t" x="600" y="598" text-anchor="middle">Anthropic API</text>
         </g>
         <g class="plug plug-any">
-          <rect class="plug-node" x="512" y="443" width="176" height="30" rx="8"/>
-          <text class="plug-t" x="600" y="462" text-anchor="middle">Anthropic API</text>
+          <rect class="plug-node" x="720" y="576" width="200" height="34" rx="9"/>
+          <text class="plug-t" x="820" y="598" text-anchor="middle">Claude CLI</text>
         </g>
         <g class="plug plug-any">
-          <rect class="plug-node" x="708" y="443" width="176" height="30" rx="8"/>
-          <text class="plug-t" x="796" y="462" text-anchor="middle">Claude CLI</text>
+          <rect class="plug-node" x="940" y="576" width="200" height="34" rx="9"/>
+          <text class="plug-t" x="1040" y="598" text-anchor="middle">offline stand-in</text>
         </g>
-        <g class="plug plug-any">
-          <rect class="plug-node" x="904" y="443" width="176" height="30" rx="8"/>
-          <text class="plug-t" x="992" y="462" text-anchor="middle">offline stand-in</text>
-        </g>
-        <text class="t-sub" x="30" y="464">provider seam</text>
+        <text class="t-sub" x="510" y="564">Provider seam: one interface, five plugs</text>
       </svg>
       </div>
     </div>
+    <p id="arch-detail">Click a service stage above to see the work it does. <b>Retrieval</b> and <b>the fold</b> never wake a model; <b>synthesis</b> is the only stage that spends.</p>
   </section>
 
   <section class="slide s-pipe" data-reveal id="s-pipe">
-    <span class="slide-eyebrow">The pipeline</span>
+    <span class="slide-eyebrow">Inside the service</span>
     <h2>From raw work to curated memory.</h2>
-    <p class="sub">four stages and the silicon each one runs on; the log page tails every stage live</p>
+    <p class="sub">Four stages, and the silicon each one runs on. The Log page tails every stage live.</p>
     <div class="pipe">
       <div class="pipe-card">
         <div class="k">TRIAGE</div>
@@ -3259,36 +3559,36 @@ _HOME_PAGE = """<!doctype html>
       </div>
       <div class="pipe-card">
         <div class="k">DISTIL</div>
-        <div class="where">edge · Hexagon NPU</div>
+        <div class="where">Qwen3-4B on the <em class="hw hw-npu">Hexagon NPU</em></div>
         <p>A small local model compresses raw work into structured Findings: learnings, decisions, dead ends, open questions. Raw transcripts never leave the device.</p>
       </div>
       <div class="pipe-card">
         <div class="k">SYNTHESIZE</div>
-        <div class="where">cloud · 70B on AI 100</div>
+        <div class="where">Llama-3.3-70B on <em class="hw hw-ai100">Cloud AI 100</em></div>
         <p>A large model folds everyone's findings into one working memory: dedup, conflicts, lineage. Two people reaching the same insight become one Finding with both names on it.</p>
       </div>
       <div class="pipe-card">
         <div class="k">RETRIEVE</div>
-        <div class="where">MCP · pull-only</div>
+        <div class="where">MCP · pull-only · no LLM</div>
         <p>Agents ask in natural language and get suppression-aware answers with attribution. Nothing is injected unprompted.</p>
       </div>
     </div>
     <p class="curated"><b>Curated, not accumulated.</b> The shared memory is not a dump of everything everyone said: synthesis merges duplicates into one finding, resolves conflicts, demotes the trivial, and keeps every author's name on the lineage. Findings are queryable the instant they land; curation catches up behind them inside natural human think-time.</p>
-    <div class="split">
-      <div class="split-card">
-        <span class="sic"><svg viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="11.5" rx="1.6"/><path d="M8 20h8M12 16.5V20"/><path d="M8.5 9.2h4M8.5 12h7"/></svg></span>
-        <div>
-          <h3>Edge</h3>
-          <div class="where">Snapdragon X Elite · Hexagon NPU · GenieX</div>
-          <p>4B-class models run locally, already optimized for the NPU. Your raw work never leaves the device, and the compile/test loop keeps the CPU and GPU to itself.</p>
+    <div class="retrv">
+      <h3>Retrieval is ranked, and it never wakes a model.</h3>
+      <p class="rsub">The query path is deterministic end to end, which is why answers are instant and free.</p>
+      <div class="retrv-cols">
+        <div class="rcol">
+          <div class="rk">LANES</div>
+          <p>Candidates gather from two lanes: the curated working memory and the long-term finding store, so a fresh decision and an old dead end compete on equal terms.</p>
         </div>
-      </div>
-      <div class="split-card cloud">
-        <span class="sic"><svg viewBox="0 0 24 24"><path d="M7 17.5a4 4 0 0 1-.6-7.96A5.5 5.5 0 0 1 17 8.6a3.8 3.8 0 0 1 .4 7.55z"/><path d="M8.5 13.2h7M8.5 15.4h4.5"/></svg></span>
-        <div>
-          <h3>Cloud</h3>
-          <div class="where">Llama-3.3-70B · Cloud AI 100</div>
-          <p>Cross-team synthesis where the big model earns its cost: semantic dedup, conflict detection, and one bounded working memory rewritten per merge.</p>
+        <div class="rcol">
+          <div class="rk">RANK</div>
+          <p>Embedding similarity does the ordering, with recency in the mix. Same query, same ranking, every time: no sampling, no drift.</p>
+        </div>
+        <div class="rcol">
+          <div class="rk">FILTER</div>
+          <p>Suppression-aware delivery: an asker never gets their own contribution echoed back, and every answer arrives with its authors attached.</p>
         </div>
       </div>
     </div>
@@ -3297,26 +3597,39 @@ _HOME_PAGE = """<!doctype html>
   <section class="slide s-cases" data-reveal id="s-cases">
     <span class="slide-eyebrow">In practice</span>
     <h2>What you'd use it for</h2>
-    <p class="sub">the same memory, six shapes of team</p>
+    <p class="sub">The same memory, six shapes of team. Each card is a moment where the memory pays for itself.</p>
     <div class="cases">
-      <div class="case"><span class="cic"><svg viewBox="0 0 24 24"><circle cx="12" cy="13" r="4.5"/><path d="M12 8.5V6.2M9 7l1.4 1.7M15 7l-1.4 1.7M4.5 13h3M16.5 13h3M6 18l2.1-1.8M18 18l-2.1-1.8M6 8.5l2.2 1.5M18 8.5l-2.2 1.5"/></svg></span><div><b>Debugging together</b><span>one teammate's dead end is everyone's dead end</span></div></div>
-      <div class="case"><span class="cic"><svg viewBox="0 0 24 24"><circle cx="6.5" cy="6" r="2.2"/><circle cx="6.5" cy="18" r="2.2"/><circle cx="17.5" cy="9.5" r="2.2"/><path d="M6.5 8.2v7.6M6.5 12c0-2.6 4.4-2.2 8.8-2.4"/></svg></span><div><b>Feature work</b><span>parallel building without parallel re-discovery</span></div></div>
-      <div class="case"><span class="cic"><svg viewBox="0 0 24 24"><path d="M12 3.5a5.7 5.7 0 0 0-3.2 10.4c.7.5 1.2 1.6 1.2 2.6h4c0-1 .5-2.1 1.2-2.6A5.7 5.7 0 0 0 12 3.5z"/><path d="M10 19.2h4M10.7 21.2h2.6"/></svg></span><div><b>Design and brainstorming</b><span>decisions propagate the moment they're made</span></div></div>
-      <div class="case"><span class="cic"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="1.8"/><path d="M8.5 15.5a5 5 0 0 1 0-7M15.5 8.5a5 5 0 0 1 0 7M6 18a8 8 0 0 1 0-12M18 6a8 8 0 0 1 0 12"/></svg></span><div><b>Status sharing</b><span>your agent already knows what the team did today</span></div></div>
-      <div class="case"><span class="cic"><svg viewBox="0 0 24 24"><path d="M9.5 3.5h5M10.5 3.5v5.2L5.6 17a2.6 2.6 0 0 0 2.3 3.9h8.2A2.6 2.6 0 0 0 18.4 17l-4.9-8.3V3.5"/><path d="M8 14.5h8"/></svg></span><div><b>Lab and dev</b><span>on-target context meets code context in one memory</span></div></div>
-      <div class="case"><span class="cic"><svg viewBox="0 0 24 24"><path d="M4 9h13M14 5.5L17.5 9 14 12.5"/><path d="M20 15H7M10 11.5L6.5 15l3.5 3.5"/></svg></span><div><b>Asymmetric teammates</b><span>MATLAB author and C++ porter, no manual relay</span></div></div>
-    </div>
-    <div class="aha">
-      <p class="setup">A teammate joins late. Their agent is briefed on arrival. They start their own task, and before doing any work, their agent says:</p>
-      <p class="quote"><span class="said">"Sid already ruled this out."</span></p>
-      <p class="receipt">In live rehearsal the system merged two contributors' findings into one, unscripted. That merge is on the Memory page of this dashboard right now, struck-through sources and all.</p>
+      <div class="case c-red">
+        <div class="case-head"><span class="cic"><svg viewBox="0 0 24 24"><circle cx="12" cy="13" r="4.5"/><path d="M12 8.5V6.2M9 7l1.4 1.7M15 7l-1.4 1.7M4.5 13h3M16.5 13h3M6 18l2.1-1.8M18 18l-2.1-1.8M6 8.5l2.2 1.5M18 8.5l-2.2 1.5"/></svg></span><div><b>Debugging together</b><span class="gist">One teammate's dead end is everyone's dead end.</span></div></div>
+        <p class="scen"><b>Sid</b> rules out a DMA race at 2pm. At 4pm <b>Akhil's</b> agent proposes the same theory, asks the memory first, and gets Sid's dead end back before opening a single file.</p>
+      </div>
+      <div class="case c-blue">
+        <div class="case-head"><span class="cic"><svg viewBox="0 0 24 24"><circle cx="6.5" cy="6" r="2.2"/><circle cx="6.5" cy="18" r="2.2"/><circle cx="17.5" cy="9.5" r="2.2"/><path d="M6.5 8.2v7.6M6.5 12c0-2.6 4.4-2.2 8.8-2.4"/></svg></span><div><b>Feature work</b><span class="gist">Parallel building without parallel re-discovery.</span></div></div>
+        <p class="scen"><b>Aditya</b> builds the parser while <b>Akhil</b> builds the CLI. The flag-name decision Aditya makes lands in the memory; Akhil's agent uses the same name without being told.</p>
+      </div>
+      <div class="case c-purple">
+        <div class="case-head"><span class="cic"><svg viewBox="0 0 24 24"><path d="M12 3.5a5.7 5.7 0 0 0-3.2 10.4c.7.5 1.2 1.6 1.2 2.6h4c0-1 .5-2.1 1.2-2.6A5.7 5.7 0 0 0 12 3.5z"/><path d="M10 19.2h4M10.7 21.2h2.6"/></svg></span><div><b>Design and brainstorming</b><span class="gist">Decisions propagate the moment they're made.</span></div></div>
+        <p class="scen">The team debates cache eviction in the morning. By afternoon every agent answers "what did we decide about eviction" with the decision, and with who decided it.</p>
+      </div>
+      <div class="case c-cyan">
+        <div class="case-head"><span class="cic"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="1.8"/><path d="M8.5 15.5a5 5 0 0 1 0-7M15.5 8.5a5 5 0 0 1 0 7M6 18a8 8 0 0 1 0-12M18 6a8 8 0 0 1 0 12"/></svg></span><div><b>Status sharing</b><span class="gist">Your agent already knows what the team did today.</span></div></div>
+        <p class="scen">"What happened with the flaky auth test?" is answered by the agent from the memory, with attribution, instead of by scrolling a chat thread for ten minutes.</p>
+      </div>
+      <div class="case c-amber">
+        <div class="case-head"><span class="cic"><svg viewBox="0 0 24 24"><path d="M9.5 3.5h5M10.5 3.5v5.2L5.6 17a2.6 2.6 0 0 0 2.3 3.9h8.2A2.6 2.6 0 0 0 18.4 17l-4.9-8.3V3.5"/><path d="M8 14.5h8"/></svg></span><div><b>Lab and dev</b><span class="gist">On-target context meets code context in one memory.</span></div></div>
+        <p class="scen"><b>Akhil</b> captures a crash signature on the bench rig; <b>Sid's</b> code-side stack trace lands the same hour. The join between them happens at query time, in one memory.</p>
+      </div>
+      <div class="case c-green">
+        <div class="case-head"><span class="cic"><svg viewBox="0 0 24 24"><path d="M4 9h13M14 5.5L17.5 9 14 12.5"/><path d="M20 15H7M10 11.5L6.5 15l3.5 3.5"/></svg></span><div><b>Asymmetric teammates</b><span class="gist">MATLAB author and C++ porter, no manual relay.</span></div></div>
+        <p class="scen">The MATLAB author fixes an off-by-one in the filter. The C++ porter's agent flags the same loop in the port before the bug ships twice.</p>
+      </div>
     </div>
   </section>
 
   <section class="slide s-proof" data-reveal id="s-proof">
-    <span class="slide-eyebrow">Proof and a prompt</span>
-    <h2>Measured, not claimed. Running in one command.</h2>
-    <p class="sub">our own numbers, from our own Snapdragon X Elite; nothing below is a projection</p>
+    <span class="slide-eyebrow">Proof</span>
+    <h2>Measured, not claimed.</h2>
+    <p class="sub">Our own numbers, from our own Snapdragon X Elite. Nothing below is a projection.</p>
     <div class="band">
       <div class="band-card hero-stat">
         <div class="num"><span class="cu" data-n="0.1" data-dec="1">0.1</span><small>% variance</small></div>
@@ -3336,7 +3649,7 @@ _HOME_PAGE = """<!doctype html>
       </div>
     </div>
     <p class="band-note scroll-only"><b>Power draw itself is unmeasured, and we say so.</b> The efficiency story we stand on is the one we measured: always-on work moved off your CPU and GPU onto the NPU, the silicon built for it, with a decode rate steady to one part in a thousand. No number on this page is nicer-sounding than the truth.</p>
-    <div class="run">
+    <div class="run scroll-only">
       <div class="term">
         <div><span class="p">$</span> git clone … &amp;&amp; uv sync</div>
         <div><span class="p">$</span> uv run python scripts/serve_local.py --purpose "fix the flaky auth test"</div>
@@ -3346,17 +3659,19 @@ _HOME_PAGE = """<!doctype html>
         <div class="providers">
           <h3>Five providers, one seam</h3>
           <p class="phead">Every model call goes through one interface. No NPU? No cloud key? It still runs, end to end, on any machine.</p>
-          <div class="prov-row live"><span>NPU · GenieX</span><span class="st">live now</span></div>
-          <div class="prov-row live"><span>Cloud AI 100</span><span class="st">live now</span></div>
-          <div class="prov-row"><span>Anthropic API</span><span class="st">plugs in</span></div>
+          <div class="prov-row live"><span>NPU · GenieX · Qwen3-4B</span><span class="st">live now</span></div>
+          <div class="prov-row live"><span>Cloud AI 100 · Llama-3.3-70B</span><span class="st">live now</span></div>
+          <div class="prov-row live"><span>Anthropic API · Claude Haiku</span><span class="st">live now</span></div>
           <div class="prov-row"><span>Claude CLI</span><span class="st">plugs in</span></div>
           <div class="prov-row"><span>offline stand-in</span><span class="st">plugs in</span></div>
         </div>
-        <a class="gh-card" id="gh-link2" href="#">
-          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
-          <div><b>Read the code</b><span>github.com/SinghSiddharth01/Synapse</span></div>
-        </a>
       </div>
+    </div>
+    <div class="gh-row">
+      <a class="gh-card" id="gh-link2" href="#">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+        <div><b>Read the code</b><span>github.com/SinghSiddharth01/Synapse</span></div>
+      </a>
     </div>
   </section>
 
@@ -3482,8 +3797,8 @@ _HOME_PAGE = """<!doctype html>
   var archAllows = document.getElementById("arch-allows");
   var archCaption = document.getElementById("arch-caption");
   var ARCH_TEXT = {
-    today: "Three edge workers distil on the Hexagon NPU; one service folds findings into a curated working memory; synthesis runs on Cloud AI 100.",
-    allows: "The same seams with nothing swapped out: any machine joins with no NPU, any of the five providers plugs into the one interface, and the pipeline still runs end to end, even fully offline."
+    today: "Running now: sid and aditya distil with Qwen3-4B on the Hexagon NPU, akhil runs the same worker on Claude Haiku through the Anthropic API, and synthesis runs Llama-3.3-70B on Cloud AI 100.",
+    allows: "Every module is swappable: any agent, any worker provider (GenieX NPU, Anthropic API, Claude CLI, offline stand-in), and any synthesis backend up to a frontier model. The pipeline runs end to end on any machine, even fully offline."
   };
   function setArch(view) {
     if (!arch) return;
@@ -3494,6 +3809,31 @@ _HOME_PAGE = """<!doctype html>
   }
   if (archToday) archToday.addEventListener("click", function () { setArch("today"); });
   if (archAllows) archAllows.addEventListener("click", function () { setArch("allows"); });
+
+  // ── the five service stages: click to unpack ──
+  var LANE_TEXT = {
+    log: "Session log. Every finding lands in an append-only log first. Nothing is edited in place: the current view is always recomputed from history, so provenance is never lost, even across merges.",
+    fold: "The fold. Deterministic triage replays the log into the current view: visible, superseded, or trivial. No LLM in the loop, no token cost, and the same answer every time.",
+    retrieve: "Retrieval. Queries never wake a model: candidates gather from the working memory and long-term finding lanes, rank by embedding similarity with recency, and suppression filters out what the asker already knows.",
+    synth: "Synthesis scheduler. Merges are scheduled, not reflexive: debounced behind human think-time and spend-governed. Each round sends the fold to Llama-3.3-70B on Cloud AI 100 and lands one curated rewrite.",
+    memory: "Working memory. One bounded, versioned document. Curated, not accumulated: every merge keeps authors on the lineage, and superseded findings stay, struck through, pointing at what replaced them."
+  };
+  var archDetail = document.getElementById("arch-detail");
+  if (arch && archDetail) {
+    arch.addEventListener("click", function (ev) {
+      var lane = ev.target.closest ? ev.target.closest(".lane-g") : null;
+      if (!lane) return;
+      var key = lane.getAttribute("data-lane");
+      if (!key || !LANE_TEXT[key]) return;
+      if (arch.getAttribute("data-focus") === key) {
+        arch.removeAttribute("data-focus");
+        archDetail.innerHTML = "Click a service stage above to see the work it does. <b>Retrieval</b> and <b>the fold</b> never wake a model; <b>synthesis</b> is the only stage that spends.";
+        return;
+      }
+      arch.setAttribute("data-focus", key);
+      archDetail.textContent = LANE_TEXT[key];
+    });
+  }
 
   // ── count-ups: the measured numbers earn their reveal ──
   function countUp(el) {
@@ -3592,7 +3932,13 @@ _HOME_PAGE = """<!doctype html>
 
   function go(n, instant) {
     if (!slideMode) return;
-    cur = Math.max(0, Math.min(slides.length - 1, n));
+    // Wrap around: advancing past the last slide returns to the first, and
+    // backing up from the first lands on the last. A deck that dead-ends on
+    // its final slide re-renders it forever; a loop always has a way home.
+    var len = slides.length;
+    var next = ((n % len) + len) % len;
+    if (next === cur && !instant && slides[cur].classList.contains("on")) return;
+    cur = next;
     slides.forEach(function (s, i) { s.classList.toggle("on", i === cur); });
     var active = slides[cur];
     active.scrollTop = 0;
@@ -3635,6 +3981,17 @@ _HOME_PAGE = """<!doctype html>
   }
   function toggleSlides() { if (slideMode) exitSlides(); else enterSlides(); }
   if (presentBtn) presentBtn.addEventListener("click", toggleSlides);
+
+  // In slides mode the topbar auto-hides; it peeks back when the pointer
+  // approaches the top edge, so Exit and the theme toggle stay reachable.
+  var topbar = document.querySelector(".topbar");
+  if (topbar) {
+    document.addEventListener("mousemove", function (ev) {
+      if (!slideMode) return;
+      if (ev.clientY < 64) topbar.classList.add("peek");
+      else if (!topbar.matches(":hover")) topbar.classList.remove("peek");
+    });
+  }
 
   function toggleFullscreen() {
     try {
@@ -3776,7 +4133,7 @@ _HOME_PAGE = """<!doctype html>
 
 # ── the memory page: every finding, projected through the fold ─────────────
 _MEMORY_PAGE = """<!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -3821,6 +4178,32 @@ _MEMORY_PAGE = """<!doctype html>
     --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
     --mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
   }
+  :root[data-theme="light"] {
+    color-scheme: light;
+    --canvas: #ffffff;
+    --surface-1: #f5f6f8;
+    --surface-2: #eaecf0;
+    --surface-3: #dde0e6;
+    --hairline: rgba(11, 13, 18, 0.13);
+    --hairline-soft: rgba(11, 13, 18, 0.06);
+    --ink: #0b0d12;
+    --ink-muted: #4c515a;
+    --ink-subtle: #878c95;
+    --cyan: #0b9ba0;
+    --cyan-deep: #0d8f94;
+    --green: #008a63;
+    --amber: #8f6400;
+    --red: #d5271b;
+    --red-text: #c22318;
+    --purple: #6d34ae;
+    --purple-bright: #7d1bd0;
+    --purple-text: #6d34ae;
+    --blue: #1355c9;
+    --blue-text: #1a56c4;
+    --copper: #a85e1e;
+    --copper-dim: #c99a68;
+  }
+  :root[data-theme="light"] .stat.fold { box-shadow: none; }
   * { box-sizing: border-box; }
   body {
     margin: 0;
@@ -3890,6 +4273,22 @@ _MEMORY_PAGE = """<!doctype html>
   .tabs a:hover { color: var(--ink); background: var(--surface-2); }
   .tabs a[aria-current="page"] { color: var(--cyan); background: rgba(20, 198, 203, 0.12); }
   .tabs a:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+  .tool {
+    display: inline-flex; align-items: center; gap: 7px;
+    margin-left: auto;
+    padding: 6px 12px; border-radius: var(--radius-sm);
+    background: var(--surface-2); color: var(--ink);
+    border: 1px solid var(--hairline);
+    font: 600 12.5px var(--sans); cursor: pointer;
+    transition: background-color 130ms;
+  }
+  .tool:hover { background: var(--surface-3); }
+  .tool:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+  .tool svg { width: 15px; height: 15px; display: block; }
+  .tool .stroke-ic { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+  #theme-btn .ic-sun { display: none; }
+  :root[data-theme="light"] #theme-btn .ic-sun { display: block; }
+  :root[data-theme="light"] #theme-btn .ic-moon { display: none; }
   main { padding: 28px 32px 64px; }
   @media (max-width: 900px) {
     .shell { flex-direction: column; }
@@ -4033,6 +4432,7 @@ _MEMORY_PAGE = """<!doctype html>
     <a id="tab-log" href="/debug/log">Log</a>
     <a id="tab-memory" href="/debug/memory" aria-current="page">Memory</a>
   </nav>
+  <button class="tool" id="theme-btn" type="button" aria-label="toggle theme (T)"><svg class="ic-moon" viewBox="0 0 20 20" aria-hidden="true"><path class="stroke-ic" d="M16.5 12.2A7 7 0 0 1 7.8 3.5a7 7 0 1 0 8.7 8.7z"/></svg><svg class="ic-sun" viewBox="0 0 20 20" aria-hidden="true"><circle class="stroke-ic" cx="10" cy="10" r="3.6"/><path class="stroke-ic" d="M10 1.8v2.1M10 16.1v2.1M1.8 10h2.1M16.1 10h2.1M4.2 4.2l1.5 1.5M14.3 14.3l1.5 1.5M15.8 4.2l-1.5 1.5M5.7 14.3l-1.5 1.5"/></svg><span>Theme</span></button>
 </header>
 <main>
   <div class="mem-head">
@@ -4336,6 +4736,43 @@ _MEMORY_PAGE = """<!doctype html>
 
   refresh();
   setInterval(refresh, 2000);
+})();
+
+
+
+
+
+(function () {
+  "use strict";
+  // Light/dark toggle: T key or the topbar button. Guarded throughout so the
+  // headless test DOM (no documentElement, no localStorage) never notices.
+  try {
+    var root = document.documentElement;
+    if (!root || !root.setAttribute) return;
+    var KEY = "synapse-theme";
+    function apply(t) {
+      root.setAttribute("data-theme", t);
+      try { localStorage.setItem(KEY, t); } catch (e) { /* private mode */ }
+    }
+    function flip() {
+      apply(root.getAttribute("data-theme") === "light" ? "dark" : "light");
+    }
+    try {
+      if (typeof localStorage !== "undefined") {
+        var stored = localStorage.getItem(KEY);
+        if (stored === "light" || stored === "dark") root.setAttribute("data-theme", stored);
+      }
+    } catch (e) { /* storage unavailable */ }
+    var btn = document.getElementById("theme-btn");
+    if (btn && btn.addEventListener) btn.addEventListener("click", flip);
+    if (typeof document.addEventListener === "function") {
+      document.addEventListener("keydown", function (ev) {
+        var tag = ev.target && ev.target.tagName;
+        if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+        if (ev.key === "t" || ev.key === "T") flip();
+      });
+    }
+  } catch (e) { /* theme chrome is optional everywhere */ }
 })();
 </script>
 </body>
