@@ -50,14 +50,30 @@ jobs:
         run: |
           python - <<'EOF'
           import glob, sys, zipfile
-          [wheel] = glob.glob("dist/wheels/synapse_distiller-*.whl")
-          names = zipfile.ZipFile(wheel).namelist()
-          required = ["synapse_distiller/data/synapse.toml",
-                      "synapse_distiller/data/prompts/v4-condense.toml"]
-          missing = [n for n in required if n not in names]
-          if missing:
-              sys.exit(f"{wheel} is missing packaged data: {missing}")
-          print(f"{wheel}: packaged data present")
+          # wheel glob -> the package data it must carry to work without a checkout.
+          REQUIRED = {
+              "synapse_distiller-*.whl": [
+                  "synapse_distiller/data/synapse.toml",
+                  "synapse_distiller/data/prompts/v4-condense.toml"],
+              # The awareness pack. `synapse configure` installs it into
+              # ~/.claude, and its whole audience is people who never cloned
+              # this repo — so a bundle without it silently degrades to "no
+              # /synapse:health, no skill" on exactly those machines.
+              "synapse_cli-*.whl": [
+                  "synapse_cli/pack/skills/synapse-shared-memory/SKILL.md",
+                  "synapse_cli/pack/commands/synapse/health.md"],
+          }
+          failed = False
+          for pattern, required in REQUIRED.items():
+              [wheel] = glob.glob(f"dist/wheels/{pattern}")
+              names = zipfile.ZipFile(wheel).namelist()
+              missing = [n for n in required if n not in names]
+              if missing:
+                  print(f"{wheel} is missing packaged data: {missing}")
+                  failed = True
+              else:
+                  print(f"{wheel}: packaged data present")
+          sys.exit(1 if failed else 0)
           EOF
 
       - name: assemble the client and server bundles

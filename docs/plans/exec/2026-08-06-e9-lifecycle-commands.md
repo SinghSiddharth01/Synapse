@@ -867,82 +867,131 @@ git commit -am "feat(orchestrator): --idle-stop, so an unused stack does not out
 
 ---
 
-### Task 5 — the explicit trigger: `/synapse-up` and `/synapse-down`
+### Task 5 — the explicit trigger: the `/synapse:*` commands
 
-**Files:** create `packs/claude-code/commands/synapse-up.md`,
-`packs/claude-code/commands/synapse-down.md`; modify
-`packs/claude-code/INSTALL.md`; modify `tests/test_awareness_pack_content.py`.
+> **Revised 2026-08-06.** As first written this task was two flat commands,
+> `/synapse-up.md` and `/synapse-down.md`, copied into `.claude/commands/` by
+> hand. Three things found while building it changed the shape, and all three
+> are worth keeping written down because each was a wrong assumption, not a
+> preference:
+>
+> 1. **Flat names do not group.** Claude Code derives a command's name from
+>    its *path*: `commands/synapse/health.md` is `/synapse:health`. Hyphenated
+>    files in the `commands/` root are `/synapse-up`, `/synapse-down` — which
+>    autocomplete happily lists next to `/synapse-shared-memory`, the *skill*,
+>    whose model-facing trigger paragraph then reads as the product's name in
+>    the menu. A directory is the namespace; use it.
+> 2. **`/synapse:down` cannot be written yet.** Tasks 2 and 3 are unbuilt and
+>    `packages/lifecycle/` does not exist, so `synapse down` is not a verb. A
+>    command file for it would be a command that fails when typed. Deferred to
+>    Task 3, where the verb is born.
+> 3. **Nothing installs `commands/` any more.** The original Step 5 said "copy
+>    it by hand, and `install.sh`'s P5 does it for you." Both installers have
+>    since been rewritten to install-only (P1–P4: prereqs, wheels, `uv tool
+>    install`, verify) and P5 is gone. That is deliberate — `main.py`'s own
+>    contract is "Install never configures; configure never starts" — so the
+>    fix is not to restore P5. `synapse configure` already registers the MCP
+>    server under the comment "a configure-time concern, never an install-time
+>    one" (`config_cmd.py:112`); the pack belongs beside it, on exactly the
+>    same reasoning.
+>
+> Consequence of (3): the pack must ship **inside the wheel**. A machine that
+> installed from a release bundle has no `packs/` directory to copy from, so a
+> `configure` that reads the repo would work only for developers — the
+> narrowest possible audience for an onboarding step.
 
-- [ ] **Step 1: write the failing test**
+**Files:** create `packs/claude-code/commands/synapse/health.md`,
+`packages/cli/src/synapse_cli/pack.py`, `packages/cli/tests/test_pack.py`;
+modify `packages/cli/pyproject.toml`, `packages/cli/src/synapse_cli/config_cmd.py`,
+`packages/cli/src/synapse_cli/main.py`, `packs/claude-code/INSTALL.md`,
+`tests/test_awareness_pack_content.py`.
+
+**Why `health` is the first command, and not `up`.** Signals ③ and ④ both fire
+on a model's judgement — the hook when memory moved, the skill when the work
+smells familiar. That is the right default and it is also why a deterministic
+escape hatch has to exist next to them: when someone asks "is this thing even
+on?", the answer must not depend on a model deciding the question is relevant.
+
+- [x] **Step 1: the command.** `commands/synapse/health.md` → `/synapse:health`.
+Two halves, and the first is the one the CLI cannot do: check whether
+`mcp__synapse__query` / `mcp__synapse__contribute` are available *in this
+session*, then shell out to `synapse health` for the processes. These are
+different questions — a session opened before the orchestrator started, or a
+project that never approved the server, has no tools while `:8787` answers
+perfectly. A command that only shelled out would report PASS to someone whose
+tools are missing.
+
+- [x] **Step 2: `synapse health` learns the worker.** It checked the
+orchestrator, the seam, the binding and the prereqs; it never checked the Edge
+Worker, so "is anything being captured on this machine" had no deterministic
+answer. Probe `/debug/stats.json` on `WORKER_DEBUG_PORT` (8790 — where
+`up.py`'s spawn lands, since it passes no `--debug-port`), and *parse* it:
+valid JSON with a `ticks` key is a Synapse worker, where a bare port check
+cannot tell one from the stale process the `--debug-port` comment already warns
+about. Expect a worker only under `up`'s own spawn condition
+(`worker != off and distiller != listen`), or every listen-only machine grows a
+permanent WARN it cannot clear.
+
+- [ ] **Step 3: write the failing test** for shipping and installing the pack.
 
 ```python
-# tests/test_awareness_pack_content.py
-COMMANDS = PACK / "commands"
+# packages/cli/tests/test_pack.py
+def test_pack_source_is_found_from_an_installed_wheel_not_just_a_checkout():
+    """The whole audience for `configure` is people who did not clone this
+    repo. Resolving the pack relative to ROOT would work on exactly the
+    machines that least need it."""
+    assert pack.source_dir().is_dir()
+    assert (pack.source_dir() / "commands" / "synapse" / "health.md").is_file()
 
 
-def test_the_lifecycle_commands_exist_and_never_imply_automatic_startup():
-    """Nothing in this pack may start a process on its own. The commands are
-    the record of that: they are things a human types."""
-    up = (COMMANDS / "synapse-up.md").read_text(encoding="utf-8")
-    down = (COMMANDS / "synapse-down.md").read_text(encoding="utf-8")
-
-    assert "synapse up" in up and "synapse down" in down
-    assert "synapse down" in up, "starting must always name how to stop"
-    for text in (up, down):
-        for forbidden in ("automatically", "on startup", "launchd", "daemon"):
-            assert forbidden not in text.lower(), forbidden
+def test_installing_twice_is_idempotent_and_never_deletes_a_hand_edit():
+    """P5's rule, kept: what sits at the destination may be a skill the
+    operator edited. `--update` moves it aside with a timestamp; it never
+    rm -rf's something nobody consented to losing."""
 ```
 
-- [ ] **Step 2: run it and watch it fail.** Expected: `FileNotFoundError`.
+- [ ] **Step 4: ship the pack in the wheel.** Hatchling `force-include` in
+`packages/cli/pyproject.toml`, mapping `packs/claude-code` to
+`synapse_cli/pack`. `pack.source_dir()` prefers the bundled copy and falls
+back to the repo checkout, so a working tree still tests what it edits.
 
-- [ ] **Step 3: write `synapse-up.md`**
+- [ ] **Step 5: `pack.install()`** — copy `skills/` and `commands/` into
+`~/.claude/`, carrying P5's three rules verbatim: idempotent; already-present
+entries left alone unless `--update`; on update, move aside with a timestamp
+rather than delete. Return what it did so callers can print it. It does
+**not** install the hook: `settings-snippet.json` points at
+`$CLAUDE_PROJECT_DIR/.claude/synapse-pack/hooks/`, which is per-project by
+construction, and rewriting a `settings.json` this tool does not own is an
+overwrite risk.
 
-```markdown
----
-description: Start the local Synapse processes (orchestrator, and the service
-  and model seam if they are not already up) so this session's MCP tools work.
----
+- [ ] **Step 6: call it from `configure`**, next to `register_mcp`, and expose
+`synapse pack install [--update]` as the explicit verb — without it, upgrading
+Synapse never refreshes a skill or command that shipped with the new version.
 
-Run `uv run synapse up` from the Synapse checkout, then report exactly what it
-printed — which components started, which were already running, and the MCP
-URL.
+- [ ] **Step 7: document** in `INSTALL.md`: the namespace rule (copy the
+`synapse/` *directory*, not its contents), and that `configure` now does it.
 
-Flags worth offering if the user's situation calls for them:
-- `--worker` also starts passive capture. It polls and calls a model, so it is
-  the expensive half; leave it off unless they want their transcript watched.
-- `--distiller claude-cli` distils with Claude on their own subscription, no
-  API key. `--distiller anthropic` uses an API key. Default is the NPU.
-- `--service-url http://<host>:8899` joins a service a teammate is hosting
-  instead of starting one.
-- `--idle-stop 30m` makes the stack shut itself down after half an hour of no
-  MCP traffic.
+- [ ] **Step 8: tests pass.** `uv run pytest packages/cli/tests tests/test_awareness_pack_content.py -q`
 
-If it reports a `foreign` port, do not try to work around it — say which port
-and that something else is already there, then stop. A second orchestrator
-would stamp a different developer's identity onto this machine's findings.
+- [ ] **Step 9: verify by hand** — `synapse pack install`, start a new Claude
+Code session, type `/syna`, confirm `/synapse:health` autocompletes, run it,
+and confirm it reports the MCP tools *and* the four process lines.
 
-Finish by telling them `/synapse-down` stops everything.
-```
-
-- [ ] **Step 4: write `synapse-down.md`** — run `uv run synapse down`, report
-what stopped, and note that anything it calls "not ours" was left alone
-deliberately.
-
-- [ ] **Step 5: document installation** in `INSTALL.md`: copy `commands/` to
-`.claude/commands/`, alongside the existing skill and hook steps.
-
-- [ ] **Step 6: tests pass.** Run: `uv run pytest tests/test_awareness_pack_content.py -q`
-
-- [ ] **Step 7: verify by hand** — install into `~/.claude/commands/`, start a
-new session, run `/synapse-up`, confirm the stack comes up and the session's
-`/mcp` shows `synapse` connected.
-
-- [ ] **Step 8: commit**
+- [ ] **Step 10: commit**
 
 ```bash
-git add packs/claude-code tests/test_awareness_pack_content.py
-git commit -m "feat(pack): /synapse-up and /synapse-down — explicit triggers, no automatic startup"
+git add packs/claude-code packages/cli tests/test_awareness_pack_content.py
+git commit -m "feat(pack): /synapse:health, and configure installs the pack it ships"
 ```
+
+**Deferred to Task 3, deliberately:** `/synapse:up` and `/synapse:down`. The
+original constraint still binds when they are written — nothing in this pack
+may start a process on its own, `synapse up` is the user's to run, and a
+command that started the stack to make its own check go green would stamp this
+machine's identity onto a Shared Session nobody asked to join. The test that
+pins it (`("automatically", "on startup", "launchd", "daemon")` absent from
+every command file) is written and passing against `health.md` today, so it
+guards those two the moment they land.
 
 ---
 
