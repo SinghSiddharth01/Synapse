@@ -1508,6 +1508,7 @@ _PAGE = """<!doctype html>
 
 
 
+
 (function () {
   "use strict";
   // Light/dark toggle: T key or the topbar button. Guarded throughout so the
@@ -2526,6 +2527,7 @@ _BRAIN_PAGE = """<!doctype html>
 
 
 
+
 (function () {
   "use strict";
   // Light/dark toggle: T key or the topbar button. Guarded throughout so the
@@ -3282,25 +3284,25 @@ _HOME_PAGE = """<!doctype html>
     </div>
     <div class="net" aria-label="three machines, each running an agent and an edge worker, exchanging findings and answers with the shared Synapse service, which synthesizes on Cloud AI 100">
       <svg viewBox="0 0 1200 420">
-        <path class="axon" id="ax1" d="M155 90 C 300 105, 420 160, 555 197"/>
-        <path class="axon" id="ax2" d="M130 215 C 280 213, 420 211, 548 211"/>
-        <path class="axon" id="ax3" d="M155 340 C 300 325, 420 265, 555 225"/>
-        <path class="axon" id="ax4" d="M652 211 C 760 211, 850 211, 950 211"/>
+        <path class="axon" id="ax1" d="M155 104 C 300 118, 420 175, 555 230"/>
+        <path class="axon" id="ax2" d="M130 244 C 280 244, 420 244, 548 244"/>
+        <path class="axon" id="ax3" d="M155 384 C 300 370, 420 300, 555 258"/>
+        <path class="axon" id="ax4" d="M652 244 C 760 244, 850 244, 950 244"/>
 
-        <circle class="halo-edge" cx="155" cy="90" r="15"/>
-        <circle class="soma-edge" cx="155" cy="90" r="8"/>
-        <circle class="halo-edge" cx="130" cy="215" r="15"/>
-        <circle class="soma-edge" cx="130" cy="215" r="8"/>
-        <circle class="halo-edge" cx="155" cy="340" r="15"/>
-        <circle class="soma-edge" cx="155" cy="340" r="8"/>
+        <circle class="halo-edge" cx="155" cy="104" r="15"/>
+        <circle class="soma-edge" cx="155" cy="104" r="8"/>
+        <circle class="halo-edge" cx="130" cy="244" r="15"/>
+        <circle class="soma-edge" cx="130" cy="244" r="8"/>
+        <circle class="halo-edge" cx="155" cy="384" r="15"/>
+        <circle class="soma-edge" cx="155" cy="384" r="8"/>
 
-        <circle class="ring" id="net-ring" r="22" cx="600" cy="211" opacity="0"/>
-        <circle class="halo-core" id="net-halo" cx="600" cy="211" r="27"/>
-        <circle class="soma-core" id="net-hub" cx="600" cy="211" r="15"/>
+        <circle class="ring" id="net-ring" r="22" cx="600" cy="244" opacity="0"/>
+        <circle class="halo-core" id="net-halo" cx="600" cy="244" r="27"/>
+        <circle class="soma-core" id="net-hub" cx="600" cy="244" r="15"/>
 
-        <rect class="chip" x="950" y="176" width="200" height="70" rx="10"/>
-        <text class="chip-label" x="1050" y="206" text-anchor="middle">CLOUD AI 100</text>
-        <text class="sub2" x="1050" y="227" text-anchor="middle">Llama-3.3-70B · synthesis</text>
+        <rect class="chip" x="950" y="209" width="200" height="70" rx="10"/>
+        <text class="chip-label" x="1050" y="239" text-anchor="middle">CLOUD AI 100</text>
+        <text class="sub2" x="1050" y="260" text-anchor="middle">Llama-3.3-70B · synthesis</text>
 
         <circle class="impulse" id="ax1-dot" r="3.6"/>
         <circle class="impulse" id="ax2-dot" r="3.6"/>
@@ -3311,18 +3313,18 @@ _HOME_PAGE = """<!doctype html>
         <circle class="impulse back" id="ax3-ret" r="3.2"/>
         <circle class="impulse back" id="ax4-ret" r="3.2"/>
 
-        <text x="155" y="30" text-anchor="middle">sid · claude-code</text>
-        <text x="155" y="50" text-anchor="middle" class="sub2">agent + edge worker</text>
-        <text x="155" y="68" text-anchor="middle" class="sub3">Qwen3-4B · Hexagon NPU</text>
-        <text x="130" y="260" text-anchor="middle">aditya · claude-code</text>
-        <text x="130" y="280" text-anchor="middle" class="sub2">agent + edge worker</text>
-        <text x="130" y="298" text-anchor="middle" class="sub3">Qwen3-4B · Hexagon NPU</text>
-        <text x="155" y="373" text-anchor="middle">akhil · codex</text>
-        <text x="155" y="393" text-anchor="middle" class="sub2">agent + edge worker</text>
-        <text x="155" y="411" text-anchor="middle" class="sub2">Claude Haiku · Anthropic API</text>
+        <text x="155" y="38" text-anchor="middle">sid · claude-code</text>
+        <text x="155" y="58" text-anchor="middle" class="sub2">agent + edge worker</text>
+        <text x="155" y="76" text-anchor="middle" class="sub3">Qwen3-4B · Hexagon NPU</text>
+        <text x="130" y="178" text-anchor="middle">aditya · claude-code</text>
+        <text x="130" y="198" text-anchor="middle" class="sub2">agent + edge worker</text>
+        <text x="130" y="216" text-anchor="middle" class="sub3">Qwen3-4B · Hexagon NPU</text>
+        <text x="155" y="318" text-anchor="middle">akhil · codex</text>
+        <text x="155" y="338" text-anchor="middle" class="sub2">agent + edge worker</text>
+        <text x="155" y="356" text-anchor="middle" class="sub2">Claude Haiku · Anthropic API</text>
 
-        <text x="600" y="268" text-anchor="middle" class="core-label">SYNAPSE SERVICE</text>
-        <text x="600" y="288" text-anchor="middle" class="sub2">one shared memory · curated</text>
+        <text x="600" y="301" text-anchor="middle" class="core-label">SYNAPSE SERVICE</text>
+        <text x="600" y="321" text-anchor="middle" class="sub2">one shared memory · curated</text>
       </svg>
       <p class="net-caption">Findings flow in from every machine; answers flow back to whoever asks. Raw transcripts never cross the wire.</p>
     </div>
@@ -3489,8 +3491,8 @@ _HOME_PAGE = """<!doctype html>
         <path class="ah" stroke="var(--cyan)" d="M898 300 l-11 -5 m11 5 l-11 5"/>
         <path class="flow syn" d="M898 370 C 860 370, 850 370, 800 370"/>
         <path class="ah" stroke="var(--cyan)" d="M800 370 l11 -5 m-11 5 l11 5"/>
-        <text class="t-cyan t-mono" x="846" y="282" text-anchor="middle" style="font-size:12px;letter-spacing:0.02em">merge round</text>
-        <text class="t-cyan t-mono" x="846" y="394" text-anchor="middle" style="font-size:12px;letter-spacing:0.02em">rewritten</text>
+        <text class="t-cyan t-mono" x="828" y="282" text-anchor="middle">merge round</text>
+        <text class="t-cyan t-mono" x="833" y="394" text-anchor="middle">rewritten</text>
 
         <rect class="box cld" x="900" y="240" width="320" height="190" rx="14"/>
         <text class="t-cyan t-mono" x="1060" y="274" text-anchor="middle" style="letter-spacing:0.1em">CLOUD AI 100</text>
@@ -4680,6 +4682,7 @@ _MEMORY_PAGE = """<!doctype html>
   refresh();
   setInterval(refresh, 2000);
 })();
+
 
 
 
