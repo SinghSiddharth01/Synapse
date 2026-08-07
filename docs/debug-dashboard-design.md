@@ -81,31 +81,74 @@ hue (`sec-why` red, `sec-pipe`/`sec-split` copper, `sec-cases` blue, `sec-aha`
 green, everything else cyan): this is the eyebrow system without adding words.
 The brain identity strip uses the vertical form via `border-image`.
 
+## The home page (2026-08-07: themes, slides, diagrams)
+
+The home page is both the scroll landing page and a 6-slide presentation:
+
+- **Themes**: dark (brand default) and light, toggled by the header Theme
+  button or the `T` key, persisted in `localStorage["synapse-theme"]`, applied
+  as `data-theme` on `<html>`. Dark tokens live on bare `:root`; light
+  overrides the SAME variable names under `:root[data-theme="light"]`
+  (identity hues are darkened there to clear contrast on white). The home page
+  adds theme-scoped extension tokens (`--cta-bg`, `--cta-ink`, `--inset-bg`,
+  `--glow-*`, `--wash`); the shared base block stays byte-identical with the
+  operator pages, which remain dark-only.
+- **Slides mode**: the six `.slide` sections become full-viewport slides.
+  Enter/exit via the Present button or `Shift+S`; `Esc` exits; arrows /
+  PageUp/PageDown / Home / End navigate; `F` toggles fullscreen; a fixed HUD
+  shows clickable dots, "n / 6", and the shortcut hints. Slide order: hero +
+  network, the problem (animated diagram), architecture (toggleable), pipeline
+  + division of labor + curation, use cases + aha, measured numbers + run-it +
+  GitHub. Slide-mode-only CSS compacts the hero and proof slides to fit
+  1080p-class viewports; `.scroll-only` elements (anecdote, power-draw note,
+  footer) hide in slides.
+- **Sessions live in the sidebar only** (with the live status dot), never in
+  scroll or slide content. `id="sessions"` is test-required and stays there.
+- **Diagrams** (all inline SVG on CSS variables, so they follow the theme):
+  the hero network (three edge workers: sid, aditya, akhil + the service hub +
+  a Cloud AI 100 chip), the dual-panel why diagram, and the end-to-end
+  architecture diagram whose "Running today / What it allows" segmented
+  control flips `data-view` on `#arch` (ghost device + all five provider
+  plugs light via CSS transitions; captions swap in JS).
+- **GitHub link**: the served page may not contain `http://` / `https://`
+  substrings (test-enforced), so both GitHub anchors ship with `href="#"` and
+  the URL is assembled at runtime in JS. The page still makes zero external
+  requests; the link only navigates on click.
+
 ## Motion
 
 - **Home page: AnimeJS v4.5** (`anime.umd.min.js`, 118KB, inlined verbatim in
   its own `<script>` block ahead of the page script; the pages may make zero
   external requests, so the library must live in the markup). The UMD wrapper
   exposes the `anime` namespace global; the page uses `anime.animate`,
-  `anime.stagger`, `anime.svg.createMotionPath`.
-  - Hero entrance: staggered rise/fade of h1 → tagline → CTAs → live row → net.
-  - Network: the SMIL impulse dots were replaced by anime motion-path
-    animations along the four axon paths (forward dots white, return dots cyan
-    with `reversed: true`, staggered durations/delays); the hub breathes
-    (`r` attribute tween, `alternate: true`) and the ring pulse is an anime
-    loop on `r` + opacity.
-  - "Measured, not claimed": count-ups animate a plain `{v}` object and write
-    `textContent` on `onUpdate` (`.cu` spans carry `data-n` / `data-dec` /
-    `data-sep`; the real numbers stay in the markup so no-JS renders complete).
+  `anime.stagger`, `anime.svg.createMotionPath`, `anime.svg.createDrawable`,
+  and `anime.createTimeline`.
+  - Hero entrance: staggered rise/fade of kicker → h1 → tagline → CTAs → net.
+  - Network: anime motion-path impulses along the four axon paths (forward
+    dots white, returns cyan with `reversed: true`, the service→AI 100 dot
+    green); the hub breathes (`r` tween, `alternate: true`) and the ring pulse
+    loops on `r` + opacity.
+  - The why diagram is one looping `createTimeline`: three draw-on
+    explorations to a flashing red X plus an amber relay dot on the left;
+    one exploration, a finding pulse into the hub, a hub ring, and green
+    propagation ticks on the right. Every stateful element gets a 1ms reset
+    tween at t=0 so the loop restarts clean. Without motion the paths render
+    fully drawn and static.
+  - Count-ups animate a plain `{v}` object and write `textContent` on
+    `onUpdate` (`.cu` spans carry `data-n` / `data-dec` / `data-sep`; real
+    numbers stay in the markup so no-JS renders complete). They fire on
+    scroll reveal or slide activation, once (`data-done`).
   - Scroll reveals: IntersectionObserver drives anime rise/fades per
     `[data-reveal]` section, implemented as a **sweep**: every observer tick
     and scroll event reveals ALL still-hidden sections whose top has entered
     the viewport. (IO coalesces entries during fast jumps; a per-entry
     `isIntersecting` check permanently lost sections. A missed event may only
-    delay a reveal, never lose one.)
+    delay a reveal, never lose one.) Entering slides mode force-reveals
+    everything and tears the observer down.
   - Everything is gated: `prefers-reduced-motion: reduce` or a failed library
     load skips all of it, and initial styles are set from JS so the static
-    page is complete without it.
+    page is complete without it. Theme, slides, keyboard, and the architecture
+    toggle work with no animation library at all.
 - **Brain / log / memory: CSS only.** The one `<script>` block on the brain
   and log pages is executed by the minidom contract tests, so the anime
   library must NOT be added there. Each page has a one-shot entrance
