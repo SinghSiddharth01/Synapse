@@ -46,3 +46,6 @@ node_modules/
 
 # Claude
 .claude/
+
+# MCP.json
+.mcp.json
