@@ -104,7 +104,7 @@ Each tick (`loop.py:290-434`) does, in this fixed order:
 7. **WAL then push.** `producer.record()` writes `{produced_at, shared_id, finding}` envelopes to `wal/findings.jsonl` **before** any send (`loop.py:415`, `producer.py:242-269`); `flush()` sends only envelopes whose recorded `shared_id` matches the current binding, holding mismatches rather than retargeting or dropping (`producer.py:309-364`). Delivery confirmation is an append of the id to `wal/sent.jsonl` (`producer.py:337-340`).
 8. **Persist offset + pending buffer last** (`loop.py:430` → `_persist_state`, `loop.py:174-180`) so a crash costs duplicated work, never lost conversation.
 
-Retry semantics are two-layer: the **distiller** retries once with a corrective `RETRY_NUDGE` message appended on attempt 2 only (`distiller.py:46-57`, `128-136`), then drops the segment; the **producer** retries indefinitely on every subsequent tick because unsent is derived from the log, not from memory (`producer.py:342-364`).
+Retry semantics are two-layer: the **distiller** retries once, appending on attempt 2 a corrective nudge selected by why attempt 1 failed — `classify_drop`'s reason indexes `RETRY_NUDGES`, so over-budget asks for a shorter reply, a repetition loop is named and offered `{"findings": []}`, and only plain-malformed gets the original `RETRY_NUDGE` — then drops the segment; the **producer** retries indefinitely on every subsequent tick because unsent is derived from the log, not from memory (`producer.py:342-364`).
 
 ### The effective limits
 
@@ -131,7 +131,7 @@ Effective column assumes the shipped `[distiller] model = "qualcomm/Qwen3-4B-Ins
 | `sink` / `upstream_url` | `"file"` / `:8787/producer/findings` | `"file"`, `.synapse/upstream.jsonl` | **file sink** by default (demo forces `http`) | `config/synapse.toml:122-124`; `cli.py:243-247`; demo `demo_local.py:499-500` |
 | `state_dir` (WAL + offset + pending) | `.synapse` | `.synapse` | **`.synapse/`**; WAL at `.synapse/wal/` | `config/synapse.toml:116`; `cli.py:248` |
 | `attach_at_end` | `True` | `true` | **True** — history is skipped after priming the Source from the header | `config/synapse.toml:129`; `config.py:257`; `loop.py:182-202` |
-| `MAX_ATTEMPTS` (distil retries) | 2 | not configurable | **2** (attempt 2 appends `RETRY_NUDGE`) | `distiller.py:46`, `50-57`, `128-136` |
+| `MAX_ATTEMPTS` (distil retries) | 2 | not configurable | **2** (attempt 2 appends the nudge `RETRY_NUDGES[reason]` for attempt 1's drop reason) | `distiller.py` `MAX_ATTEMPTS`, `RETRY_NUDGES`, the `attempt_messages` selection in `distil()` |
 | `MIN_USABLE_SEGMENT_TOKENS` | 500 | not configurable | **500** — an override below this raises `CapabilityError` | `capability.py:29`, `84-89` |
 | `HEAD_TAIL_LINES` (tool_result truncation) | 15 | not configurable | **15 head + 15 tail** | `compaction.py:130`, `213-231` |
 | `MAX_SURVIVOR_LINES` (buried error lines kept) | `= HEAD_TAIL_LINES` | not configurable | **15**, uncleared-ranked before cleared | `compaction.py:166`, `226-228` |
@@ -139,7 +139,7 @@ Effective column assumes the shipped `[distiller] model = "qualcomm/Qwen3-4B-Ins
 | `TRIVIAL_RESULT_MAX_CHARS` | 200 | not configurable | **200** (read-only result collapses to `""`) | `compaction.py:139`, `189`, `261` |
 | `SUBSTANTIAL_PROSE_CHARS` (triage skip gate) | 300 | not configurable | **300** | `triage.py:39`, `139`, `144` |
 | `provider.timeout_s` (model call) | 300.0 | 300.0 | **300.0s** | `config/synapse.toml:135`; `config.py:117`; `cli.py:155` |
-| `temperature` | 0.0 | 0.0 | **0.0** — why a byte-identical retry cannot help, hence the nudge | `config/synapse.toml:134`; `distiller.py:130-136` |
+| `temperature` | 0.0 | 0.0 | **0.0** — why a byte-identical retry cannot help, hence the nudge | `config/synapse.toml:134`; `distiller.py` (the `attempt_messages` selection in `distil()`) |
 | `distil_kinds` | `("text",)` via `DEFAULT_KINDS` | `["text"]` | **text only** — non-text-only segments hit the `skipped_empty` short-circuit | `config/synapse.toml:53`; `distiller.py:116-123` |
 | `render_style` | `"labelled"` | `"labelled"` | **labelled** | `config/synapse.toml:71` |
 
