@@ -9,6 +9,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+import httpx
 import pytest
 from synapse_contracts import (
     Attribution,
@@ -19,10 +20,10 @@ from synapse_contracts import (
     write_binding,
 )
 from synapse_distiller import Distiller, load_pack_by_name
-from synapse_providers import FakeProvider
+from synapse_providers import FakeProvider, ModelProvider
 
 from synapse_worker.discovery import binding_path_for_agent
-from synapse_worker.loop import WorkerLoop
+from synapse_worker.loop import MAX_DISTIL_ATTEMPTS, WorkerLoop
 from synapse_worker.producer import FileSink, Producer
 
 PACK = load_pack_by_name("v4-condense")
@@ -542,3 +543,346 @@ async def test_shutdown_applies_triage_to_the_flushed_final_turn(tmp_path, worke
     from synapse_worker.triage_log import TriageLog
     [(seg, reason)] = TriageLog(loop.state_dir).load_skipped()
     assert reason == "lint-clean"
+
+
+# -- a provider that dies mid-tick must not cost the conversation -----------
+#
+# The observed failure (2026-08-07): the seam supervisor declared the NPU dead
+# and restarted it while a distillation was in flight. The worker took an
+# httpx.ReadError, logged it, dropped the segment, advanced the follower's
+# offset past bytes nothing would ever re-read, and reported "0 findings".
+# `shutdown()` had been corrected for this in the W3b review; `tick()` — which
+# runs every 30 seconds instead of once — had not.
+
+
+class FlakyProvider(ModelProvider):
+    """Raises for its first `failures` calls, then delegates to `inner`.
+
+    Models a provider that is *down*, not one that is wrong: the call never
+    produces an answer at all. That distinction is what separates the retry
+    path from the prompt-drop path in `tick()`.
+    """
+
+    provider_id = "flaky"
+
+    def __init__(self, inner, failures: int) -> None:
+        self._inner = inner
+        self._failures = failures
+        self.attempts = 0
+
+    @property
+    def capabilities(self):
+        return self._inner.capabilities
+
+    async def complete(self, messages, response_schema=None):
+        self.attempts += 1
+        if self.attempts <= self._failures:
+            raise httpx.ReadError("model seam died mid-request")
+        return await self._inner.complete(messages, response_schema)
+
+
+def build_flaky(tmp_path, scripts: list, failures: int) -> tuple[WorkerLoop, FlakyProvider]:
+    transcript = tmp_path / "t.jsonl"
+    transcript.touch()
+    provider = FlakyProvider(FakeProvider(scripts=scripts), failures)
+    loop = WorkerLoop(
+        transcript=transcript,
+        distiller=Distiller(provider, BINDING, PACK, ["text"], "labelled"),
+        producer=Producer(tmp_path / "wal", FileSink(tmp_path / "upstream.jsonl")),
+        binding=BINDING,
+        state_dir=tmp_path / "state",
+        budget_tokens=5000,
+    )
+    return loop, provider
+
+
+def deferred_on_disk(loop: WorkerLoop) -> list[dict]:
+    path = loop.session_state_dir / "deferred-segments.json"
+    return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else []
+
+
+async def test_a_failed_distillation_is_requeued_not_dropped(tmp_path) -> None:
+    """The regression. One provider death used to delete the segment."""
+    loop, provider = build_flaky(tmp_path, [condensed("pooling mode matters")], failures=1)
+    loop.transcript.write_text(
+        user("add pooling") + assistant("done") + user("next"), encoding="utf-8"
+    )
+
+    first = await loop.tick()
+
+    assert first.findings == 0
+    assert first.requeued == 1
+    assert first.abandoned == 0
+    # The load-bearing assertion: it is still ON DISK. `_persist_state()` runs
+    # at the end of every tick and writes the queue over this file, so a
+    # segment that only survived in memory would read as [] here.
+    assert len(deferred_on_disk(loop)) == 1
+    # And it is still counted as waiting, not silently gone.
+    assert first.deferred == 1
+
+
+async def test_the_requeued_segment_is_distilled_on_the_next_tick(tmp_path) -> None:
+    """Re-queued is worthless unless something retries it. Nothing new arrives
+    on the transcript between the two ticks — the second tick's finding can
+    only have come from the backlog."""
+    loop, provider = build_flaky(tmp_path, [condensed("pooling mode matters")], failures=1)
+    loop.transcript.write_text(
+        user("add pooling") + assistant("done") + user("next"), encoding="utf-8"
+    )
+
+    await loop.tick()
+    second = await loop.tick()
+
+    assert second.new_lines == 0
+    assert second.findings == 1
+    assert second.deferred == 0
+    assert deferred_on_disk(loop) == []
+    assert provider.attempts == 2
+    upstream = (tmp_path / "upstream.jsonl").read_text(encoding="utf-8").strip()
+    assert json.loads(upstream)["text"] == "pooling mode matters"
+
+
+class PoisonProvider(ModelProvider):
+    """Raises on calls whose messages carry `marker`; answers everything else
+    by delegating to `inner`.
+
+    Models the case MAX_DISTIL_ATTEMPTS exists for — a SEGMENT the provider
+    dies on deterministically while demonstrably serving the rest — as
+    distinct from FlakyProvider's provider that is DOWN, which must never
+    cost any segment its place in line.
+    """
+
+    provider_id = "poison"
+
+    def __init__(self, inner, marker: str) -> None:
+        self._inner = inner
+        self._marker = marker
+        self.poison_calls = 0
+
+    @property
+    def capabilities(self):
+        return self._inner.capabilities
+
+    async def complete(self, messages, response_schema=None):
+        if any(self._marker in str(m) for m in messages):
+            self.poison_calls += 1
+            raise httpx.ReadError("provider dies on this segment")
+        return await self._inner.complete(messages, response_schema)
+
+
+def build_poison(tmp_path, scripts: list, marker: str = "POISON") -> tuple[WorkerLoop, PoisonProvider]:
+    transcript = tmp_path / "t.jsonl"
+    transcript.touch()
+    provider = PoisonProvider(FakeProvider(scripts=scripts), marker)
+    loop = WorkerLoop(
+        transcript=transcript,
+        distiller=Distiller(provider, BINDING, PACK, ["text"], "labelled"),
+        producer=Producer(tmp_path / "wal", FileSink(tmp_path / "upstream.jsonl")),
+        binding=BINDING,
+        state_dir=tmp_path / "state",
+        budget_tokens=5000,
+    )
+    return loop, provider
+
+
+def append(loop: WorkerLoop, text: str) -> None:
+    with loop.transcript.open("a", encoding="utf-8") as handle:
+        handle.write(text)
+
+
+async def test_a_poison_segment_is_abandoned_after_charged_attempts_only(tmp_path) -> None:
+    """The other half of the bound. A segment the provider deterministically
+    dies on must not occupy an admit slot forever — but a failure only burns
+    retry budget on ticks where the provider answered something ELSE, which is
+    the evidence that the failure was the segment's own. Healthy traffic flows
+    around the poison segment the whole time."""
+    loop, provider = build_poison(
+        tmp_path,
+        [condensed("healthy 1"), condensed("healthy 2"), condensed("healthy 3")],
+    )
+    loop.transcript.write_text(
+        user("POISON: plan the migration") + assistant("POISON: acknowledged")
+        + user("how do we pool connections") + assistant("pgbouncer, transaction mode")
+        + user("open question"),
+        encoding="utf-8",
+    )
+
+    first = await loop.tick()                      # [poison, healthy-1] admitted
+    append(loop, assistant("session pooling breaks prepared statements") + user("next"))
+    second = await loop.tick()                     # [poison, healthy-2]
+    append(loop, assistant("noted") + user("more"))
+    third = await loop.tick()                      # [poison, healthy-3] -> give up
+    results = [first, second, third]
+
+    assert [r.requeued for r in results] == [1, 1, 0]
+    assert [r.abandoned for r in results] == [0, 0, 1]
+    # The healthy segment landed every tick — the poison one starved nothing.
+    assert [r.findings for r in results] == [1, 1, 1]
+    assert provider.poison_calls == MAX_DISTIL_ATTEMPTS
+    # Gone, deliberately — and the queue is empty rather than spinning forever.
+    assert deferred_on_disk(loop) == []
+    assert "ABANDONED" in results[-1].summary()
+
+
+async def test_a_provider_outage_longer_than_the_retry_budget_sheds_nothing(tmp_path) -> None:
+    """DEFER, NEVER SHED, even when the outage outlives MAX_DISTIL_ATTEMPTS
+    ticks. Every tick of a dead provider fails ALL its calls, which is
+    indistinguishable from N bad segments — so nobody is charged, and the
+    segment is still there when the provider comes back. This is the observed
+    incident (an NPU restart spanning several ticks) done honestly: the first
+    version of this fix abandoned the segment on the third tick of it."""
+    outage_ticks = MAX_DISTIL_ATTEMPTS + 2
+    loop, provider = build_flaky(
+        tmp_path, [condensed("survived the outage")], failures=outage_ticks)
+    loop.transcript.write_text(
+        user("add pooling") + assistant("done") + user("next"), encoding="utf-8"
+    )
+
+    down = [await loop.tick() for _ in range(outage_ticks)]
+
+    assert [r.abandoned for r in down] == [0] * outage_ticks
+    assert [r.requeued for r in down] == [1] * outage_ticks
+    assert len(deferred_on_disk(loop)) == 1
+    assert loop._attempts == {}, "an all-fail tick must not charge the segment"
+
+    recovered = await loop.tick()
+    assert recovered.findings == 1
+    assert deferred_on_disk(loop) == []
+
+
+async def test_mid_batch_failures_requeue_in_order_and_healthy_segments_still_land(tmp_path) -> None:
+    """Several failures in one tick keep their relative (admitted) order at
+    the head of the queue, and a healthy segment behind them still distils in
+    the same tick — its success is also what charges the failures."""
+    loop, provider = build_poison(tmp_path, [condensed("healthy finding")])
+    loop.transcript.write_text(
+        user("POISON one") + assistant("POISON r1")
+        + user("POISON two") + assistant("POISON r2")
+        + user("clean question") + assistant("clean answer")
+        + user("open"),
+        encoding="utf-8",
+    )
+
+    result = await loop.tick()                     # [poison-1, poison-2, clean]
+
+    assert result.findings == 1
+    assert result.requeued == 2
+    assert result.abandoned == 0
+    assert [d["id"] for d in deferred_on_disk(loop)] == ["sess-1-00001", "sess-1-00002"]
+    assert loop._attempts == {"sess-1-00001": 1, "sess-1-00002": 1}
+    upstream = (tmp_path / "upstream.jsonl").read_text(encoding="utf-8").strip()
+    assert json.loads(upstream)["text"] == "healthy finding"
+
+
+async def test_a_restart_cannot_reissue_a_queued_segments_id(tmp_path) -> None:
+    """Segment ids number off an in-memory counter that restarts at zero,
+    while the deferred queue survives on disk with the OLD numbering. Without
+    the counter bump in `_restore_deferred`, run 2's first new segment took
+    the same id as the restored one still in the queue, and the two shared a
+    single retry budget — reproduced in review: the restored segment was
+    abandoned a charged attempt early because a same-named newcomer's failure
+    was billed to it."""
+    loop1, _ = build_flaky(tmp_path, [], failures=99)
+    loop1.transcript.write_text(
+        user("first question") + assistant("first answer") + user("second"),
+        encoding="utf-8",
+    )
+    await loop1.tick()
+    assert [s.id for s in loop1._deferred] == ["sess-1-00001"]
+    # The process dies without shutdown; the queue survives on disk.
+
+    loop2, _ = build_flaky(tmp_path, [], failures=99)
+    assert [s.id for s in loop2._deferred] == ["sess-1-00001"]
+    append(loop2, assistant("second answer") + user("third"))
+    await loop2.tick()
+
+    ids = [s.id for s in loop2._deferred]
+    assert ids == ["sess-1-00001", "sess-1-00002"], (
+        "a new segment re-used a restored segment's id"
+    )
+    # And with the provider down, neither carries a charged attempt.
+    assert loop2._attempts == {}
+
+
+async def test_an_abort_outside_the_distil_guard_still_requeues_the_batch(tmp_path) -> None:
+    """A raise from anything OTHER than the distillation itself — the recorder
+    is the live case (disk full) — aborts the tick after `admit()` has already
+    taken segments off the queue. `run()` catches the raise and ticks again,
+    and THAT tick persists the (now short) queue, so without the salvage
+    clause the aborted batch would quietly vanish from disk. Fail toward
+    duplication, never loss."""
+    loop, _ = build(tmp_path, [condensed("kept"), condensed("kept")])
+    loop.transcript.write_text(
+        user("q") + assistant("a") + user("next"), encoding="utf-8"
+    )
+    real_record = loop.producer.record
+
+    def dying_record(findings):
+        raise RuntimeError("disk full")
+
+    loop.producer.record = dying_record
+    with pytest.raises(RuntimeError):
+        await loop.tick()
+
+    assert [s.id for s in loop._deferred] == ["sess-1-00001"]
+
+    loop.producer.record = real_record
+    second = await loop.tick()
+    assert second.findings == 1
+
+
+async def test_shutdown_drops_a_prompt_dropped_segment_instead_of_bequeathing_it(tmp_path) -> None:
+    """tick() drops a prompt-drop on the first strike because the model
+    ANSWERED, wrongly — re-queueing buys nothing but another invented answer.
+    `shutdown()`'s bare `except Exception` used to catch PromptDropError too
+    and hand the segment to the next run for exactly that pointless retry."""
+    transcript = tmp_path / "t.jsonl"
+    transcript.touch()
+    loop = WorkerLoop(
+        transcript=transcript,
+        distiller=Distiller(
+            FakeProvider(scripts=[condensed("invented")], input_tokens=1),
+            BINDING, PACK, ["text"], "labelled",
+        ),
+        producer=Producer(tmp_path / "wal", FileSink(tmp_path / "upstream.jsonl")),
+        binding=BINDING,
+        state_dir=tmp_path / "state",
+        budget_tokens=5000,
+    )
+    transcript.write_text(user("a") + assistant("b"), encoding="utf-8")
+    await loop.tick()                              # buffer the open turn
+
+    result = await loop.shutdown()
+
+    assert any("prompt-drop" in e for e in result.errors)
+    assert deferred_on_disk(loop) == [], "an invented answer was bequeathed to the next run"
+    upstream = tmp_path / "upstream.jsonl"
+    assert not upstream.exists() or upstream.read_text(encoding="utf-8").strip() == ""
+
+
+async def test_a_prompt_drop_is_not_retried(tmp_path) -> None:
+    """The two except clauses must stay distinct. A prompt-drop is a segment
+    the model answered WRONGLY — retrying only buys another invented answer,
+    so it is dropped on the first strike, while a segment the provider merely
+    FAILED on is re-queued (uncharged while the provider looks down, three
+    charged strikes once it is provably up)."""
+    transcript = tmp_path / "t.jsonl"
+    transcript.touch()
+    loop = WorkerLoop(
+        transcript=transcript,
+        distiller=Distiller(
+            FakeProvider(scripts=[condensed("invented")], input_tokens=1),
+            BINDING, PACK, ["text"], "labelled",
+        ),
+        producer=Producer(tmp_path / "wal", FileSink(tmp_path / "upstream.jsonl")),
+        binding=BINDING,
+        state_dir=tmp_path / "state",
+        budget_tokens=5000,
+    )
+    transcript.write_text(user("a") + assistant("b") + user("c"), encoding="utf-8")
+
+    result = await loop.tick()
+
+    assert any("prompt-drop" in e for e in result.errors)
+    assert result.requeued == 0
+    assert deferred_on_disk(loop) == []

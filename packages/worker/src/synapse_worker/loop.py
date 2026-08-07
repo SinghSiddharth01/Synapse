@@ -56,6 +56,27 @@ from synapse_worker.triage_log import TriageLog
 
 logger = logging.getLogger(__name__)
 
+#: How many CHARGED failures a segment may accrue before `tick()` gives up on
+#: it. A failure is charged only when the same tick got an answer out of the
+#: provider on some other call — evidence the provider was up, so the failure
+#: was about THIS segment. A tick where every call failed is indistinguishable
+#: from the provider being down and charges nobody (DEFER, NEVER SHED —
+#: limiter.py, decisions/002), so an outage of any length — including the seam
+#: supervisor taking minutes to restart the NPU, the observed incident —
+#: abandons nothing. What this bounds is the POISON segment: one the provider
+#: dies on deterministically while serving everything else. Note a single one
+#: of those cannot block the queue outright — `admit()` takes several per tick
+#: and the line flows past it — but each permanently occupies one of
+#: `max_calls_per_tick`'s admit slots at the head of the queue, and enough of
+#: them accumulate into a wall that starves the whole line. KNOWN CORNER,
+#: chosen deliberately: `max_calls_per_tick` poison segments arriving together
+#: fail as a whole batch, read as an outage, and are never charged — the queue
+#: blocks, loudly, rather than shedding. Shedding real work on every outage
+#: costs more than blocking on that pathology; raising [worker]
+#: max_calls_per_tick admits healthy segments alongside them, whose successes
+#: resume the charging that clears the wall.
+MAX_DISTIL_ATTEMPTS = 3
+
 
 @dataclass
 class TickResult:
@@ -78,6 +99,13 @@ class TickResult:
     # pipeline that stopped.
     deferred: int = 0
     backpressured: bool = False
+    # Segments whose distillation raised and which went BACK on the deferred
+    # queue for a later tick, and segments that exhausted MAX_DISTIL_ATTEMPTS
+    # and were given up on. `abandoned` is the only path in this loop that
+    # loses conversation, so it is counted separately and said out loud rather
+    # than folded into `errors` — see the charging block in `tick()`.
+    requeued: int = 0
+    abandoned: int = 0
     errors: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
@@ -103,12 +131,32 @@ class TickResult:
         if self.pending_events:
             bits.append(f"{self.pending_events} events held (turn open)")
         if self.deferred:
-            bits.append(f"{self.deferred} deferred (provider rate)")
+            # "(provider rate)" only when rate pacing is the whole story. A
+            # tick that re-queued failures folds those into `deferred` too —
+            # same queue, different cause — and the re-queued bit right below
+            # already names that cause; labelling them "rate" would tell an
+            # operator the provider was merely paced when it was failing.
+            bits.append(f"{self.deferred} deferred"
+                        + ("" if self.requeued else " (provider rate)"))
+        if self.requeued:
+            bits.append(f"{self.requeued} re-queued (provider failed)")
+        if self.abandoned:
+            bits.append(f"{self.abandoned} ABANDONED after {MAX_DISTIL_ATTEMPTS} attempts")
         if self.backpressured:
             bits.append("BACKPRESSURE: not reading new input")
         if self.flushed_incomplete:
             bits.append("idle-flushed")
         return " · ".join(bits)
+
+
+def _segment_number(segment_id: str) -> int:
+    """The NNNNN of a `{session}-NNNNN` segment id, or 0 when it has none.
+
+    Tolerant on purpose: ids are data restored from disk, and an id this
+    process would never mint (hand-edited state, a future format) must read
+    as "no number" rather than crash the restore."""
+    tail = segment_id.rsplit("-", 1)[-1]
+    return int(tail) if tail.isdigit() else 0
 
 
 class WorkerLoop:
@@ -255,6 +303,15 @@ class WorkerLoop:
         # the follower's offset, so losing them is losing conversation.
         self._deferred_path = self.session_state_dir / "deferred-segments.json"
         self._deferred: list[Segment] = []
+        # segment id -> CHARGED failed-distillation attempts, for
+        # MAX_DISTIL_ATTEMPTS (see its note for what makes a failure charged).
+        # Deliberately NOT persisted alongside the queue: the count is about
+        # this process's provider, and a restart usually means a restarted (or
+        # repaired) model server, which has earned a fresh budget. The segments
+        # themselves survive on disk either way, which is the part that matters.
+        # Keying on segment id is safe only because `_restore_deferred` bumps
+        # the segmenter's counter past every restored id — see the note there.
+        self._attempts: dict[str, int] = {}
         self._restore_pending()
         self._restore_deferred()
         self._last_change = datetime.now(timezone.utc)
@@ -348,6 +405,24 @@ class WorkerLoop:
             return
         if segments:
             self._deferred = segments
+            # ⟨2026-08-07⟩ Number NEW segments past everything restored.
+            # Segment ids are `{session}-{counter:05d}` off the Segmenter's
+            # in-memory counter, which starts at zero every process — while
+            # the ids restored here were minted by the PREVIOUS process's
+            # counter. Without this bump the new counter re-issues those same
+            # ids to brand-new segments while the restored ones still sit in
+            # the queue, and everything keyed on segment id — the retry-budget
+            # dict `self._attempts` being the correctness-bearing case —
+            # silently conflates two different pieces of conversation
+            # (reproduced in review: a restored segment was abandoned a
+            # charged attempt early because a same-named newcomer's failure
+            # was billed to it). Reaching into `_counter` mirrors what
+            # `_persist_state` already does with `_pending`: this loop owns
+            # its segmenter's durability.
+            self.segmenter._counter = max(
+                self.segmenter._counter,
+                max(_segment_number(s.id) for s in segments),
+            )
             logger.info(
                 "Restored %d segment(s) deferred by the provider rate limit "
                 "in the previous run", len(segments),
@@ -667,89 +742,296 @@ class WorkerLoop:
                     backpressured=result.backpressured,
                 )
 
-        for segment in segments:
-            # Triage FIRST, on the Segment exactly as segmented -- before
-            # compaction has a chance to reshape it. See compaction.py's
-            # module docstring and `_compact`'s docstring above: a
-            # keep/skip judgment made against a truncated/ranked view is a
-            # judgment made against evidence compaction chose to show, not
-            # the evidence that was actually there.
-            if self.triage_enabled:
-                decision = triage(segment)
-                if not decision.keep:
-                    self.triage_log.record_skip(segment, decision.reason)
-                    result.skipped_triage += 1
-                    logger.info("Triage skipped %s (%s)", segment.id, decision.reason)
+        # Segments whose distillation raised this tick, in admitted (FIFO)
+        # order, each with the error that failed it. Collected rather than
+        # re-queued in place because `self._deferred` is the *rest* of the
+        # FIFO line and these belong in front of it — they were admitted off
+        # its head. Whether a failure is CHARGED against its segment's retry
+        # budget is decided only after the whole pass, because the deciding
+        # question — was it the provider or the segment? — needs the tick's
+        # other outcomes as evidence. See the charging block below the loop.
+        failed: list[tuple[Segment, str]] = []
+        # Whether any call this tick actually got an answer out of the
+        # provider — findings, or even a prompt-drop, which is a WRONG answer
+        # but an answer. While this is False every failure looks exactly like
+        # the provider being down, and a down provider must cost no segment
+        # its place: DEFER, NEVER SHED (limiter.py, decisions/002).
+        provider_alive = False
+        # Which segment is in flight, so the salvage clause below can tell
+        # the finished from the unfinished if the pass aborts.
+        idx = -1
+        distil_pass_completed = False
+        try:
+            for idx, segment in enumerate(segments):
+                # Triage FIRST, on the Segment exactly as segmented -- before
+                # compaction has a chance to reshape it. See compaction.py's
+                # module docstring and `_compact`'s docstring above: a
+                # keep/skip judgment made against a truncated/ranked view is a
+                # judgment made against evidence compaction chose to show, not
+                # the evidence that was actually there.
+                if self.triage_enabled:
+                    decision = triage(segment)
+                    if not decision.keep:
+                        self.triage_log.record_skip(segment, decision.reason)
+                        result.skipped_triage += 1
+                        logger.info("Triage skipped %s (%s)", segment.id, decision.reason)
+                        if self.stats:
+                            self.stats.event(
+                                "triage",
+                                f"skip {segment.id} ({decision.reason})",
+                                segment=segment.id,
+                                reason=decision.reason,
+                            )
+                        self._attempts.pop(segment.id, None)
+                        continue
                     if self.stats:
                         self.stats.event(
                             "triage",
-                            f"skip {segment.id} ({decision.reason})",
+                            f"keep {segment.id} ({decision.reason})",
                             segment=segment.id,
                             reason=decision.reason,
                         )
+                # Only now, for a Segment triage has already decided is worth
+                # sending to the model: shape what the model actually sees.
+                #
+                # KEPT SEPARATE from `segment` on purpose. This used to rebind
+                # `segment` itself, which left the retry path below holding
+                # nothing but the compacted view. Compaction is lossy — it
+                # truncates and ranks events to fit a budget — so re-queueing
+                # it would make the next attempt work from evidence THIS tick
+                # chose to show rather than what was actually in the
+                # transcript. Same argument `shutdown()` makes on its own
+                # except clause.
+                compacted = self._compact(segment)
+                if self.stats:
+                    self.stats.distil_started(compacted.id, len(compacted.events))
+                try:
+                    # THE CONCURRENCY BOUND. Every worker->provider call in
+                    # this module goes through the limiter, so "one call at a
+                    # time" is a checked property rather than a consequence of
+                    # this `for` loop happening to await in sequence — which is
+                    # what an `asyncio.gather` refactor here would silently
+                    # repeal.
+                    findings, distil_stats = await self.limiter.call(
+                        lambda s=compacted: self.distiller.distil(s))
+                except PromptDropError as exc:
+                    # The model stopped conditioning on its prompt. Every
+                    # finding it would produce is invented, so drop the segment
+                    # rather than poison shared memory. Loud, because it means
+                    # the model or its type is wrong.
+                    #
+                    # NOT re-queued, unlike the clause below, and the
+                    # distinction is the whole point of keeping these two
+                    # excepts apart: a prompt-drop is a segment the model
+                    # answered WRONGLY, and retrying buys another invented
+                    # answer. The clause below is a segment the model never
+                    # answered at all — which is also why this counts as the
+                    # provider being alive: wrong is still an answer.
+                    provider_alive = True
+                    logger.error("Prompt-drop guard tripped on %s: %s", segment.id, exc)
+                    result.errors.append(f"prompt-drop on {segment.id}")
+                    if self.stats:
+                        self.stats.event(
+                            "error", f"prompt-drop on {segment.id}", segment=segment.id
+                        )
+                    self._attempts.pop(segment.id, None)
                     continue
-                if self.stats:
-                    self.stats.event(
-                        "triage",
-                        f"keep {segment.id} ({decision.reason})",
-                        segment=segment.id,
-                        reason=decision.reason,
-                    )
-            # Only now, for a Segment triage has already decided is worth
-            # sending to the model: shape what the model actually sees.
-            segment = self._compact(segment)
-            if self.stats:
-                self.stats.distil_started(segment.id, len(segment.events))
-            try:
-                # THE CONCURRENCY BOUND. Every worker->provider call in this
-                # module goes through the limiter, so "one call at a time" is
-                # a checked property rather than a consequence of this `for`
-                # loop happening to await in sequence — which is what an
-                # `asyncio.gather` refactor here would silently repeal.
-                findings, distil_stats = await self.limiter.call(
-                    lambda s=segment: self.distiller.distil(s))
-            except PromptDropError as exc:
-                # The model stopped conditioning on its prompt. Every finding it
-                # would produce is invented, so drop the segment rather than
-                # poison shared memory. Loud, because it means the model or its
-                # type is wrong.
-                logger.error("Prompt-drop guard tripped on %s: %s", segment.id, exc)
-                result.errors.append(f"prompt-drop on {segment.id}")
-                if self.stats:
-                    self.stats.event(
-                        "error", f"prompt-drop on {segment.id}", segment=segment.id
-                    )
-                continue
-            except Exception as exc:  # noqa: BLE001 - a tick must never die
-                logger.exception("Distillation failed for %s", segment.id)
-                result.errors.append(f"{segment.id}: {exc}")
-                if self.stats:
-                    self.stats.event(
-                        "error", f"{segment.id}: {exc}", segment=segment.id
-                    )
-                continue
-            finally:
-                if self.stats:
-                    self.stats.distil_finished()
+                except Exception as exc:  # noqa: BLE001 - a tick must never die
+                    # ⟨CORRECTED 2026-08-07⟩ Put it BACK. `admit()` above has
+                    # already taken this segment OFF `self._deferred`, and
+                    # `_persist_state()` at the end of the tick writes what
+                    # remains over deferred-segments.json — so before this
+                    # change a single raise here deleted the segment, and its
+                    # transcript bytes were already behind the follower's
+                    # offset and never re-read. One provider hiccup was
+                    # permanent loss of that conversation.
+                    #
+                    # Observed in the wild on 2026-08-07: the seam supervisor
+                    # declared the NPU dead and restarted it (supervisor.log,
+                    # "model seam DEAD ... Restarting geniex") while a
+                    # distillation was in flight; the worker took an
+                    # httpx.ReadError, dropped segment ...-00001, advanced the
+                    # offset, and reported "0 findings" — silent loss that
+                    # looks like success, which is exactly what decisions/002
+                    # and `shutdown()`'s own W3b correction exist to forbid.
+                    # `shutdown()` was fixed then; `tick()`, which runs every
+                    # 30s rather than once, was not.
+                    logger.exception("Distillation failed for %s", segment.id)
+                    result.errors.append(f"{segment.id}: {exc}")
+                    if self.stats:
+                        self.stats.event(
+                            "error", f"{segment.id}: {exc}", segment=segment.id
+                        )
+                    # The UNCOMPACTED segment, per the compaction note above.
+                    # Appended LAST, so a raise in the bookkeeping above cannot
+                    # leave this segment both here and in the salvage clause's
+                    # `segments[idx:]` at once.
+                    failed.append((segment, str(exc)))
+                    continue
+                finally:
+                    if self.stats:
+                        self.stats.distil_finished()
+                # Distilled: the provider answered, so failures elsewhere in
+                # this tick are about their segments, not about the provider.
+                # A `skipped_empty` result made no provider call and proves
+                # nothing either way.
+                if not distil_stats.skipped_empty:
+                    provider_alive = True
+                # Its retry budget dies with it.
+                self._attempts.pop(segment.id, None)
 
-            if self.stats:
-                retained = sum(
-                    1 for e in segment.events if e.kind in set(self.distiller.kinds)
-                )
-                self.stats.event(
-                    "render",
-                    f"{segment.id}: {retained}/{len(segment.events)} events reached the model",
-                    events_in=len(segment.events),
-                    retained=retained,
-                    kinds=list(self.distiller.kinds),
-                    input_tokens=distil_stats.input_tokens,
-                )
+                if self.stats:
+                    # `compacted`, not `segment`: this measures what actually
+                    # reached the model, which is the post-compaction view. It
+                    # read `segment` before only because `segment` WAS the
+                    # compacted one by this line — the split above preserved
+                    # the meaning.
+                    retained = sum(
+                        1 for e in compacted.events if e.kind in set(self.distiller.kinds)
+                    )
+                    self.stats.event(
+                        "render",
+                        f"{compacted.id}: {retained}/{len(compacted.events)} events reached the model",
+                        events_in=len(compacted.events),
+                        retained=retained,
+                        kinds=list(self.distiller.kinds),
+                        input_tokens=distil_stats.input_tokens,
+                    )
 
-            if distil_stats.skipped_empty:
-                continue
-            # Write-ahead: on disk before any send is attempted.
-            self.producer.record(findings)
-            result.findings += len(findings)
+                if distil_stats.skipped_empty:
+                    continue
+                # Write-ahead: on disk before any send is attempted.
+                self.producer.record(findings)
+                result.findings += len(findings)
+            distil_pass_completed = True
+        finally:
+            if not distil_pass_completed:
+                # An unexpected raise ABORTED the pass — not a distillation
+                # failure (those are caught per-segment above) but a raise in
+                # triage, compaction, a stats sink, or the recorder (disk full
+                # is the live case). `run()` catches it and ticks again, and
+                # THAT tick's `_persist_state()` writes the in-memory queue —
+                # already missing everything `admit()` took — over
+                # deferred-segments.json, so without this clause every
+                # unfinished segment here would quietly vanish from disk. Fail
+                # toward duplication instead, as the module docstring orders:
+                # everything not cleanly finished goes back on the queue,
+                # uncharged (the provider's health this tick is unknown). The
+                # in-flight segment may already have been distilled, so its
+                # retry can cost a duplicate distillation; its disappearance
+                # would cost the conversation.
+                salvage = [s for s, _ in failed] + segments[idx:]
+                if salvage:
+                    self._deferred = salvage + self._deferred
+                    logger.error(
+                        "Distil pass aborted with %d segment(s) unfinished; "
+                        "ALL are re-queued in %s, not dropped.",
+                        len(salvage), self._deferred_path.name,
+                    )
+
+        if failed:
+            # THE CHARGING DECISION, now that the whole tick is in evidence.
+            # If anything got an answer out of the provider this tick, each
+            # failure was about its own segment and burns one charged attempt;
+            # if EVERY call failed, that is what an outage looks like and
+            # nobody is charged — see MAX_DISTIL_ATTEMPTS's note for both
+            # halves of that argument, including the deliberate corner.
+            requeue: list[Segment] = []
+            if provider_alive:
+                for segment, error in failed:
+                    attempts = self._attempts[segment.id] = (
+                        self._attempts.get(segment.id, 0) + 1)
+                    if attempts < MAX_DISTIL_ATTEMPTS:
+                        requeue.append(segment)
+                        result.requeued += 1
+                        logger.warning(
+                            "Re-queued %s after charged attempt %d/%d — NOT "
+                            "dropped: it keeps its place at the head of %s and "
+                            "is retried next tick.",
+                            segment.id, attempts, MAX_DISTIL_ATTEMPTS,
+                            self._deferred_path.name,
+                        )
+                        if self.stats:
+                            self.stats.event(
+                                "error",
+                                f"{segment.id}: {error} (attempt "
+                                f"{attempts}/{MAX_DISTIL_ATTEMPTS}, re-queued)",
+                                segment=segment.id,
+                                attempts=attempts,
+                                abandoned=False,
+                            )
+                    else:
+                        # The one path in this loop that loses conversation.
+                        # Never quiet.
+                        result.abandoned += 1
+                        self._attempts.pop(segment.id, None)
+                        logger.error(
+                            "GIVING UP on %s after %d charged attempts: %s. "
+                            "Its transcript bytes are behind the follower's "
+                            "offset and will NOT be re-read — that conversation "
+                            "is lost from shared memory. Recovery exists but is "
+                            "blunt: re-attaching with --from-start re-distils "
+                            "the WHOLE transcript and ships duplicate findings "
+                            "for everything already captured (Finding ids are "
+                            "fresh per distillation), so use it knowingly.",
+                            segment.id, attempts, error,
+                        )
+                        if self.stats:
+                            self.stats.event(
+                                "error",
+                                f"{segment.id}: {error} (abandoned after "
+                                f"{attempts} attempts)",
+                                segment=segment.id,
+                                attempts=attempts,
+                                abandoned=True,
+                            )
+            else:
+                # EVERY call this tick failed. Nothing in that distinguishes a
+                # dead provider from `max_calls_per_tick` poison segments
+                # arriving together, so the whole batch waits, uncharged, for
+                # a tick that produces evidence either way. An outage of any
+                # length therefore abandons nothing.
+                requeue = [segment for segment, _ in failed]
+                result.requeued += len(requeue)
+                logger.warning(
+                    "All %d distillation(s) this tick failed — treating that "
+                    "as the provider being down, not as %d bad segments. All "
+                    "are re-queued UNCHARGED at the head of %s; retry budgets "
+                    "only burn on ticks where the provider answers something.",
+                    len(failed), len(failed), self._deferred_path.name,
+                )
+                if self.stats:
+                    self.stats.event(
+                        "limiter",
+                        f"provider looks down: {len(failed)} failure(s), none "
+                        f"charged; all re-queued",
+                        requeued=len(failed),
+                        provider_alive=False,
+                    )
+            if requeue:
+                # In FRONT of the rest, in admitted order: these came off the
+                # head of the queue, so QUEUE order stays strictly FIFO, and
+                # the queue ends no longer than the drain left it (`failed` is
+                # a subset of what `admit()` removed), so the re-queue can
+                # never be what pushes it past the bound — or past the bound's
+                # documented one-turn slack, `Segmenter.drain`'s "exact to
+                # within one turn".
+                #
+                # DELIVERY order is a different matter, and the honest note
+                # is owed here (limiter.py: "slow is recoverable; scrambled is
+                # not"): a segment that succeeded later in this same tick has
+                # already had its findings recorded, and a re-queued segment's
+                # findings will land a tick or more behind them. Chosen over
+                # the alternative — aborting the batch at the first failure —
+                # which would strand healthy segments behind a poison one and
+                # blind the liveness signal the charging above depends on. A
+                # hiccup in arrival order is recoverable; a lost segment is
+                # not.
+                self._deferred = requeue + self._deferred
+            # Recomputed, because `result.deferred` was set before the distil
+            # loop ran and a stale count here is exactly the kind of number an
+            # operator reads as "nothing is waiting".
+            result.deferred = len(self._deferred)
 
         result.sent, result.pending_send = await self.producer.flush()
         result.held = self.producer.pending_count()[1]
@@ -823,6 +1105,18 @@ class WorkerLoop:
                 if not stats.skipped_empty:
                     self.producer.record(findings)
                     result.findings += len(findings)
+            except PromptDropError as exc:
+                # Same first-strike drop as tick(), for the same reason: the
+                # model ANSWERED, wrongly, and re-queueing would hand the next
+                # run an invented answer to retry for. ⟨2026-08-07⟩ Until now
+                # this fell through to the clause below and was re-queued —
+                # contradicting the distinction tick() documents as the whole
+                # point of keeping the two excepts apart.
+                logger.error(
+                    "Prompt-drop guard tripped on %s during shutdown: %s",
+                    segment.id, exc,
+                )
+                result.errors.append(f"prompt-drop on {segment.id}")
             except Exception:  # noqa: BLE001
                 # ⟨CORRECTED 2026-08-06, W3b review⟩ Put it BACK. `deferred,
                 # self._deferred = self._deferred, []` above empties the queue
