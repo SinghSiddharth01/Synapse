@@ -35,9 +35,39 @@ ORCHESTRATOR_PORT = 8787
 # a machine where the worker package is not installed at all.
 WORKER_DEBUG_PORT = 8790
 
-PROBE_INTERVAL_S = 15
-PROBE_TIMEOUT_S = 5.0
-DEATH_STRIKES = 4
+# ⟨CORRECTED 2026-08-07⟩ These four used to be 15 / 5.0 / 4, and this is the
+# copy that `synapse up` actually runs — the numbers in scripts/serve_local.py
+# supervise the dev script, not the installed stack, so a fix applied only
+# there changes nothing on a real machine. THE FULL REASONING LIVES AT
+# serve_local.py's matching block; the short version:
+#
+# geniex serves ONE request at a time, so the GET /v1/models probe queues
+# behind a running generation instead of being answered off the accept loop,
+# and a queued probe is indistinguishable from a dead one at the socket
+# (accepted, no bytes). A 5s timeout therefore struck against 81% of real
+# generations (n=16: median 12.9s, max 35.1s), and four of those in a row
+# restarted a healthy seam and killed the in-flight distillation. 55s is ~1.6x
+# the observed worst case, sized off the TAIL because a timeout near the mean
+# strikes on every above-average call.
+#
+# TWO strikes, not one — and not because of generation length. `probe_seam`
+# scores four flavours and only ONE spends the timeout: refused, reset and any
+# non-200 all strike INSTANTLY. At a single strike one transient HTTP 500 or
+# refused connection restarts the seam and kills the live generation, having
+# waited for nothing. The strikes are the only tolerance for those paths, so
+# there must be more than one. ~120s end to end is the price, and it is cheap:
+# the worker re-queues a failed distillation and charges no retry against a
+# provider that was down, so slow detection costs delay, while a WRONG death
+# kills a generation and, at four inside RESTART_WINDOW_S, reaches GAVE_UP and
+# needs a human.
+#
+# The 5s cadence is not about probe frequency (an idle probe costs 2-4ms and
+# the supervisor blocks inside the probe anyway). It keeps `child.poll()` —
+# which declares an EXITED process dead immediately, no strikes — on a fast
+# clock instead of inheriting the probe timeout, so a crash is caught in ~5s.
+PROBE_INTERVAL_S = 5
+PROBE_TIMEOUT_S = 55.0
+DEATH_STRIKES = 2
 RESTART_DELAYS_S = (0, 30, 120)
 RESTART_WINDOW_S = 600
 GAVE_UP_REPEAT_S = 60
@@ -246,10 +276,19 @@ def probe_seam(models_url: str, timeout: float = PROBE_TIMEOUT_S) -> str | None:
 
 class SeamSupervisor:
     """Probes the model seam and restarts it. Same rule as serve_local.py
-    decision 005: 4 consecutive failed /models probes = dead (a seam that
-    cannot answer metadata for a minute is not busy, it is not serving);
+    decision 005: `DEATH_STRIKES` consecutive failed /models probes = dead;
     restarts at 0/30/120s, at most 3 per 10 minutes, then GIVE UP loudly and
-    keep probing so recovery is announced."""
+    keep probing so recovery is announced.
+
+    ⟨CORRECTED 2026-08-07⟩ This used to say "4 consecutive failed /models
+    probes = dead (a seam that cannot answer metadata for a minute is not
+    busy, it is not serving)". Both halves were wrong: the threshold is read
+    from the constant rather than fixed at 4, and the parenthetical is the
+    premise the constants block above retracts — geniex serves one request at
+    a time, so /models DOES queue behind a generation and a busy seam is
+    byte-identical to a dead one. A docstring asserting the retracted reason,
+    in the copy `synapse up` actually runs, is how that premise survived the
+    first fix."""
 
     def __init__(self, *, models_url: str, seam_name: str, restart,
                  child: subprocess.Popen | None = None,
@@ -381,9 +420,22 @@ class SeamSupervisor:
             return
         delay = RESTART_DELAYS_S[attempt - 1]
         span = int(now - self._first_strike_at) if self._first_strike_at else 0
-        cause = (reason if immediate else
-                 f"{DEATH_STRIKES} consecutive probe failures over {span}s "
-                 f"(last OK {down}s ago; last reason: {reason})")
+        if immediate:
+            cause = reason
+        elif DEATH_STRIKES == 1:
+            # At a single strike the first strike IS the death, so the span
+            # between them is zero while the seam has really been silent for a
+            # cadence plus a whole probe timeout — "over 0s" would read as an
+            # instant death. Report the silence, which `down` already holds.
+            # Re-read the clock rather than reuse `down`: `now` was sampled at
+            # the top of the tick, before the probe spent its timeout, so
+            # `down` undercounts the silence by a whole PROBE_TIMEOUT_S.
+            cause = (f"no answer for {int(self._now() - self.last_ok)}s "
+                     f"(one strike is fatal at a {PROBE_TIMEOUT_S:g}s timeout; "
+                     f"last reason: {reason})")
+        else:
+            cause = (f"{DEATH_STRIKES} consecutive probe failures over {span}s "
+                     f"(last OK {down}s ago; last reason: {reason})")
         self.log(
             f"SUPERVISOR: model seam DEAD — {cause}. "
             f"Restarting {self.seam_name} (attempt {attempt}/"
