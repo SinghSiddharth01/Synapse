@@ -11,11 +11,29 @@
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue)](pyproject.toml)
 [![Platforms](https://img.shields.io/badge/runs%20on-macOS%20·%20Linux%20·%20Windows%2FARM64-8A2BE2)](docs/JOIN-WINDOWS.md)
 
-[Install](#getting-started) · [Documentation](https://SinghSiddharth01.github.io/Synapse/) · [Architecture](docs/architecture.md) · [Join a team](docs/JOIN.md) · [Demo script](docs/demo-script.md)
+[**Quickstart**](#quickstart) · [**How it works**](#how-it-works) · [**Installation**](#installation) · [**MCP tools**](#the-mcp-tools) · [**Docs**](https://SinghSiddharth01.github.io/Synapse/) · [**Contributing**](docs/contributing.md)
 
 </div>
 
-Install the client in one command, point it at your team's service, and your coding agent can ask what the team already learned — and put what it learns back:
+---
+
+## Overview
+
+When several engineers work toward the same goal, their agents each hold a different slice of the same problem — and those slices never meet. One person's agent spends an hour ruling out a theory that the person next to them ruled out yesterday.
+
+Synapse closes that gap without changing anyone's workflow. A lightweight **Edge Worker** tails the local agent's transcript on-device. A small model **distils** it into structured *Findings* — key learnings, decisions, dead ends, open questions — each stamped with its contributor. A local **Orchestrator**, the single egress point per machine, ships only those Findings to a **Synapse Service** that a teammate hosts on the LAN, where a large model merges everyone's Findings into one shared memory: deduplicating semantically, flagging conflicts, keeping a bounded prose summary. Agents read it back on demand through six MCP tools.
+
+**What makes it different**
+
+- **Passive, not per-insight opt-in.** The worker observes an *unmodified* agent session. Agents are detected, never configured.
+- **Private by construction.** The Edge Worker is the only component that ever sees raw transcript text. Only abstracted Findings leave the machine.
+- **One egress per machine.** The MCP server is local and speaks streamable HTTP, never stdio — stdio would spawn one server per client and dissolve the property.
+- **Semantic merge, not id dedup.** Two people reaching the same insight in different words produce one Finding carrying both attributions.
+- **Nothing is injected unprompted.** Agents ask; Synapse answers.
+
+## Quickstart
+
+Install the client, point it at your team's service, and start it. No clone, no build.
 
 ```bash
 curl -LsSf https://raw.githubusercontent.com/SinghSiddharth01/Synapse/main/install.sh | sh
@@ -23,146 +41,365 @@ synapse config set service.url http://<your-team-host>:8899
 synapse up
 ```
 
-## The Problem
-
-Every engineer now works alongside an AI coding agent, but each agent is blind to the team. When several people work toward the same goal, their agents repeat the same explorations and duplicate hours of work. What teams lack is a passive listener — running on the Copilot+ PC each member already has — that quietly captures what every agent learns and turns it into shared knowledge.
-
-## The Solution
-
-Synapse is that passive listener: it observes any coding agent's session unmodified and turns isolated agents into a shared team intelligence.
-
-A teammate creates an opt-in shared session from their Copilot+ PC, declaring its purpose; teammates join with one command. Each member holds a different slice of context for the same task, and today those slices never meet. Synapse pools what each agent learns so the team builds on shared knowledge rather than rediscovering it.
-
-## How It Works
-
-**Edge (Snapdragon X Elite).** The Copilot+ PC acts as the control surface. A lightweight worker on each PC observes the local agent's activity, and a small language model distills it into structured findings — key learnings, decisions, dead ends, and open questions — each tagged with contributor and time. Raw work stays on the device. Only distilled findings stream to the shared context service.
-
-**Cloud (Qualcomm Cloud AI 100).** The shared context service runs a large model that merges everyone's findings into one shared working memory: deduplicating, flagging conflicts, and organizing against the session's purpose.
-
-**Retrieval (MCP).** Agents retrieve on demand through simple MCP commands; nothing is injected unprompted. Queries are natural language, and the service returns only relevant, ranked results. When one member's agent learns something, every teammate's agent can build on it minutes later rather than arriving at it independently.
-
-## Why Qualcomm's Connected Ecosystem
-
-Per-user distillation runs constantly, so it must be local, private, and power-efficient. The Snapdragon X Elite's Hexagon NPU runs that always-on distillation off the critical path — leaving CPU and GPU free for the developer's own compile/test loop — with models served locally through GenieX. Cross-team synthesis needs a large model serving many users at low cost — the sustained-inference workload Cloud AI 100 is built for.
-
-Edge distillation on Snapdragon plus cloud synthesis on Cloud AI 100 is the division of labor this hardware was designed for.
-
-## Technologies
-
-- **On-device SLM inference** on the Snapdragon X Elite NPU
-- **Qualcomm Cloud AI 100** for synthesis and retrieval
-- **MCP** (Model Context Protocol) for the agent-facing interface
-- **Claude Code** as the demo agent — the worker auto-detects which agent product is running, and a Codex adapter is registered alongside it (`packages/worker/src/synapse_worker/discovery.py:279-284`), built from the Codex source tree rather than against a live transcript. The design is agent-agnostic; Claude Code is the path with live evidence behind it.
-
-## Five-Day Plan
-
-| Days | Focus |
-|------|-------|
-| 1–3 | Build and validate each component independently — on-device distillation, cloud synthesis, memory, and retrieval — so every piece is proven before anything depends on it |
-| 4–5 | Integrate into the end-to-end pipeline and prepare the demo |
-
-## Stretch Goals
-
-- Mobile contributions (photos and voice notes)
-- Knowledge persisting across sessions
-- A team dashboard
-
-## Impact
-
-Our demo highlights one concrete use case: a team debugging a shared issue, combining a lab engineer's on-target context with a developer's code context. The architecture applies to any collaborative work where AI agents operate alone — from incident response to code review to design exploration.
-
-## Getting Started
-
-The lifecycle has three separate stages — **install** puts commands on the machine, **configure** sets values (all re-settable, like `git config`), **run** starts processes (foreground only; nothing is a daemon, nothing starts at install time). Two packages ship independently: the **client** (`synapse` — orchestrator, MCP server, edge worker; what every consumer machine runs) and the **server** (`synapse-server` — the shared context service; one machine per team). CI builds both bundles on every release (`.github/workflows/release.yml`), so nobody clones this repo to use Synapse.
-
-### 1 · Install (no clone, no arguments, installs nothing but the software)
-
-The installer checks each prerequisite and uses what already exists: `uv` is installed only if missing (a version warning if it is old), Python 3.12+ is downloaded by uv only if the machine has none, and GenieX is only ever considered on Snapdragon (ARM64 Windows) hardware — never installed where it cannot run.
+One machine per team also runs the service:
 
 ```bash
-# client (macOS / Linux)
+curl -LsSf https://raw.githubusercontent.com/SinghSiddharth01/Synapse/main/install.sh | sh -s -- server
+synapse-server configure --keys /path/to/keys.txt
+synapse-server up
+```
+
+`synapse up` prints the `claude mcp add` line for Claude Code and the lines a teammate needs to join you. Windows equivalents and the full three-stage story are in [Installation](#installation).
+
+## How it works
+
+```mermaid
+flowchart TB
+  subgraph EDGE["Developer machine"]
+    T["Agent transcript<br/>JSONL on disk"]
+    W["Edge Worker<br/>follow → segment → triage → compact"]
+    D["Distiller — model call 1<br/>NPU / Anthropic / claude-cli"]
+    A["Coding agent<br/>MCP client"]
+    O["Orchestrator :8787<br/>MCP tools · producer route · Relay + WAL"]
+  end
+  subgraph SVC["Synapse Service :8899"]
+    I["Ingest<br/>store.upsert"]
+    L["Finding Log<br/>append-only"]
+    S["Synthesis — model call 2<br/>AIC100 Llama-3.3-70B"]
+    M["Working Memory"]
+    R["Retrieval — model call 3<br/>five lanes → rank"]
+  end
+  T --> W --> D --> O
+  A -- contribute --> O
+  A -- query --> O
+  O -- "POST /v1/sessions/.../findings" --> I
+  I --> L
+  L --> S --> M
+  M --> S
+  L --> R
+  M --> R
+  O -- "POST /v1/sessions/.../query" --> R
+  R --> O --> A
+```
+
+1. **Worker** tails the local agent's transcript, triages it deterministically, and a small model distils what survives into Findings. It is the only component that ever sees raw transcript content.
+2. **Orchestrator** is the single egress — one per laptop, on `127.0.0.1:8787`. It serves the MCP tools and the producer endpoint, and rejects any malformed body with a 422 rather than forwarding it.
+3. **Service** holds the Shared Session. The Finding Log is append-only and the shared memory is a *fold* over it; synthesis is debounced, with a force-now override.
+4. **Retrieval** ranks over the Finding Log across several lanes, unioned and fused. The service does the ranking, so reading costs you no local model.
+5. **Agents** reach all of it through six MCP tools.
+
+Exactly three model calls exist in the whole system — distillation, synthesis, retrieval ranking. Nothing else calls a model.
+
+**Ports, once running**
+
+| Port | Component | URL |
+|---|---|---|
+| `8787` | Orchestrator — **the MCP endpoint** | `http://127.0.0.1:8787/mcp` |
+| `8899` | Synapse Service — shared memory + `/debug` dashboard | `http://127.0.0.1:8899` |
+| `18181` | Model seam — stand-in or `geniex serve` | `http://127.0.0.1:18181/v1` |
+
+**Hardware.** Per-user distillation runs constantly, so it belongs on-device: the Snapdragon X Elite's Hexagon NPU runs it off the critical path via GenieX, leaving CPU and GPU free for the developer's own compile/test loop. Cross-team synthesis needs a large model serving many users at low cost — Qualcomm Cloud AI 100 with Llama-3.3-70B. **Neither is required.** A model stand-in makes every line of the system run unchanged on an ordinary laptop.
+
+## Installation
+
+The lifecycle is **three separate stages**, and they never blur into each other:
+
+| Stage | Command | What it does |
+|---|---|---|
+| **Install** | `install.sh` / `install.ps1` | Puts the command on the machine. Writes no config, asks no questions, registers nothing, **starts nothing** |
+| **Configure** | `synapse configure` · `synapse config set` | Sets values, re-settable any time, git-style |
+| **Run** | `synapse up` · `synapse-server up` | Starts processes in the **foreground**, only when you ask. Nothing is a daemon |
+
+Two packages ship independently:
+
+- **client** — `synapse`: orchestrator, MCP server, edge worker. What every engineer's machine runs.
+- **server** — `synapse-server`: the shared context service. One machine per team.
+
+CI builds both bundles on every release, so **nobody clones this repo to use Synapse**.
+
+### 1 · Install
+
+The installer uses what already exists: `uv` is installed only if missing (with a warning if it is old), Python 3.12+ is downloaded by uv only if the machine has none, and GenieX is only ever considered on Snapdragon (ARM64 Windows) hardware — never installed where it cannot run.
+
+<table>
+<tr><th width="50%">macOS / Linux</th><th width="50%">Windows (PowerShell)</th></tr>
+<tr valign="top"><td>
+
+```bash
+# client
 curl -LsSf https://raw.githubusercontent.com/SinghSiddharth01/Synapse/main/install.sh | sh
 
 # server
 curl -LsSf https://raw.githubusercontent.com/SinghSiddharth01/Synapse/main/install.sh | sh -s -- server
 ```
 
+</td><td>
+
 ```powershell
-# client (Windows)
+# client
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/SinghSiddharth01/Synapse/main/install.ps1)))
 
 # server
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/SinghSiddharth01/Synapse/main/install.ps1))) -Component server
 ```
 
-### 2 · Configure (separate step, reconfigurable any time)
+</td></tr>
+</table>
+
+`sh -s --` and `[scriptblock]::Create` are load-bearing — they are the only forms that let an argument through the pipe, since `irm … | iex` cannot take one.
+
+| macOS / Linux | Windows | Effect |
+|---|---|---|
+| `client` \| `server` | `-Component client\|server` | Which package to install (default `client`) |
+| `--tag <tag>` | `-Tag <tag>` | Install a specific release instead of the latest |
+| `--local <dir>` | `-Local <dir>` | Install from a local bundle or checkout instead of GitHub |
+| `--update` | `-Update` | Reinstall over an existing install, picking up new versions |
+| `-h`, `--help` | `-?` | Usage |
+
+> [!NOTE]
+> Install no longer takes `--purpose`, `--shared-id`, `--service-url` or `--contributor`. Those were installer flags in an earlier design; configuration and session lifecycle are separate stages now, and the installer will tell you so if you pass one.
+
+### 2 · Configure
+
+Values live in `~/.synapse/config.toml` (override the directory with `$SYNAPSE_HOME`) and are re-settable any time — the service URL in particular is *expected* to change as you move between networks, exactly like pointing a git remote somewhere else.
 
 ```bash
-# the machine hosting the service — API keys live in a FILE, one key per line:
-synapse-server configure --keys /path/to/keys.txt
-
-# every client machine — the URL is ping-tested the moment you set it:
-synapse configure                       # guided, or non-interactively:
+# every client machine — the URL is ping-tested the moment you set it
+synapse configure                                  # guided, or non-interactively:
 synapse config set service.url http://192.168.4.44:8899
 synapse config set user.contributor akhil
-synapse config set client.distiller claude-cli   # npu | anthropic | claude-cli | listen
+synapse config set client.distiller claude-cli     # npu | anthropic | claude-cli | listen
+
+# the machine hosting the service — API keys live in a FILE, one key per line
+synapse-server configure --keys /path/to/keys.txt
 ```
 
-The service URL is expected to change (new LAN, new host) — `synapse config set service.url …` any time, exactly like pointing a git remote somewhere else.
+`synapse config` is git-style throughout: `get`, `set`, `unset`, `list`.
 
-### 3 · Run (services exist only while these commands do)
+<details>
+<summary><b>Every configuration key</b></summary>
+
+**Client**
+
+| Key | Meaning |
+|---|---|
+| `service.url` | Base URL of the Synapse Service this client talks to |
+| `user.contributor` | The name findings from this machine are attributed to |
+| `client.distiller` | Which model distils here: `npu` \| `anthropic` \| `claude-cli` \| `listen` |
+| `client.claude_model` | Model override for the `anthropic` / `claude-cli` arms |
+| `client.worker` | `on` \| `off` — start the passive Edge Worker with `synapse up` |
+
+**Server**
+
+| Key | Meaning |
+|---|---|
+| `server.keys_file` | Path to a file of inference-cloud API keys, one per line |
+| `server.base_url` | Inference-cloud base URL the server synthesizes against |
+| `server.model` | Synthesis model name (e.g. `Llama-3.3-70B`) |
+| `server.synthesizer` | `aic100` \| `npu` \| `anthropic` \| `fake` |
+| `server.host` | Interface `synapse-server` binds (default `0.0.0.0`) |
+| `server.port` | Port `synapse-server` binds (default `8899`) |
+
+Unknown keys are still stored — an older CLI must never destroy a newer CLI's setting — but the CLI warns about them.
+
+`client.distiller = claude-cli` needs **no API key at all**: it uses your local `claude` binary's subscription.
+
+</details>
+
+### 3 · Run
+
+Services exist only while these commands do. Ctrl-C stops them.
 
 ```bash
 synapse-server up    # host: health-checks every key against the cloud FIRST, then serves
-synapse up           # client: model seam + orchestrator + worker; Ctrl-C stops the lot
+synapse up           # client: model seam + orchestrator + worker
 synapse health       # either side, any time: what is configured, what is running
 ```
 
-`synapse up` prints the MCP line for Claude Code (`claude mcp add --transport http --scope project synapse http://127.0.0.1:8787/mcp`) and the three lines a teammate needs. `synapse-server health` re-checks the key pool on demand.
+`synapse up` accepts per-run overrides that do not touch your config — `--service-url`, `--contributor`, `--distiller`, `--claude-model`, `--no-worker`. It deliberately has **no** `--shared-id` or `--purpose`: `up` starts processes, while Shared Sessions are a separate lifecycle owned by the MCP tools once an agent connects.
 
-### Developing (from a checkout)
+`synapse-server up` takes `--host`, `--port`, `--skip-key-check` and `--force`. Both sides have a `health` subcommand that reports what is configured and what is running, with a remedy per failing line; `synapse-server health --json` is machine-readable.
+
+### Developing from a checkout
 
 ```bash
 git clone https://github.com/SinghSiddharth01/Synapse.git
 cd Synapse
 uv sync
 cp secrets.example.jsonc secrets.jsonc   # paste keys here; none are needed for a first run
-```
-
-> **Windows on ARM64:** point `uv` at the ARM64 interpreter explicitly (e.g. `uv venv --python <path-to-arm64-python.exe>` before `uv sync`) — a bare `uv venv` can silently provision an emulated x86_64 environment, which breaks NPU wheel installs. Also pin `mcp==1.9.4`; newer `mcp` releases pull a `cryptography` dependency with no ARM64 Windows wheel. (`install.ps1` handles both automatically.)
-
-### Run it
-
-The fastest way to see Synapse end to end, with no NPU or cloud credentials required, is `scripts/serve_local.py`. It starts the Synapse Service, the Orchestrator, and a model stand-in, then creates (or joins) a Shared Session:
-
-```bash
 uv run python scripts/serve_local.py --purpose "my first shared session"
 ```
 
-This prints a Shared Session id and an MCP URL. Connect Claude Code to it:
+`scripts/serve_local.py` is the all-in-one development path: it starts the service, the orchestrator and a model stand-in, then creates or joins a Shared Session and prints the MCP URL. Add `--npu` for a real GenieX seam — it starts `geniex serve` itself if `:18181` is free, adopts one already running otherwise, and supervises it either way, probing `GET /v1/models` every 15s and restarting the seam if it goes silent (a known failure mode where the process survives but its HTTP server stops answering). Add `--live` to proxy the seam to a real cloud model, or `--npu --live` for the split production topology: distil on the local NPU, synthesize on the real 70B.
+
+From a checkout, `uv run python scripts/doctor.py` additionally reports on `uv`, the interpreter, the `mcp==1.9.4` pin, console encoding, the three ports, `secrets.jsonc`, the awareness pack, and your `claude mcp` registration.
+
+> [!IMPORTANT]
+> **Windows on ARM64.** Point `uv` at the ARM64 interpreter explicitly (e.g. `uv venv --python <path-to-arm64-python.exe>` before `uv sync`) — a bare `uv venv` can silently provision an emulated x86_64 environment, which breaks NPU wheel installs. Also keep `mcp` pinned at `1.9.4`; newer releases pull a `cryptography` dependency with no ARM64 Windows wheel. `install.ps1` handles both automatically.
+
+---
+
+### Connecting a coding agent
+
+**Claude Code is the supported client.** A Codex adapter is registered in the worker, but it was built from the Codex source tree rather than against a live transcript, and it has no awareness pack — see `fixtures/raw_lines/codex/README.md` for exactly what was and was not verified.
+
+#### 1. Register the MCP server
+
+`synapse up` prints this line for you. Run it **from the project you want shared memory in** — identical on both platforms:
 
 ```bash
 claude mcp add --transport http --scope project synapse http://127.0.0.1:8787/mcp
 ```
 
-Start a **new** Claude Code session in that project and approve the `synapse` server when prompted — the `mcp__synapse__query` and `mcp__synapse__contribute` tools then become available (verify with `/mcp` inside the session). A second teammate joins the same Shared Session by re-running `serve_local.py --shared-id <the id printed above>` from their own machine, or by running `synapse-worker join <shared_id>` to passively observe an existing Claude Code transcript instead of calling `contribute` directly.
+`--scope project` writes a committable `.mcp.json`, so everyone who clones that repo gets the connection. `--scope user` (`~/.claude.json`) covers every project on your machine instead, and is not shared.
 
-Add `--npu` to use a real GenieX NPU seam — `serve_local.py` starts `geniex serve` itself if `:18181` is free, adopts one that is already running otherwise, and supervises it either way: it probes `GET /v1/models` every 15s and restarts the seam if it stops answering, because `geniex serve` is known to keep its process alive while its HTTP server goes silent. Every transition prints to your terminal and to `.synapse/logs/supervisor.log`. Add `--live` to proxy the model seam to a real cloud model instead of the stand-in, or `--npu --live` together for the split production topology: distil on the local NPU, synthesize on the real 70B.
+> Always point at **your own** `127.0.0.1:8787`, never the host's. One orchestrator per laptop — otherwise your findings get stamped with someone else's contributor.
 
-To check a machine *before* starting anything: `synapse health` (installed client) or `synapse-server health` (installed server) shows what is configured and what is running, with a remedy per failing line. From a checkout, `uv run python scripts/doctor.py` additionally reports on `uv`, the interpreter, the `mcp==1.9.4` pin, console encoding, the three ports, `secrets.jsonc`, the awareness pack, and your `claude mcp` registration.
+#### 2. Start a new session and approve it
 
-### Run the test suite
+The config is read at session start, not live. Open a **new** Claude Code session in that project and approve the `synapse` server when prompted. Verify with:
 
 ```bash
-uv run pytest
+claude mcp list        # expect: ✔ Connected  synapse
 ```
 
-### Further reading
+or `/mcp` from inside the session. The tools appear as `mcp__synapse__query`, `mcp__synapse__contribute`, and the four session-lifecycle tools.
 
-- [`docs/demo-script.md`](docs/demo-script.md) — the full scripted walkthrough (multiple contributors, cross-teammate retrieval, and recovery after a service restart)
-- [`packs/claude-code/INSTALL.md`](packs/claude-code/INSTALL.md) — optional awareness hooks that make shared-memory updates surface proactively inside a Claude Code session, rather than only on demand via `query`
-- [`docs/architecture.md`](docs/architecture.md) — architecture deep-dive (`docs/architecture.html` is a standalone rendered copy of the same material; the Markdown is the one the docs site publishes and the one to edit)
-- [`CONTEXT.md`](CONTEXT.md) — vocabulary and design invariants
+#### 3. Install the awareness pack
+
+Copied into `~/.claude/{skills,commands,agents}/` — existing entries are *moved aside*, never deleted:
+
+```bash
+# macOS / Linux
+mkdir -p ~/.claude/skills
+cp -r packs/claude-code/skills/synapse-shared-memory ~/.claude/skills/
+```
+
+```powershell
+# Windows
+New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\.claude\skills" | Out-Null
+Copy-Item -Recurse -Force packs\claude-code\skills\synapse-shared-memory "$env:USERPROFILE\.claude\skills\"
+```
+
+Restart Claude Code afterwards. This matters more than it looks: without the pack the agent *has* the tools but rarely reaches for them.
+
+#### 4. Create or join a Shared Session
+
+Sessions are owned by the MCP tools, not by the CLI. Ask your agent to `create_session` (if you are starting the work) or `join_session` with the id a teammate sends you. From a checkout, `uv run synapse-worker join <shared-id> --contributor <name> --agent-session-id "$CLAUDE_CODE_SESSION_ID"` binds a conversation for passive observation without going through the agent; `--agent-session-id` is what tells two Claude Code windows apart.
+
+<details>
+<summary><b>Optional — the freshness hook</b> (never installed automatically)</summary>
+
+Nothing touches your `settings.json` for you. To get the hook that speaks one line on the first turn after shared memory changes, wire it up per project:
+
+```bash
+mkdir -p .claude/synapse-pack
+cp -r <path-to-synapse-repo>/packs/claude-code/hooks .claude/synapse-pack/hooks
+```
+
+Then merge `packs/claude-code/settings-snippet.json` into `<project>/.claude/settings.json` by hand — it registers a `UserPromptSubmit` hook with a 5s timeout. Verify with:
+
+```bash
+python3 .claude/synapse-pack/hooks/freshness_pointer.py; echo "exit: $?"
+```
+
+Exit 0 with no output is correct: the hook fails open by design. For a non-default service, set `SYNAPSE_SERVICE_URL` under `"env"` in `.claude/settings.json`.
+
+Full details in [`packs/claude-code/INSTALL.md`](packs/claude-code/INSTALL.md).
+
+</details>
+
+## The MCP tools
+
+Six tools, all registered unconditionally by the orchestrator. Every one returns plain prose and **never raises** — a failure is a sentence, not a stack trace.
+
+| Tool | Signature | What it does |
+|---|---|---|
+| `query` | `(question, agent_session_id?)` | Searches the team's shared memory. Returns ranked `[type] text — contributor(s)` lines, or an explicit "nothing relevant to that. (Checked — not skipped.)" |
+| `contribute` | `(text, agent_session_id?)` | Pushes a durable insight. Runs the real distiller over your text and marks the result as contributed rather than distilled |
+| `create_session` | `(purpose, agent_session_id?)` | Creates a Shared Session, registers you as a member, binds this conversation |
+| `join_session` | `(shared_id, agent_session_id?)` | Liveness-probes the service first, then adds you as a member and binds |
+| `leave_session` | `(agent_session_id?)` | Detaches **this conversation only**, leaving the session open for everyone else — including your own other windows |
+| `end_session` | `(agent_session_id?, confirm?)` | Closes the session for everyone, permanently. Creator-only, and refuses — naming names — while other contributors remain |
+
+A session, end to end:
+
+```
+alice   create_session("tracking down the DMA timing bug")   →  sh-bbe76a56
+bob     join_session("sh-bbe76a56")
+bob     contribute("the retry path double-frees on the timeout branch")
+alice   query("anything known about the timeout branch?")     →  bob's finding, attributed
+```
+
+Two more agent-facing surfaces come for free: the **arrival briefing**, which rides MCP's `instructions` field so a late joiner is oriented without a hook pack, and `POST /producer/findings` on the orchestrator for anything else that wants to emit Findings.
+
+Full reference: [`docs/reference/mcp-tools.md`](docs/reference/mcp-tools.md) · [`docs/reference/service-http.md`](docs/reference/service-http.md).
+
+## Project layout
+
+A `uv` workspace — pure Python, one-way dependency edges.
+
+| Path | Role |
+|---|---|
+| `packages/contracts` | Frozen cross-package schemas: `Finding`, `Segment`, `Attribution`, `SynapseSession`, `LocalBinding`, user config |
+| `packages/providers` | `ModelProvider` implementations — the one seam every model call goes through (NPU, Anthropic, `claude` CLI, AIC100, fake) |
+| `packages/distiller` | Segment → `Finding[]`, on-device. Prompt packs, capability-derived budgets, guards, evaluation |
+| `packages/worker` | Edge Worker: follow, segment, triage, compact, distil, push. Agent discovery and transcript adapters |
+| `packages/orchestrator` | Local hub: MCP server, producer route, Relay + WAL, LocalBinding, arrival briefing |
+| `packages/service` | Shared memory: ingest, append-only log, fold, synthesis, five-lane retrieval, `synapse-server` CLI |
+| `packages/cli` | The `synapse` client CLI — `configure`, `config`, `up`, `health` |
+| `scripts/` | `serve_local.py` (the development entry point), `doctor.py`, the model stand-in, demo and measurement harnesses |
+| `packs/claude-code/` | Shipped awareness pack — skill, commands, freshness hook, settings snippet |
+| `fixtures/` | Golden evaluation corpus: hand-authored segments paired with expected Findings, plus triage expectations |
+| `docs/` | The published site, ADRs, runbooks, and the design record |
+| `presentation/` | Self-contained deck, opens from `file://` |
+
+## Development
+
+```bash
+uv sync                  # install the workspace
+uv run pytest            # the full suite — offline, no keys, no network
+uv run mkdocs serve      # preview the docs site locally
+```
+
+The suite runs entirely against a fake provider. Anything that needs a live port, a real key, or real money is deliberately a `scripts/` file rather than a test.
+
+CI runs four offline jobs on every push and PR: `ruff` lint; the test suite; an install-path job that executes both halves of the installer; and an end-to-end demo rehearsal against real service and orchestrator subprocesses over real localhost sockets. A docs workflow builds the site on every PR and deploys to GitHub Pages from `main`, and a release workflow builds the client and server wheel bundles.
+
+See [`docs/contributing.md`](docs/contributing.md) for repo conventions, how to add an agent adapter or a model provider, and the documentation discipline (some of it enforced by a failing test).
+
+## Status and limitations
+
+Synapse works end to end, and these are true today:
+
+- **The memory is in-process.** Restart the host's service and the Shared Session is genuinely empty — the shared-id changes too.
+- **The service has no authentication.** It binds `0.0.0.0` by default so teammates can reach it, which means anyone who can reach port `8899` can read and write the team's memory. Set `server.host` to `127.0.0.1` to keep it local.
+- **Distillation abstracts; it does not redact.** Measured verbatim overlap is 0.10. Point the passive worker only at a conversation you would be happy to read aloud.
+- **Codex is unverified.** The adapter exists and is registered, but Claude Code is the path with live evidence behind it.
+
+## Roadmap
+
+Directions we think are right, not commitments:
+
+- Persistent shared memory across service restarts and across sessions
+- A Codex awareness pack, and a second verified agent adapter
+- Mobile contributions — photos and voice notes from the lab bench
+- A team dashboard over the Finding Log
+
+## Documentation
+
+| | |
+|---|---|
+| [**Docs site**](https://SinghSiddharth01.github.io/Synapse/) | Published reference and guides |
+| [`docs/first-run.md`](docs/first-run.md) | Ten minutes, one machine, no NPU and no credentials |
+| [`docs/architecture.md`](docs/architecture.md) | The deep dive — every stage, with the code that implements it |
+| [`docs/JOIN.md`](docs/JOIN.md) · [`docs/JOIN-WINDOWS.md`](docs/JOIN-WINDOWS.md) | Multi-machine join runbooks, bash and PowerShell |
+| [`docs/reference/mcp-tools.md`](docs/reference/mcp-tools.md) · [`docs/reference/service-http.md`](docs/reference/service-http.md) | Tool and HTTP reference |
+| [`docs/demo-script.md`](docs/demo-script.md) | The full scripted walkthrough |
+| [`docs/troubleshooting.md`](docs/troubleshooting.md) | Symptom → cause → fix, ordered by when you hit it |
+| [`docs/adr/`](docs/adr/0004-the-log-is-append-only-and-state-is-a-fold.md) | Why the system is shaped the way it is |
+| [`CONTEXT.md`](CONTEXT.md) | Vocabulary and design invariants — the naming authority |
+| [`packs/claude-code/INSTALL.md`](packs/claude-code/INSTALL.md) | The awareness pack in full |
 
 ## Team
 
