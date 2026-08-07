@@ -3491,8 +3491,8 @@ _HOME_PAGE = """<!doctype html>
         <path class="ah" stroke="var(--cyan)" d="M898 300 l-11 -5 m11 5 l-11 5"/>
         <path class="flow syn" d="M898 370 C 860 370, 850 370, 800 370"/>
         <path class="ah" stroke="var(--cyan)" d="M800 370 l11 -5 m-11 5 l11 5"/>
-        <text class="t-cyan t-mono" x="828" y="282" text-anchor="middle">merge round</text>
-        <text class="t-cyan t-mono" x="833" y="394" text-anchor="middle">rewritten</text>
+        <text class="t-cyan t-mono" x="846" y="282" text-anchor="middle" style="font-size:12px;letter-spacing:0.02em">merge round</text>
+        <text class="t-cyan t-mono" x="846" y="394" text-anchor="middle" style="font-size:12px;letter-spacing:0.02em">rewritten</text>
 
         <rect class="box cld" x="900" y="240" width="320" height="190" rx="14"/>
         <text class="t-cyan t-mono" x="1060" y="274" text-anchor="middle" style="letter-spacing:0.1em">CLOUD AI 100</text>
