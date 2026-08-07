@@ -216,7 +216,12 @@ fi
 step "P3  install"
 if [ "$COMPONENT" = "server" ]; then TOOL_GLOB="synapse_service"; TOOL="synapse-service"
 else TOOL_GLOB="synapse_cli"; TOOL="synapse-cli"; fi
-TOOL_WHEEL=$(ls "$WHEELS/$TOOL_GLOB"-*.whl 2>/dev/null | head -n 1)
+TOOL_WHEEL=""
+for WHEEL in "$WHEELS/$TOOL_GLOB"-*.whl; do
+  [ -e "$WHEEL" ] || continue
+  TOOL_WHEEL=$WHEEL
+  break
+done
 [ -n "$TOOL_WHEEL" ] || die "no $TOOL wheel in $WHEELS — wrong bundle for '$COMPONENT'?"
 # Every synapse-* dependency is pinned to the bundle's own wheel by explicit
 # path (--with <file>), so nothing that happens to share a name on PyPI can
