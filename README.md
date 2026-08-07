@@ -238,6 +238,38 @@ synapse health       # either side, any time: what is configured, what is runnin
 
 `synapse-server up` takes `--host`, `--port`, `--skip-key-check` and `--force`. Both sides have a `health` subcommand that reports what is configured and what is running, with a remedy per failing line; `synapse-server health --json` is machine-readable.
 
+### Synthesis rate limits
+
+The synthesis key is rate limited per key — 5 requests/minute, 20/hour, 250/day
+and 25,000 tokens/hour on the hosted Llama-3.3-70B arm. The service reads the
+gateway's own `X-RateLimit-*` headers and falls back to its internal estimate
+only for the dimensions the gateway did not report. A 429 rotates to the next
+key first, then waits and retries up to three times (~36s, capped at 45s total)
+before synthesis defers.
+
+The hour and day budgets are enforced ahead of time, because overrunning one
+means waiting up to an hour. The per-minute limit deliberately is not: a burst
+clears in seconds and the retry above absorbs it, whereas refusing synthesis
+pre-emptively would stall the memory over traffic — including ordinary
+`/query` reads, which spend the same key — that was about to succeed anyway.
+
+Current headroom shows on the brain page (`/debug`) as **Synthesis key**. A
+`LIMITED` reading there is the answer to *"findings are landing but the working
+memory is not moving"*; `—` means no headers have been recognised yet, which is
+not the same as headroom.
+
+Deferred merges are not lost and do not wait for another push: a background
+drain re-runs them once the interval passes and the budget allows.
+
+- `INFERENCE_CLOUD_API_KEYS` — comma-separated pool. Rotation happens before any
+  waiting, so more keys means less waiting.
+- `SYNAPSE_SYNTHESIS_KEYS` — must match the pool size. Setting it higher
+  authorises budget the pool cannot pay for; the service warns at boot.
+- `INFERENCE_CLOUD_MAX_TOKENS` — the synthesis output cap (default 1600, giving
+  a 500-word working memory and room for 10 merge verdicts). Raise
+  `INFERENCE_CLOUD_TIMEOUT` with it.
+- `SYNAPSE_DRAIN_DISABLED=1` — turn off the background drain.
+
 ### Uninstall
 
 ```bash

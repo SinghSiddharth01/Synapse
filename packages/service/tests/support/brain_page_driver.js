@@ -14,6 +14,7 @@
  "stat-contributors", "stat-contributors-log", "stat-conversations",
  "stat-visible", "stat-superseded",
  "stat-trivial", "stat-conflicts", "stat-version", "stat-entries",
+ "stat-ratelimit", "stat-ratelimit-why",
  "wm-meta", "wm-body", "rev-count", "revisions", "participants",
  "recent"].forEach(function (id) { seed("div", id); });
 
@@ -28,6 +29,10 @@ var SESSION = {
   counts: {
     contributors: 2, contributors_in_log: 1, conversations: 2,
     visible: 18, superseded: 6, trivial: 2, conflicts: 1, log_entries: 63,
+  },
+  rate_limit: {
+    state: "ok", requests_remaining: 13, tokens_remaining: 18000,
+    reset_seconds: null, reason: "headroom reported by the provider",
   },
   working_memory: {
     text: "the team is chasing a decode failure",

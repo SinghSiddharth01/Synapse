@@ -507,8 +507,39 @@ def _working_memory(ctx: Any, wm_log: WorkingMemoryLog | None, sid: str) -> dict
     }
 
 
+def _rate_limit_panel(provider: Any) -> dict[str, Any]:
+    """What the synthesis key has left, as the gateway last reported it.
+
+    Three states, and "unknown" is not "ok": the snapshot is empty until the
+    first response and stays empty if the gateway's header spelling is one
+    `synapse_providers.ratelimit` does not know. Showing headroom we cannot
+    see would recreate the silent failure this panel exists to end -- on
+    2026-08-06 a throttled synthesis key was invisible from every surface,
+    with findings landing normally and the working memory simply not moving.
+    """
+    snapshot = getattr(provider, "last_rate_limit", None)
+    if snapshot is None or snapshot.is_empty:
+        return {"state": "unknown", "requests_remaining": None,
+                "tokens_remaining": None, "reset_seconds": None,
+                "reason": "no rate-limit headers seen from the provider yet"}
+
+    throttled = (snapshot.requests_remaining is not None
+                 and snapshot.requests_remaining < 1)
+    if throttled:
+        reset = (f", resets in {snapshot.reset_seconds:.0f}s"
+                 if snapshot.reset_seconds else "")
+        reason = f"provider reported 0 request(s) remaining{reset}"
+    else:
+        reason = "headroom reported by the provider"
+    return {"state": "throttled" if throttled else "ok",
+            "requests_remaining": snapshot.requests_remaining,
+            "tokens_remaining": snapshot.tokens_remaining,
+            "reset_seconds": snapshot.reset_seconds,
+            "reason": reason}
+
+
 def _brain_payload(store: InMemoryStore, feed: Feed, wm_log: WorkingMemoryLog | None,
-                   sid: str) -> dict[str, Any]:
+                   sid: str, provider: Any = None) -> dict[str, Any]:
     ctx = store.get_context(sid)
     view = store.view(sid)
     session = store.get_session(sid)
@@ -537,11 +568,16 @@ def _brain_payload(store: InMemoryStore, feed: Feed, wm_log: WorkingMemoryLog | 
         "working_memory": _working_memory(ctx, wm_log, sid),
         "participants": participants,
         "recent": _recent(store, sid),
+        # Session-independent -- the key is the app's, not this session's --
+        # but it belongs here because this is the page an operator opens when
+        # the memory has stopped moving, and a throttled key is the answer.
+        "rate_limit": _rate_limit_panel(provider),
     }
 
 
 def debug_routes(store: InMemoryStore, call_log: CallLog, feed: Feed,
-                 wm_log: WorkingMemoryLog | None = None) -> list[Route]:
+                 wm_log: WorkingMemoryLog | None = None,
+                 provider: Any = None) -> list[Route]:
     async def stats_json(request: Request) -> JSONResponse:
         sids = store.session_ids()
         sessions = [
@@ -568,7 +604,8 @@ def debug_routes(store: InMemoryStore, call_log: CallLog, feed: Feed,
         ]
         requested = request.query_params.get("session")
         sid = requested if requested in sids else (sids[0] if sids else None)
-        session = _brain_payload(store, feed, wm_log, sid) if sid is not None else None
+        session = (_brain_payload(store, feed, wm_log, sid, provider)
+                   if sid is not None else None)
         return JSONResponse({"sessions": sessions, "session": session})
 
     async def brain_page(request: Request) -> HTMLResponse:
@@ -1419,6 +1456,11 @@ _BRAIN_PAGE = """<!doctype html>
       <div class="value" id="stat-conflicts">0</div>
       <div class="sub">v<span id="stat-version">0</span> · <span id="stat-entries">0</span> log entries</div>
     </div>
+    <div class="node">
+      <div class="label">Synthesis key</div>
+      <div class="value" id="stat-ratelimit" data-state="unknown">—</div>
+      <div class="sub" id="stat-ratelimit-why">rate limit</div>
+    </div>
   </div>
 
   <section class="panel wm">
@@ -1567,6 +1609,30 @@ _BRAIN_PAGE = """<!doctype html>
     document.getElementById("stat-conflicts").textContent = c.conflicts;
     document.getElementById("stat-version").textContent = s.memory_version;
     document.getElementById("stat-entries").textContent = c.log_entries;
+    renderRateLimit(s.rate_limit);
+  }
+
+  // A throttled synthesis key is the answer to "findings are landing but the
+  // working memory is not moving". "unknown" is deliberately not "ok": the
+  // gateway may spell its headers in a way the parser does not know yet, and
+  // claiming headroom we cannot see is the silent failure this row exists for.
+  function renderRateLimit(rl) {
+    var el = document.getElementById("stat-ratelimit");
+    var why = document.getElementById("stat-ratelimit-why");
+    if (!rl) { rl = {state: "unknown", reason: "not reported"}; }
+    // setAttribute rather than .dataset: the page is driven headlessly in
+    // tests by support/minidom.js, which implements attributes and not the
+    // DOMStringMap.
+    el.setAttribute("data-state", rl.state);
+    if (rl.state === "throttled") {
+      el.textContent = "LIMITED";
+    } else if (rl.state === "ok") {
+      el.textContent = rl.requests_remaining === null
+        ? "ok" : rl.requests_remaining + " left";
+    } else {
+      el.textContent = "—";
+    }
+    why.textContent = rl.reason || "rate limit";
   }
 
   function renderWorkingMemory(wm) {
