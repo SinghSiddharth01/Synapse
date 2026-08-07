@@ -109,21 +109,31 @@ The home page is both the scroll landing page and a 6-slide presentation:
   + GitHub. Slides typography scales UP (targets ~80% viewport fill);
   `.scroll-only` elements (terminal, five-providers list, power-draw note,
   footer) hide in slides.
-- **Sessions live in the sidebar only** (with the live status dot), never in
-  scroll or slide content. `id="sessions"` is test-required and stays there.
+- **Navigation is one consistent topbar everywhere**: brand + Home / Brain /
+  Memory / Log (Log deliberately last), with the theme control. The home page
+  has NO sidebar: sessions live in a topbar dropdown (`#sess-menu`, opened by
+  the live-status pill, closed by outside click or Escape). `id="sessions"`
+  is test-required and stays inside the dropdown. Operator pages keep the
+  sessions sidebar and gain the Home tab. The brain page's working-memory
+  panel has a collapse pin (`#wm-collapse`, guarded appended JS; the state
+  lives on `#wm-panel` because the frozen script rewrites `#wm-body`'s class
+  every poll).
 - **Diagrams** (all inline SVG on CSS variables, so they follow the theme):
   the hero network (three workers with their models named: sid and aditya on
   Qwen3-4B · Hexagon NPU, akhil on Claude Haiku · Anthropic API, plus the
   service hub and a Cloud AI 100 chip), the dual-panel why diagram, and the
-  end-to-end architecture diagram: one box per user (agent chip, Synapse MCP ·
-  orchestrator chip, worker → provider chip), five iconized service stages
-  (log, fold, retrieval, synthesis scheduler, working memory) that are
-  **clickable** (`data-focus` on `#arch` dims the rest and swaps the
-  `#arch-detail` explainer), the Llama-3.3-70B AI 100 box, and the provider
-  seam. The "Running today / What it allows" segmented control flips
-  `data-view` (ghost machine + all plugs light via CSS transitions; captions
-  swap in JS). Model symmetry rule: wherever the cloud model (Llama-3.3-70B /
-  AI 100) is named, the local model (Qwen3-4B / Hexagon NPU) is named too.
+  end-to-end architecture diagram: a flat, static components-and-runtimes
+  view with NO toggle and NO click chrome. Each user box mirrors the service
+  box's lane style (mono header, iconized lanes for agent, Synapse MCP ·
+  orchestrator, and worker → provider), the service box holds five iconized
+  stages (log, fold, retrieval, synthesis scheduler, working memory), the
+  Llama-3.3-70B AI 100 box sits right, and the provider seam row closes it.
+  Slide 4 is the complementary data-flow view: two HTML chains (`.flowlane.in`
+  copper: agent → distil → triage → log → synthesize → memory;
+  `.flowlane.out` green: agent asks → lanes → rank → filter → back to agent)
+  with the curated callout. Model symmetry rule: wherever the cloud model
+  (Llama-3.3-70B / AI 100) is named, the local model (Qwen3-4B / Hexagon NPU)
+  is named too.
 - **GitHub link**: the served page may not contain `http://` / `https://`
   substrings (test-enforced), so both GitHub anchors ship with `href="#"` and
   the URL is assembled at runtime in JS. The page still makes zero external
