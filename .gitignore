@@ -39,3 +39,7 @@ __pycache__/
 # `git add -A` after a docs build would commit a whole rendered copy of the
 # site alongside its source. GitHub Pages builds from docs/, never from this.
 site/
+
+# npm workspace for the debug GUI build (animejs is inlined into debug.py;
+# the checkout never needs node_modules at runtime).
+node_modules/
