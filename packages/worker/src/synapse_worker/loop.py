@@ -34,6 +34,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1051,7 +1052,8 @@ class WorkerLoop:
             self.stats.event("tick", result.summary())
         return result
 
-    async def run(self, interval_seconds: float, max_ticks: int | None = None) -> None:
+    async def run(self, interval_seconds: float, max_ticks: int | None = None,
+                  stop_when: Callable[[], bool] | None = None) -> None:
         tick_number = 0
         while max_ticks is None or tick_number < max_ticks:
             tick_number += 1
@@ -1060,6 +1062,11 @@ class WorkerLoop:
                 logger.info("tick %d — %s", tick_number, result.summary())
             except Exception:  # noqa: BLE001 - the loop outlives any one tick
                 logger.exception("Tick %d failed; continuing", tick_number)
+            # Checked BETWEEN ticks, never inside one: whatever the caller is
+            # watching for (cmd_run watches for a newer pinned binding), the
+            # answer must not interrupt a distillation mid-segment.
+            if stop_when is not None and stop_when():
+                return
             if max_ticks is None or tick_number < max_ticks:
                 await asyncio.sleep(interval_seconds)
 

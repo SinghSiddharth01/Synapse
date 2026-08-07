@@ -500,22 +500,66 @@ async def cmd_run(args: argparse.Namespace) -> int:
         return 1
     print(f"canary           ok (prompt_tokens={canary.input_tokens})\n")
 
-    if args.from_start:
-        print("Starting from the beginning of the transcript.\n")
-    elif config.worker.attach_at_end:
-        loop.attach_at_end()
-        print("Attached at the end; only new conversation will be condensed.\n")
+    # Auto-rebind: sessions join and change AFTER the worker attached — a new
+    # conversation's `join_session` used to be invisible to a running worker,
+    # which kept ticking "no change" against the old, finished conversation
+    # until someone restarted `synapse up` (2026-08-07, three field reports).
+    # Between ticks the worker re-resolves; when a NEWER pinned binding names
+    # a different transcript, it flushes the open turn (shutdown already
+    # does) and re-attaches. Never in play when the caller named an exact
+    # source: --transcript is a file, --agent-session-id is a promise.
+    auto_rebind = (not args.transcript
+                   and not getattr(args, "agent_session_id", None))
+    state_dir = Path(config.worker.state_dir)
+    first_attach = True
+    while True:
+        if args.from_start and first_attach:
+            print("Starting from the beginning of the transcript.\n")
+        elif config.worker.attach_at_end:
+            loop.attach_at_end()
+            if first_attach:
+                print("Attached at the end; only new conversation will be condensed.\n")
 
-    try:
-        await loop.run(interval_seconds=interval, max_ticks=args.ticks)
-    except (KeyboardInterrupt, asyncio.CancelledError):
-        # Ctrl-C. On Python 3.11+ asyncio.Runner delivers it by CANCELLING
-        # the main task, so it arrives here as CancelledError, not
-        # KeyboardInterrupt; catching only the latter skipped the graceful
-        # shutdown below and let a traceback escape.
-        pass
-    result = await loop.shutdown()
-    print(f"\nshutdown — {result.summary()}")
+        current_transcript = transcript
+        moved: list[ResolvedTranscript] = []
+
+        def _binding_moved(current=current_transcript, moved=moved) -> bool:
+            if not auto_rebind:
+                return False
+            _, resolved = _resolve_agent_and_transcript(args, state_dir)
+            if resolved is None or resolved.source != "pinned":
+                return False        # heuristic drift never steals the worker
+            if Path(resolved.path) == Path(current):
+                return False
+            moved.append(resolved)
+            return True
+
+        interrupted = False
+        try:
+            await loop.run(interval_seconds=interval, max_ticks=args.ticks,
+                           stop_when=_binding_moved)
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            # Ctrl-C. On Python 3.11+ asyncio.Runner delivers it by
+            # CANCELLING the main task, so it arrives here as CancelledError,
+            # not KeyboardInterrupt; catching only the latter skipped the
+            # graceful shutdown below and let a traceback escape.
+            interrupted = True
+        result = await loop.shutdown()
+        print(f"\nshutdown — {result.summary()}")
+
+        if interrupted or not moved:
+            break
+        resolved = moved[-1]
+        print(f"binding moved — now following {resolved.path} "
+              f"(shared_id {resolved.local_binding.shared_id!r}); the previous "
+              f"conversation's open turn was flushed above.")
+        if stats is not None:
+            stats.event("tick", f"rebind -> {resolved.path.name}")
+        config, loop, transcript, _, source, stats = _build(args, debug_port, stats=stats)
+        if debug_server is not None:
+            debug_server.transcript = str(transcript)
+        first_attach = False
+
     if debug_server is not None:
         debug_server.stop()
     return 0

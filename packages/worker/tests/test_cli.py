@@ -261,6 +261,97 @@ async def test_run_reports_pinned_selection_and_uses_its_binding(tmp_path, monke
     assert "selection        pinned" in out
 
 
+async def test_run_rebinds_to_a_newer_joined_conversation(tmp_path, monkeypatch, capsys) -> None:
+    """A conversation that joins AFTER the worker attached must be picked up
+    without a process restart: between ticks the worker re-resolves the
+    pinned binding, flushes the old transcript's open turn, and re-attaches
+    to the newer one. (2026-08-07: before this, every new chat needed a
+    manual `synapse up` restart — the worker faithfully followed a dead
+    conversation forever, ticking "no change".)"""
+    from synapse_contracts import LocalBinding
+
+    a = tmp_path / "a.jsonl"
+    b = tmp_path / "b.jsonl"
+    _write_transcript(a)
+    _write_transcript(b)
+    monkeypatch.setattr(cli, "check_canary", _async(PASSING_CANARY))
+
+    def _pinned(path, sid, shared):
+        return ResolvedTranscript(
+            path=path, agent_session_id=sid, source="pinned",
+            local_binding=LocalBinding(agent_session_id=sid, shared_id=shared,
+                                       contributor="sid", agent="claude-code"))
+
+    bindings = {"a": _pinned(a, "as-a", "sh-a"), "b": _pinned(b, "as-b", "sh-b")}
+    current = {"key": "a"}
+    monkeypatch.setattr(
+        cli, "resolve_transcript",
+        lambda cwd, state_dir, *, agent=None, agent_session_id=None: bindings[current["key"]],
+    )
+
+    # The "join" from a second conversation lands right after the first tick.
+    real_tick = WorkerLoop.tick
+
+    async def tick_then_join(self):
+        result = await real_tick(self)
+        current["key"] = "b"
+        return result
+
+    monkeypatch.setattr(WorkerLoop, "tick", tick_then_join)
+
+    exit_code = await cli.cmd_run(
+        _ns(transcript=None, interval=0.01, ticks=1, from_start=False)
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "binding moved" in out
+    assert "b.jsonl" in out
+
+
+async def test_run_never_rebinds_away_from_an_explicit_session_id(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """--agent-session-id names EXACTLY one conversation; a newer join from
+    another window must not steal the worker away from it."""
+    from synapse_contracts import LocalBinding
+
+    a = tmp_path / "a.jsonl"
+    b = tmp_path / "b.jsonl"
+    _write_transcript(a)
+    _write_transcript(b)
+    monkeypatch.setattr(cli, "check_canary", _async(PASSING_CANARY))
+
+    def _pinned(path, sid, shared):
+        return ResolvedTranscript(
+            path=path, agent_session_id=sid, source="pinned",
+            local_binding=LocalBinding(agent_session_id=sid, shared_id=shared,
+                                       contributor="sid", agent="claude-code"))
+
+    bindings = {"key": _pinned(a, "as-a", "sh-a")}
+    monkeypatch.setattr(
+        cli, "resolve_transcript",
+        lambda cwd, state_dir, *, agent=None, agent_session_id=None: bindings["key"],
+    )
+
+    real_tick = WorkerLoop.tick
+
+    async def tick_then_join(self):
+        result = await real_tick(self)
+        bindings["key"] = _pinned(b, "as-b", "sh-b")
+        return result
+
+    monkeypatch.setattr(WorkerLoop, "tick", tick_then_join)
+
+    exit_code = await cli.cmd_run(
+        _ns(transcript=None, interval=0.01, ticks=1, from_start=False,
+            agent_session_id="as-a")
+    )
+
+    assert exit_code == 0
+    assert "binding moved" not in capsys.readouterr().out
+
+
 # ---------------------------------------------------------------------------
 # run — multi-agent dispatch (the demo-path goal: `run` must actually reach
 # CodexSource, not just resolve a Codex transcript path and then silently
