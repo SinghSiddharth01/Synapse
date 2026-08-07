@@ -525,7 +525,13 @@ def build_app(provider: ModelProvider, *, debug: bool = True,
         body = await request.json()
         if (err := _missing(body, "contributor")) is not None:
             return err
-        store.add_member(sid, body["contributor"])
+        # `agent_session` is OPTIONAL and additive (2026-08-06): it names the
+        # window joining, so a re-join retracts that window's departure and not
+        # its sibling's. Absent -- which is what `Relay._register_members` and
+        # every un-upgraded client send -- the store retracts only the
+        # person-level marker, so a push from window B cannot resurrect window
+        # A after A left. See `store.add_member`.
+        store.add_member(sid, body["contributor"], body.get("agent_session"))
         session = store.get_session(sid)
         return JSONResponse({"members": session.members,
                              "created_by": session.created_by,
@@ -618,11 +624,22 @@ def build_app(provider: ModelProvider, *, debug: bool = True,
         exactly how a client cleans up after a 409, so a guard here would trap
         members inside a dead session. Idempotent for a contributor who is not
         a member, because a retried DELETE must not be an error.
+
+        `?agent_session=` names WHICH WINDOW is leaving (2026-08-06). Two
+        Claude Code windows of one person are two participants, and the
+        contributor in the path cannot tell them apart -- so before this, the
+        first window to call `leave_session` marked the person departed and the
+        dashboard flipped BOTH their rows to LEFT while the second was still
+        bound and still pushing. A query parameter rather than a new path
+        segment, and optional: the route, its shape and its meaning for a
+        caller that sends no window are all unchanged, which is what the
+        pre-W2 clients and `scripts/demo_local.py` still send.
         """
         sid = request.path_params["sid"]
         if _session_or_404(sid) is None:
             return JSONResponse({"error": f"unknown session {sid}"}, status_code=404)
-        store.remove_member(sid, request.path_params["contributor"])
+        store.remove_member(sid, request.path_params["contributor"],
+                            request.query_params.get("agent_session"))
         return JSONResponse({"members": store.get_session(sid).members})
 
     async def push_findings(request: Request) -> JSONResponse:

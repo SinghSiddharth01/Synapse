@@ -384,13 +384,23 @@ def _participants(store: InMemoryStore, feed: Feed, sid: str,
         row["behind"] = (memory_version - last_seen_version) if known else None
         if row["agent_session"] is None:
             row["state"] = "listening"
+        elif store.has_departed(sid, contributor, row["agent_session"]):
+            # BEFORE the roster check, and asked per WINDOW (2026-08-06). Both
+            # halves are the fix. A person with two windows stays in `members`
+            # while either is bound, so a departed window is one that is still
+            # in the roster -- ask `members` first and it reads ACTIVE forever.
+            # Ask `has_departed` without the window and every row of that
+            # person reads LEFT the moment one of them does, which is the bug
+            # as it was observed. Left, not deleted: their findings stay in the
+            # log attributed to them, so the row stays too.
+            row["state"] = "left"
         elif contributor in members:
             row["state"] = "active"
-        elif store.has_departed(sid, contributor):
-            # Left, not deleted. Leaving is not ending: their findings stay in
-            # the log attributed to them, so the row stays too.
-            row["state"] = "left"
         else:
+            # No "left" arm here any more: a person-level departure is one the
+            # branch above already answers, since `has_departed` treats it as
+            # covering every window. What reaches here is a row with a window
+            # that this process never watched leave.
             # NOT a member, and this process never watched them leave. Three
             # situations share that shape and only one of them is "left":
             #   * they never registered -- nothing on the ingest path calls

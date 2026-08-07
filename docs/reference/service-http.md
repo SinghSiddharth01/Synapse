@@ -94,6 +94,13 @@ Handler: `add_member`, `api.py:346-373`.
 
 Body: `contributor` (str, required).
 
+Body also accepts `agent_session` (str, optional, 2026-08-06): the window
+joining. A join naming a window retracts *that* window's departure; a join
+without one retracts only a person-level departure, and deliberately leaves
+per-window ones standing — `Relay._register_members` POSTs the contributor
+alone on every push, and if that cleared window departures, one window's push
+would resurrect the window that left.
+
 Response: `{"members": [...], "created_by": ..., "purpose": ...}`.
 `created_by`/`purpose` were added 2026-08-06 so a joining orchestrator can
 record the session's ownership from the one call it's guaranteed to make —
@@ -119,12 +126,27 @@ already-pushed findings keep their attribution. Idempotent — removing a
 contributor who isn't a member is not an error. Not gated by `_unavailable`,
 so this is how a client cleans up after seeing a 409 from a closed session.
 
+Query (optional): `agent_session` — **which window** is leaving (2026-08-06).
+Two Claude Code windows of one person are two participants and `/debug` has
+shown one row each since W2, but the contributor in the path can't tell them
+apart: before this, the first window to leave marked the person departed and
+*both* their rows flipped to `left` while the second was still bound and still
+pushing. With it, only that window is marked departed and the contributor stays
+on `members` until the last of their windows has gone — which is what
+`POST /end`'s membership gate reads. Omitted, it still means the person, every
+window of them, which is the honest reading of a DELETE that names no window
+and what pre-W2 clients send (`store.remove_member`).
+
 Response: `{"members": [...]}`.
 
 Errors: `404` unknown session.
 
 ```bash
+# the person leaves, every window of them
 curl -s -X DELETE http://127.0.0.1:8899/v1/sessions/sh-abc12345/members/sid
+# just this window
+curl -s -X DELETE \
+  'http://127.0.0.1:8899/v1/sessions/sh-abc12345/members/sid?agent_session=conv-1'
 ```
 
 ### `POST /v1/sessions/{sid}/end` — close for everyone

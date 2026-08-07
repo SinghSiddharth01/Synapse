@@ -23,6 +23,7 @@ from synapse_contracts import (Conflict, Finding, FindingId, FindingStatus,
                                SessionContext, SessionStatus, SynapseSession)
 
 from synapse_service.fold import SupersessionCycleError, View
+from synapse_service.log import FindingAppended
 from synapse_service.lanes import DEFAULT_TOP_K, DEFAULT_TOPIC_LANE, CandidateSet
 from synapse_service.memory import SharedMemory, TopicSummary
 
@@ -50,14 +51,26 @@ class InMemoryStore:
         self._contexts: dict[str, SessionContext] = {}
         self._memories: dict[str, SharedMemory] = {}
         self._last_seen: dict[tuple[str, str], int] = {}
-        # Contributors this PROCESS has watched leave, per session. Not the
-        # member list and not the log -- see `remove_member` for why departure
-        # is in neither. It exists so that "not in `members`" can be told
-        # apart from "left", which are three different situations wearing one
-        # shape: never registered, registered elsewhere before a restart, and
-        # actually departed. Anything that reads this must treat absence as
-        # UNKNOWN rather than as "did not leave".
-        self._departed: dict[str, set[str]] = {}
+        # Departures this PROCESS has watched, per session. Not the member
+        # list and not the log -- see `remove_member` for why departure is in
+        # neither. It exists so that "not in `members`" can be told apart from
+        # "left", which are three different situations wearing one shape:
+        # never registered, registered elsewhere before a restart, and actually
+        # departed. Anything that reads this must treat absence as UNKNOWN
+        # rather than as "did not leave".
+        #
+        # Keyed `(contributor, agent_session)` since 2026-08-06, where the
+        # agent session is the WINDOW that left and `None` means "the person,
+        # every window of them". Two Claude Code windows are two participants
+        # (W2) and one of them leaving is not the other leaving -- but
+        # `members` is a list of contributor STRINGS, so the DELETE that
+        # detached one window marked both. Observed: a `leave_session` from one
+        # window flipped both of that person's rows on /debug to LEFT while the
+        # other window was still bound and still pushing. The roster stays
+        # person-level (it gates `end_session`, and "is this human still here?"
+        # is the question it answers); only departure gained the second
+        # dimension, because it is the only one that has to distinguish them.
+        self._departed: dict[str, set[tuple[str, str | None]]] = {}
         # How many findings had EVER entered a session's memory when this
         # contributor last read it (W5). A second watermark alongside
         # `_last_seen`, and deliberately not a replacement for it: they answer
@@ -113,19 +126,75 @@ class InMemoryStore:
     def get_session(self, shared_id: str) -> SynapseSession | None:
         return self._sessions.get(shared_id)
 
-    def add_member(self, shared_id: str, contributor: str) -> None:
+    def add_member(self, shared_id: str, contributor: str,
+                   agent_session: str | None = None) -> None:
+        """Join. `agent_session` names the WINDOW joining, when the caller
+        knows it.
+
+        Re-joining retracts the departure: someone who left and came back is
+        present, not "left", and leaving the marker would make the next
+        DELETE-less absence read as a second departure that never happened.
+        WHICH departure it retracts is the whole reason for the argument. A
+        named window retracts only its own; an unnamed join retracts only the
+        person-level marker, and deliberately leaves per-window ones standing.
+
+        That asymmetry is load-bearing. `Relay._register_members` POSTs the
+        contributor alone on the push path, with no window in hand -- so if an
+        unnamed join cleared every window's marker, window A's `leave_session`
+        would be undone by window B's very next push, which is the same
+        both-windows-are-one-person bug this keying exists to remove, arriving
+        from the other direction.
+        """
         session = self._sessions[shared_id]
         if contributor not in session.members:
             session.members.append(contributor)
-        # Re-joining retracts the departure. Someone who left and came back is
-        # present, not "left", and leaving the marker would make the next
-        # DELETE-less absence read as a second departure that never happened.
-        self._departed.get(shared_id, set()).discard(contributor)
+        self._departed.get(shared_id, set()).discard((contributor, agent_session))
 
-    def remove_member(self, shared_id: str, contributor: str) -> None:
+    def _windows_of(self, shared_id: str, contributor: str) -> set[str]:
+        """Every Agent Session this contributor has pushed under, from the log.
+
+        There is no roster of windows anywhere in this system -- nothing on the
+        join path carries one (`add_member` takes a contributor, and the relay
+        has only that) -- so the log's `Attribution.agent_session` is the same
+        and only durable evidence `debug._participants` builds its rows from.
+        Using it here is what keeps the two agreeing: a window the page shows
+        as a row is a window this can count.
+
+        A window that joined and has pushed NOTHING is invisible to this, which
+        is the identical blind spot `_participants` documents and handles by
+        listing a contributor-only row. The consequence is bounded and stated
+        at the one call site: `remove_member` can retire a contributor from the
+        roster while a silent sibling window is still bound. Its next push
+        re-registers them (`Relay._register_members` is idempotent), so the
+        roster self-heals, and the departed marker written per window is not
+        disturbed by that.
+        """
+        windows: set[str] = set()
+        memory = self._memories.get(shared_id)
+        if memory is None:
+            return windows
+        for entry in memory.log:
+            if not isinstance(entry, FindingAppended):
+                continue
+            for attribution in entry.finding.attributions:
+                if attribution.contributor == contributor:
+                    windows.add(attribution.agent_session)
+        return windows
+
+    def remove_member(self, shared_id: str, contributor: str,
+                      agent_session: str | None = None) -> None:
         """Detach one member. Leaving is not ending (2026-08-06 spec): the
         Shared Session stays open for everyone else and every finding this
         Contributor already pushed stays in the log, attributed to them.
+
+        `agent_session` names the WINDOW that left. Given one, the contributor
+        leaves the ROSTER only once every window of theirs this store can see
+        has departed -- because two windows of one person are two participants
+        and the first to leave must not evict the second, which is exactly what
+        this route did until 2026-08-06. Omitted, it stays what it always was:
+        the person leaves, whole, every window with them. That is the honest
+        reading of a DELETE that names no window, and it is what an un-upgraded
+        client sends.
 
         NOT a log entry, unlike `end_session` -- and that asymmetry is
         deliberate. Membership has never been in the log (`add_member` writes
@@ -155,18 +224,34 @@ class InMemoryStore:
         the roster keep reading `members`.
         """
         session = self._sessions[shared_id]
+        departed = self._departed.setdefault(shared_id, set())
+        departed.add((contributor, agent_session))
+        if agent_session is not None:
+            remaining = self._windows_of(shared_id, contributor) | {agent_session}
+            if any((contributor, window) not in departed for window in remaining):
+                return
         if contributor in session.members:
             session.members.remove(contributor)
-        self._departed.setdefault(shared_id, set()).add(contributor)
 
-    def has_departed(self, shared_id: str, contributor: str) -> bool:
+    def has_departed(self, shared_id: str, contributor: str,
+                     agent_session: str | None = None) -> bool:
         """Did THIS PROCESS observe a `DELETE /members/{contributor}`?
 
         `False` is not "they are still here" -- it is "no departure was
         observed", which after a restart is true of everyone. The only honest
         reading of `False` for a non-member is UNKNOWN.
+
+        Named an `agent_session`, this answers for THAT WINDOW: its own
+        departure, or a person-level one, which covers every window they have.
+        Unnamed, it answers for the person and any departure of theirs counts
+        -- which is what every pre-2026-08-06 caller means by the question.
         """
-        return contributor in self._departed.get(shared_id, set())
+        departed = self._departed.get(shared_id, set())
+        if (contributor, None) in departed:
+            return True
+        if agent_session is not None:
+            return (contributor, agent_session) in departed
+        return any(who == contributor for who, _ in departed)
 
     # ── lifecycle ───────────────────────────────────────────────────────────
     def end_session(self, shared_id: str, ended_by: str) -> str:

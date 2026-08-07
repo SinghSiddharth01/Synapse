@@ -1036,24 +1036,74 @@ def register_tools(server: FastMCP, *, resolve_binding, service_url: str, relay,
         detaching_all = not mine
         leaving = attached if detaching_all else mine
         leaving_paths = {p for p, _ in leaving}
-        # Contributors that OTHER conversations still hold on this session must
-        # not be removed from its member list — the departing window is not the
-        # person. `Relay._register_members` would re-add them on the next push
-        # anyway, but a member list that flickers is a member list `end_session`
-        # reads to decide whether anyone else is still there.
+        # WHAT THE SERVICE IS TOLD, and it is two different sentences depending
+        # on how wide the detach is (2026-08-06).
+        #
+        # A specific window detaching sends `?agent_session=<window>`, so the
+        # service marks THAT participant departed and leaves the person on the
+        # roster while any sibling window is still bound. The contributor alone
+        # cannot say this: two windows of one person are one string, which is
+        # why leaving in one window used to flip both of that person's rows on
+        # /debug to LEFT.
+        #
+        # The whole machine detaching (`detaching_all`) still sends the
+        # contributor with NO window, which is the honest reading of it —
+        # every window here is going, so the person is going. Unchanged wire
+        # shape, and the path every pre-W2 caller takes.
+        #
+        # The old "another conversation still holds this contributor, so send
+        # NOTHING" suppression is gone. It existed to stop the member list
+        # flickering when the DELETE could only be person-wide, and it is now
+        # exactly backwards: the case it suppressed — siblings remain — is
+        # precisely the case a window-scoped DELETE is FOR, and suppressing it
+        # left the departed window reading ACTIVE on /debug forever.
+        #
+        # What it was protecting is real, though, and is protected below
+        # instead. `end_session`'s layer-3 gate reads `members` to decide
+        # whether anybody else is still here, so a contributor a surviving
+        # window still speaks as must stay on the roster. The service infers
+        # that where it can (`store.remove_member` counts a contributor's
+        # windows from the log and retires them only when the last has gone),
+        # but its only evidence is findings pushed — a sibling window that has
+        # joined and pushed NOTHING is invisible to it. This end knows better:
+        # it is holding that window's binding. So it re-registers the
+        # contributor after the DELETE, which restores the roster without
+        # disturbing the departure, since a windowless `add_member` retracts
+        # only the person-level marker and never a window's.
         staying = {b.contributor for p, b in attached if p not in leaving_paths}
-        contributors = sorted(
-            ({b.contributor for _, b in leaving} | {binding.contributor}) - staying)
+        if detaching_all:
+            departures = [(b.contributor, None) for _, b in leaving]
+            departures.append((binding.contributor, None))
+        else:
+            departures = [(b.contributor, b.agent_session_id) for _, b in leaving]
+            departures.append((binding.contributor, binding.agent_session_id))
         note = ""
         try:
             async with _client() as client:
-                for who in contributors:
+                # `or ""` in the key, not a bare sort: a windowless pair and a
+                # windowed one for the same contributor would compare None
+                # against a str and raise. The branches above cannot produce
+                # both today, and a TypeError out of a leave is not the way to
+                # find out if that ever changes.
+                for who, window in sorted(set(departures),
+                                          key=lambda pair: (pair[0], pair[1] or "")):
                     resp = await client.delete(
-                        f"{base}/v1/sessions/{shared_id}/members/{who}")
+                        f"{base}/v1/sessions/{shared_id}/members/{who}",
+                        params=None if window is None else {"agent_session": window})
                     # A 404 means the service has already forgotten this session
                     # (its store is in-memory and dies with a restart). That is
                     # not a reason to keep the local binding — there is even
                     # less to stay attached to.
+                    if resp.status_code != 404:
+                        resp.raise_for_status()
+                # Put back the contributors a surviving window still speaks
+                # as. Only reachable when a specific window left — a whole
+                # machine detaching has no surviving window by construction,
+                # and `staying` is empty there.
+                for who in sorted(staying):
+                    resp = await client.post(
+                        f"{base}/v1/sessions/{shared_id}/members",
+                        json={"contributor": who})
                     if resp.status_code != 404:
                         resp.raise_for_status()
         except (_httpx.HTTPError, OSError) as exc:

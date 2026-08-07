@@ -177,7 +177,20 @@ not-joined (`server.py:849-854`).
 **Mechanics:** `DELETE`s every Contributor identity this machine attached to
 that session — not just the one the resolved binding picked, since two
 Agent products can be bound under two different Contributors
-(`server.py:807-821`). If the service is unreachable, the local binding is
+(`server.py:807-821`).
+
+The DELETE **names the window** (`?agent_session=`) when a specific
+conversation is detaching, so the service marks that participant departed and
+leaves the person on the roster while a sibling window is still bound; the
+contributor is then re-registered (`POST /members`) to keep the roster intact
+for a sibling the service has no findings from yet. A whole machine detaching
+sends the contributor with no window, which is the honest reading of it. Before
+2026-08-06 this sent nothing at all when a sibling window held the same
+Contributor, which left the departed window reading `active` on `/debug`
+forever; sending the bare contributor instead — the behaviour before that —
+flipped *both* of that person's rows to `left`.
+
+If the service is unreachable, the local binding is
 cleared anyway: staying bound because the service could not confirm the
 departure was judged worse than a stale member-list entry
 (`server.py:828-839`).

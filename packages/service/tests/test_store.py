@@ -65,6 +65,81 @@ def test_context_versioning_and_members():
     assert store.get_context(sid).memory_version == 1
 
 
+def test_departure_is_per_window_and_the_roster_waits_for_the_last_one():
+    """Two windows of one person are two participants, and `members` cannot
+    hold that -- it is a list of contributor strings. So departure carries the
+    window and the roster does not: `aditya` stays a member until every window
+    of theirs has gone, which is what `end_session`'s gate needs, while each
+    window's own state is answerable separately, which is what the roster page
+    needs."""
+    store, sid = _store_with_session()
+    store.add_member(sid, "aditya")
+    store.upsert(sid, [_finding("f-1", agent_session="as-window-1"),
+                       _finding("f-2", agent_session="as-window-2")])
+
+    store.remove_member(sid, "aditya", "as-window-1")
+
+    assert store.has_departed(sid, "aditya", "as-window-1")
+    assert not store.has_departed(sid, "aditya", "as-window-2")
+    assert store.get_session(sid).members == ["aditya"]
+
+    store.remove_member(sid, "aditya", "as-window-2")
+
+    assert store.has_departed(sid, "aditya", "as-window-2")
+    assert store.get_session(sid).members == []
+
+
+def test_a_windowless_departure_still_means_the_whole_person():
+    """What an un-upgraded client sends, and what a whole machine detaching
+    sends. It covers every window they have -- including ones this store has
+    never seen -- and it takes them off the roster immediately."""
+    store, sid = _store_with_session()
+    store.add_member(sid, "aditya")
+    store.upsert(sid, [_finding("f-1", agent_session="as-window-1"),
+                       _finding("f-2", agent_session="as-window-2")])
+
+    store.remove_member(sid, "aditya")
+
+    assert store.has_departed(sid, "aditya")
+    assert store.has_departed(sid, "aditya", "as-window-1")
+    assert store.has_departed(sid, "aditya", "as-window-2")
+    assert store.has_departed(sid, "aditya", "as-a-window-nobody-has-seen")
+    assert store.get_session(sid).members == []
+
+
+def test_a_windowless_join_does_not_retract_a_windows_departure():
+    """`Relay._register_members` has only the contributor, and it POSTs on
+    every push. If that retracted per-window departures, the surviving window
+    would keep resurrecting the one that left."""
+    store, sid = _store_with_session()
+    store.add_member(sid, "aditya")
+    store.upsert(sid, [_finding("f-1", agent_session="as-window-1"),
+                       _finding("f-2", agent_session="as-window-2")])
+    store.remove_member(sid, "aditya", "as-window-1")
+
+    store.add_member(sid, "aditya")                  # the relay, on B's push
+
+    assert store.has_departed(sid, "aditya", "as-window-1")
+    assert store.get_session(sid).members == ["aditya"]
+
+    # Naming the window IS how it comes back -- that window re-joining.
+    store.add_member(sid, "aditya", "as-window-1")
+    assert not store.has_departed(sid, "aditya", "as-window-1")
+
+
+def test_the_last_window_of_a_contributor_who_never_pushed_still_leaves():
+    """No findings, so `_windows_of` sees nothing: the departing window is the
+    only one there is, and it must not be held on the roster by a sibling the
+    store has no evidence for."""
+    store, sid = _store_with_session()
+    store.add_member(sid, "aditya")
+
+    store.remove_member(sid, "aditya", "as-window-1")
+
+    assert store.has_departed(sid, "aditya", "as-window-1")
+    assert store.get_session(sid).members == []
+
+
 def test_last_seen_tracking():
     store, sid = _store_with_session()
     store.bump_version(sid)

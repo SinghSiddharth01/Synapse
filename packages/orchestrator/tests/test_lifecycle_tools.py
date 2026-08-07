@@ -619,11 +619,20 @@ async def test_leave_session_with_an_id_detaches_only_that_conversation(tmp_path
     open, still joined, and — before this — was told nothing at all while its
     binding was deleted underneath it.
 
-    The member DELETE is skipped too: both windows carry the same Contributor,
-    and one window leaving is not that person leaving. Removing them would have
-    dropped a member the other window is still speaking as, which is what
-    `end_session`'s layer-3 gate reads to decide whether anybody else is
-    there."""
+    The member DELETE NAMES THE WINDOW, and the Contributor is put straight
+    back on the roster. Both windows carry the same Contributor, so one window
+    leaving is not that person leaving — but it is not that person STAYING
+    either, and the two have to be said separately because `members` is a list
+    of contributor strings that cannot hold the distinction.
+
+    Sending nothing at all was the first attempt and it was wrong in the other
+    direction: window A's participant row on /debug stayed ACTIVE forever,
+    because a row goes LEFT only on a departure the service actually watched.
+    So: a window-scoped DELETE marks A departed, and a re-registering POST
+    keeps `sid` in `members` for window B — which is what `end_session`'s
+    layer-3 gate reads to decide whether anybody else is there. A windowless
+    `add_member` retracts only the person-level marker, so it cannot undo the
+    window departure just written."""
     urls: list[str] = []
     wiring = _wire(tmp_path, _service(urls=urls))
     window_a, window_b = _two_windows(wiring)
@@ -636,7 +645,11 @@ async def test_leave_session_with_an_id_detaches_only_that_conversation(tmp_path
     assert wiring.binding_file.exists()           # and so is the mirror it owns
     assert "/tmp/cc-1.jsonl" in text and "/tmp/cc-2.jsonl" not in text
     assert "still bound" in text                  # honest about the sibling
-    assert not any("DELETE" in url for url in urls)
+    assert ("DELETE http://svc/v1/sessions/sh-1/members/sid?agent_session=conv-1"
+            in urls)
+    # Never the person: no bare DELETE, which is what marked BOTH rows LEFT.
+    assert "DELETE http://svc/v1/sessions/sh-1/members/sid" not in urls
+    assert "POST http://svc/v1/sessions/sh-1/members" in urls
     # And the conversation that stayed is still joined, from the tools' side.
     assert _NOT_JOINED not in str(await wiring.server.call_tool(
         "query", {"question": "x?", "agent_session_id": "conv-2"}))
@@ -686,9 +699,10 @@ async def test_a_leave_that_takes_the_mirror_with_it_leaves_the_sibling_resolvab
 async def test_leave_session_still_removes_the_member_when_nobody_else_holds_it(
     tmp_path,
 ):
-    """The other half of the skip: a contributor no surviving binding carries
-    IS removed at the service. Without this, "detach only me" would quietly
-    stop meaning "leave" for the last window on the machine."""
+    """The last window on the machine: the departure IS sent, and it names the
+    window it is about. Without the DELETE, "detach only me" would quietly stop
+    meaning "leave"; without the `agent_session`, it would mean the person, and
+    a sibling that joins later inherits a departure it never made."""
     urls: list[str] = []
     wiring = _wire(tmp_path, _service(urls=urls))
     window_a = wiring.state_dir / "bindings" / "claude-code" / "conv-1.json"
@@ -699,7 +713,11 @@ async def test_leave_session_still_removes_the_member_when_nobody_else_holds_it(
 
     await wiring.server.call_tool("leave_session", {"agent_session_id": "conv-1"})
 
-    assert "DELETE http://svc/v1/sessions/sh-1/members/sid" in urls
+    assert ("DELETE http://svc/v1/sessions/sh-1/members/sid?agent_session=conv-1"
+            in urls)
+    # Nobody else holds `sid`, so nothing puts it back on the roster.
+    assert not any(url.startswith("POST") and url.endswith("/members")
+                   for url in urls)
     assert not window_a.exists()
 
 

@@ -262,6 +262,71 @@ async def test_a_member_who_left_keeps_their_row_and_their_findings() -> None:
         assert session["recent"][0]["authors"] == ["aditya"]
 
 
+async def test_one_window_leaving_does_not_mark_the_persons_other_window_left() -> None:
+    """The 2026-08-06 report, reproduced and fixed. Two Claude Code windows of
+    one human are two participants (W2) and this page has said so since -- one
+    row each. But `members` is a list of contributor STRINGS and the DELETE
+    named only the contributor, so the first window to leave marked the person
+    departed and BOTH rows flipped to LEFT, while the second was still bound,
+    still pushing, and its worker still feeding the session.
+
+    `?agent_session=` is what carries the distinction. The row that left reads
+    `left`; the row still open reads `active`; and the person stays on the
+    roster, which is what `end_session`'s membership gate reads to decide
+    whether anybody else is still here."""
+    async with _client(build_app(FakeProvider(scripts=[_verdict()]))) as client:
+        sid = await _new_session(client)
+        await client.post(f"/v1/sessions/{sid}/members", json={"contributor": "aditya"})
+        await client.post(f"/v1/sessions/{sid}/findings", json={"findings": [
+            _finding("f-1", "aditya", "as-window-1"),
+            _finding("f-2", "aditya", "as-window-2"),
+        ]})
+
+        assert (await client.delete(
+            f"/v1/sessions/{sid}/members/aditya",
+            params={"agent_session": "as-window-1"})).status_code == 200
+
+        session = (await _brain(client, sid))["session"]
+        assert _row({"session": session}, "aditya", "as-window-1")["state"] == "left"
+        assert _row({"session": session}, "aditya", "as-window-2")["state"] == "active"
+        # Still a member: one window of them is still here.
+        assert session["counts"]["contributors"] == 1
+
+        # And when the last window goes, the person goes with it.
+        await client.delete(f"/v1/sessions/{sid}/members/aditya",
+                            params={"agent_session": "as-window-2"})
+
+        session = (await _brain(client, sid))["session"]
+        assert _row({"session": session}, "aditya", "as-window-1")["state"] == "left"
+        assert _row({"session": session}, "aditya", "as-window-2")["state"] == "left"
+        assert session["counts"]["contributors"] == 0
+
+
+async def test_a_push_from_one_window_does_not_resurrect_the_window_that_left() -> None:
+    """The same bug from the other side. `Relay._register_members` POSTs the
+    contributor with no window on the push path, so if a windowless join
+    retracted every departure, window B's next push would silently put window A
+    back to `active` -- a row claiming a conversation is live when its user
+    watched it leave. A windowless join retracts only the person-level marker.
+    """
+    async with _client(build_app(FakeProvider(scripts=[_verdict()]))) as client:
+        sid = await _new_session(client)
+        await client.post(f"/v1/sessions/{sid}/members", json={"contributor": "aditya"})
+        await client.post(f"/v1/sessions/{sid}/findings", json={"findings": [
+            _finding("f-1", "aditya", "as-window-1"),
+            _finding("f-2", "aditya", "as-window-2"),
+        ]})
+        await client.delete(f"/v1/sessions/{sid}/members/aditya",
+                            params={"agent_session": "as-window-1"})
+
+        # What the relay does on every push from the surviving window.
+        await client.post(f"/v1/sessions/{sid}/members", json={"contributor": "aditya"})
+
+        session = (await _brain(client, sid))["session"]
+        assert _row({"session": session}, "aditya", "as-window-1")["state"] == "left"
+        assert _row({"session": session}, "aditya", "as-window-2")["state"] == "active"
+
+
 async def test_a_contributor_who_never_registered_is_not_reported_as_left() -> None:
     """`left` asserts a human action. Absence from `members` does not: nothing
     on the ingest path calls `add_member`, so a raw `POST /findings` -- which
