@@ -151,28 +151,53 @@ def test_an_identical_resend_writes_no_log_entry():
     assert len(store.log_entries(sid)) == after_first
 
 
-def test_the_budget_governor_defers_once_the_hourly_tokens_are_spent(monkeypatch):
-    """Latency and spend are separate limits, and this is the second one.
+def test_a_real_rate_limit_defers_the_merge_and_nothing_is_lost(monkeypatch):
+    """Latency and spend are separate limits, and this is the second one — but
+    it is now REACTIVE.
 
-    MERGE_MIN_INTERVAL_S is 60s because that is the latency the team wants.
-    One key affords ~6 rounds/hour at ~4,000 tokens each, so 60 rounds/hour is
-    ~10x over budget. Without a governor the floor alone would authorise every
-    one of them and the key would 429 -- which surfaces as "findings landed,
-    memory unchanged", the exact symptom this whole change set exists to
-    remove, reached by a different road."""
-    monkeypatch.setattr("synapse_service.api.SYNTHESIS_TOKENS_PER_HOUR", 5_000)
-    client = _client(monkeypatch, interval=0,      # latency floor removed entirely
-                     provider=_CostlyProvider([VERDICT] * 20))
+    ⟨REWRITTEN 2026-08-07⟩ This used to set SYNTHESIS_TOKENS_PER_HOUR=5,000 and
+    assert the ledger deferred the second push before any call was made. That
+    prediction is gone: it was wrong twice in one night in both directions, most
+    expensively a 25,000/hour guess that stalled synthesis for 45 minutes while
+    the provider console read 1 of 20 requests for the hour. Probed live, this
+    gateway sends no rate-limit headers, so the estimate can never be corrected.
+
+    What defers now is a 429 that ACTUALLY HAPPENED — recorded by the provider
+    as a cooldown deadline where the 429 was received, because
+    `Synthesizer.merge` swallows exceptions and the error never reaches this
+    layer. The property that matters is unchanged and asserted here: when the
+    round is refused, the findings are PENDING, not lost, and the drain re-runs
+    them once the cooldown elapses.
+    """
+    import time as _time
+
+    provider = _CostlyProvider([VERDICT] * 20)
+    provider.rate_limited_until = _time.monotonic() + 300   # a 429 already happened
+    client = _client(monkeypatch, interval=0, provider=provider)
     sid = _session(client)
 
-    first = client.post(f"/v1/sessions/{sid}/findings",
-                        json={"findings": [_finding("f-1")]}).json()
-    assert first["deferred"] is False               # 4,000 of 5,000 spent
+    landed = client.post(f"/v1/sessions/{sid}/findings",
+                         json={"findings": [_finding("f-1")]}).json()
 
-    second = client.post(f"/v1/sessions/{sid}/findings",
-                         json={"findings": [_finding("f-2")]}).json()
-    assert second["deferred"] is True               # 8,000 would exceed 5,000
-    assert second["pending"] == 1
+    assert landed["deferred"] is True, "a live rate limit must defer the merge"
+    assert landed["pending"] == 1, "the finding was dropped rather than held"
+    assert landed["accepted"] == 1, "it must still be stored and queryable"
+
+
+def test_the_merge_runs_again_once_the_cooldown_elapses(monkeypatch):
+    """Self-healing: the deferral releases itself, with no operator action."""
+    import time as _time
+
+    provider = _CostlyProvider([VERDICT] * 20)
+    provider.rate_limited_until = _time.monotonic() - 1     # already elapsed
+    client = _client(monkeypatch, interval=0, provider=provider)
+    sid = _session(client)
+
+    landed = client.post(f"/v1/sessions/{sid}/findings",
+                         json={"findings": [_finding("f-1")]}).json()
+
+    assert landed["deferred"] is False, "an elapsed cooldown still refused"
+
 
 
 def test_more_keys_buy_more_rounds(monkeypatch):

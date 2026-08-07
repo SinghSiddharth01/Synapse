@@ -128,3 +128,35 @@ async def test_the_request_count_resets_between_calls(slept):
     await provider.complete([{"role": "user", "content": "ping"}])
     await provider.complete([{"role": "user", "content": "ping"}])
     assert provider.last_request_count == 1
+
+
+async def test_exhausting_the_retries_starts_a_reactive_cooldown(slept):
+    """The governor stops PREDICTING and starts REACTING, so the provider has
+    to leave a mark a caller can see.
+
+    `Synthesizer.merge` swallows every exception ("findings are landed, memory
+    unchanged"), so a RateLimitedError never reaches api.py. The deadline is
+    recorded on the provider instead, which `affordable()` already reads.
+    """
+    import time as _time
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, headers={"retry-after": "30"}, json={})
+
+    provider = _provider(handler)
+    assert provider.rate_limited_until == 0.0, "nothing has failed yet"
+
+    with pytest.raises(RateLimitedError):
+        await provider.complete([{"role": "user", "content": "ping"}])
+
+    remaining = provider.rate_limited_until - _time.monotonic()
+    assert 0 < remaining <= 30, f"cooldown not armed from Retry-After: {remaining}"
+
+
+async def test_a_successful_call_leaves_no_cooldown(slept):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=OK)
+
+    provider = _provider(handler)
+    await provider.complete([{"role": "user", "content": "ping"}])
+    assert provider.rate_limited_until == 0.0
