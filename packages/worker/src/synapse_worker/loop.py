@@ -43,8 +43,8 @@ from synapse_distiller import Distiller
 from synapse_distiller.guards import PromptDropError
 
 from synapse_worker.compaction import compact
-from synapse_worker.discovery import (has_per_session_bindings, resolve_agent_binding,
-                                      session_dirname)
+from synapse_worker.discovery import (has_per_session_bindings, read_bindings_for_agent,
+                                      resolve_agent_binding, session_dirname)
 from synapse_worker.discovery import AGENT_REGISTRY
 from synapse_worker.follower import TranscriptFollower
 from synapse_worker.limiter import SeamLimiter
@@ -200,14 +200,34 @@ class WorkerLoop:
         # are append-only and `Finding.id`-idempotent, so sharing them across
         # conversations is safe and keeps one readable audit trail.
         #
-        # Migration is a non-event: an existing root-level follow-state is
-        # simply not found, and the loop attaches at EOF like any first run.
-        # Nothing is re-distilled and nothing is lost, because anything still
-        # pending at the root was already unreadable for whichever process did
-        # not write it last.
+        # ⟨CORRECTED 2026-08-07⟩ This comment used to claim the migration was
+        # "a non-event … the loop attaches at EOF like any first run". Both
+        # halves were wrong, and the second is only true by accident:
+        #
+        #  - `attach_at_end()` is not something this loop does; `cmd_run` calls
+        #    it, gated on `[worker] attach_at_end` (default true). Set it false
+        #    — which an operator does precisely so nothing written while the
+        #    worker was down is missed — and a MISSING follow-state means
+        #    `read_new_lines` falls to `offsets.get(key, 0)`, i.e. byte 0. That
+        #    is a full re-read of a multi-megabyte transcript, and because
+        #    `Finding.id` is a fresh uuid per distillation, the WAL's
+        #    "duplicates are harmless, ingest upserts by id" guarantee does NOT
+        #    cover it: the run ships a complete duplicate finding set upstream.
+        #  - pending-events and deferred-segments at the root were NOT
+        #    "already unreadable". That argument holds only for the
+        #    two-process topology. On the single-worker install — the common
+        #    one — they were written and owned by one process and were
+        #    perfectly readable. Abandoning them silently discards up to
+        #    `max_deferred_segments` segments whose transcript bytes are
+        #    already behind the follower's offset.
+        #
+        # So the root files are ADOPTED rather than orphaned. See
+        # `_adopt_root_state` below for why adoption is refused when this
+        # machine holds bindings for more than one conversation.
         self.session_state_dir = (
             self.state_dir / "sessions" / session_dirname(binding.agent_session_id))
         self.session_state_dir.mkdir(parents=True, exist_ok=True)
+        self._adopt_root_state()
 
         self.follower = TranscriptFollower(self.session_state_dir / "follow-state.json")
         # Dispatched through AGENT_REGISTRY rather than hard-coded, so a
@@ -238,6 +258,65 @@ class WorkerLoop:
         self._restore_pending()
         self._restore_deferred()
         self._last_change = datetime.now(timezone.utc)
+
+    #: The three files that lived at the state_dir root before per-conversation
+    #: namespacing. Order is irrelevant; each is adopted independently.
+    _ROOT_STATE_FILES = ("follow-state.json", "pending-events.json",
+                         "deferred-segments.json")
+
+    def _adopt_root_state(self) -> None:
+        """Take over pre-namespacing root-level state — once, and only when it
+        is unambiguously this conversation's.
+
+        Without this, upgrading silently discarded the deferred backlog and the
+        open turn (see the amended note in `__init__`). Adoption is a `replace`
+        rather than a copy so it cannot happen twice and so a half-finished
+        upgrade leaves no second copy for a later run to re-adopt.
+
+        REFUSED, loudly, when this machine holds bindings for more than one
+        conversation. The root files carry no `agent_session_id` — that is the
+        whole reason they had to move — so on a multi-conversation machine
+        there is no way to tell whose they are, and guessing would feed one
+        conversation's half-turn into another's segmenter to be stamped with
+        the wrong id. That is the exact misattribution the namespacing was for,
+        and it is worse than the loss it would be avoiding. Note this refuses
+        on the machine's binding COUNT, which never decreases (bindings are not
+        pruned when a window closes), so a long-lived machine reaches the
+        refusal and stays there — deliberate: the files are then left on disk
+        and named in the log rather than being consumed by whichever
+        conversation happened to start first.
+
+        Never raises. A worker that cannot migrate must still start.
+        """
+        movable = [(self.state_dir / name, self.session_state_dir / name)
+                   for name in self._ROOT_STATE_FILES]
+        pending = [(src, dst) for src, dst in movable
+                   if src.is_file() and not dst.exists()]
+        if not pending:
+            return
+        try:
+            bound = read_bindings_for_agent(self.state_dir, self.agent)
+        except Exception:  # noqa: BLE001 — an unreadable bindings dir is not fatal here
+            bound = []
+        if len(bound) > 1:
+            logger.warning(
+                "Found pre-upgrade worker state at the root of %s (%s) but this "
+                "machine has %d conversations bound, so there is no way to tell "
+                "which one it belongs to. LEAVING IT ALONE: any deferred segments "
+                "in it will not be distilled. Move it into "
+                "sessions/<agent_session_id>/ by hand if you know whose it is.",
+                self.state_dir, ", ".join(src.name for src, _ in pending), len(bound),
+            )
+            return
+        for src, dst in pending:
+            try:
+                src.replace(dst)
+            except OSError as exc:
+                logger.warning(
+                    "Could not migrate %s into %s (%s); it is left where it is and "
+                    "this run starts without it", src, dst, exc)
+            else:
+                logger.info("Migrated %s into %s", src.name, dst.parent)
 
     def _restore_pending(self) -> None:
         if not self._pending_path.is_file():
