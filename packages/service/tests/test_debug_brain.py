@@ -133,7 +133,9 @@ async def test_brain_page_has_required_ids() -> None:
         r = await client.get("/debug")
         assert r.status_code == 200
         assert "text/html" in r.headers["content-type"]
-        for element_id in ("session-select", "wm-body", "revisions",
+        # ⟨redesign 2026-08-07⟩ session selection moved to the sidebar's
+        # session-list; the header select is gone.
+        for element_id in ("session-list", "wm-body", "revisions",
                            "participants", "recent"):
             assert f'id="{element_id}"' in r.text
 
