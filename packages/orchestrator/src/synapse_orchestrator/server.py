@@ -93,7 +93,7 @@ from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 
 from synapse_orchestrator.ended import is_session_ended, record_ended
-from synapse_orchestrator.session_meta import record_session
+from synapse_orchestrator.session_meta import record_session, retained_sessions
 
 logger = logging.getLogger(__name__)
 
@@ -376,7 +376,8 @@ def register_tools(server: FastMCP, *, resolve_binding, service_url: str, relay,
             pass
         return f"the service answered {resp.status_code}"
 
-    def _remember(shared_id: str, *, created_by: str | None, purpose: str | None) -> None:
+    def _remember(shared_id: str, *, created_by: str | None, purpose: str | None,
+                  created_by_agent_session: str | None = None) -> None:
         """Retain who owns `shared_id` and what it is for, on THIS machine.
 
         Called by `create_session` and `join_session` — the two tools that
@@ -394,7 +395,8 @@ def register_tools(server: FastMCP, *, resolve_binding, service_url: str, relay,
         """
         if state_dir is None:
             return
-        record_session(state_dir, shared_id, created_by=created_by, purpose=purpose)
+        record_session(state_dir, shared_id, created_by=created_by, purpose=purpose,
+                       created_by_agent_session=created_by_agent_session)
 
     def _session_identity(resp) -> tuple[str | None, str | None]:
         """`(created_by, purpose)` as the service reported them, or `(None, None)`.
@@ -947,6 +949,12 @@ def register_tools(server: FastMCP, *, resolve_binding, service_url: str, relay,
             return (f"Shared Session {shared_id} was created (purpose: {purpose!r}), but "
                     f"this conversation was NOT bound to it — nothing here will reach the "
                     f"team until it is. {refusal}")
+        # WHICH conversation created it, remembered for `end_session`'s
+        # same-conversation courtesy (first-write-wins fills only this field —
+        # the identity above is already recorded).
+        if bindings:
+            _remember(shared_id, created_by=who, purpose=purpose,
+                      created_by_agent_session=bindings[0].agent_session_id)
         return (f"Created Shared Session {shared_id} (purpose: {purpose!r}) as {who}, and "
                 f"bound {_summarize(bindings)} to it. Tell the user that id — it is what "
                 f"teammates pass to `join_session` — and the dashboard to share with the "
@@ -1216,28 +1224,41 @@ def register_tools(server: FastMCP, *, resolve_binding, service_url: str, relay,
         "accepting reads and writes for every member, not just you. Call only "
         "when the user explicitly asks to end the shared session — to stop your "
         "own conversation feeding it, use `leave_session` instead. "
-        "Only the session's creator can end it, and this refuses while other "
-        "contributors are still members, naming them. The result names the "
-        "session it closed and the transcript it unbound."))
-    async def end_session() -> str:
-        binding = resolve_binding()
+        "Only the session's CREATOR can end it (anyone else is told to talk to "
+        "the owner). Ending from the same conversation that created it is "
+        "clean; from any other conversation this first asks you to confirm "
+        "with the user, then takes `confirm=true`. "
+        "Pass agent_session_id set to your own session id (Claude Code exports "
+        "it as CLAUDE_CODE_SESSION_ID). The result names the session it closed "
+        "and the transcript it unbound."))
+    async def end_session(agent_session_id: str | None = None,
+                          confirm: bool = False) -> str:
+        binding = _effective_binding(agent_session_id)
         if binding is None:
             return _NOT_JOINED
         shared_id = binding.shared_id
-        # Same "every product bound here, not just the picked one" rule as
-        # leave_session. It matters for the layer-3 refusal below: with two
-        # products bound under two contributors, subtracting only
-        # `binding.contributor` from `members` leaves this same human's OTHER
-        # identity in `others`, and the tool refuses to end the session because
-        # the user is still in it.
-        mine = {b.contributor for _, b in _bindings_on(shared_id)} | {binding.contributor}
+        # The same-conversation courtesy (2026-08-06 review, Sidd). The rule:
+        # the creator ends the session for EVERYONE — members still being in
+        # it is not a refusal any more (the earlier layer-3 "others are still
+        # members" gate is deliberately gone; the spec reversed it). What
+        # remains is WHERE the end is issued from: the conversation that
+        # created the session ends it cleanly; any other conversation gets a
+        # stop-and-ask so the agent confirms with the human before destroying
+        # everyone's memory. Best-effort by construction — the record lives on
+        # the creating machine only — and never a security boundary: the
+        # service's creator-only 403 below is the real gate.
+        caller_conv = agent_session_id or binding.agent_session_id
+        meta = (retained_sessions(state_dir).get(shared_id)
+                if state_dir is not None else None)
+        creator_conv = meta.created_by_agent_session if meta else None
+        if creator_conv and caller_conv != creator_conv and not confirm:
+            return (f"Hold on: {shared_id} was created from a DIFFERENT "
+                    f"conversation ({creator_conv}); this one is {caller_conv}. "
+                    "Ending closes the memory for every member at once. Ask the "
+                    "user to confirm they really want to end it — if yes, call "
+                    "`end_session` again with confirm=true. Nothing was ended.")
         try:
             async with _client() as client:
-                # Layer 3 of the spec's three ("refuse when others are still
-                # members"). Layer 1 is the harness permission prompt, layer 2
-                # is creator-only in the SERVICE — a client-side check is not a
-                # gate, so this one is a courtesy that stops the honest mistake,
-                # not a security boundary.
                 wm = await client.get(f"{base}/v1/sessions/{shared_id}/watermark",
                                       params={"contributor": binding.contributor})
                 if is_session_ended(wm):
@@ -1247,26 +1268,16 @@ def register_tools(server: FastMCP, *, resolve_binding, service_url: str, relay,
                             "probably lost in a service restart. Nothing to end; "
                             "`leave_session` clears the local binding.")
                 wm.raise_for_status()
-                members = wm.json().get("members", [])
-                others = sorted(m for m in members if m not in mine)
-                if others:
-                    # Deliberately NOT overridable from here. Nothing an agent
-                    # can pass as an argument is evidence that a human agreed,
-                    # and this is the one call that destroys everyone's memory
-                    # at once. The override is the members leaving.
-                    who_is = "is" if len(others) == 1 else "are"
-                    return (f"Not ending {shared_id}: {', '.join(others)} {who_is} still "
-                            "a member of it, and ending closes the memory for them too. "
-                            "Ask them to call `leave_session` first, then try again. To "
-                            "detach only yourself, call `leave_session`.")
                 resp = await client.post(f"{base}/v1/sessions/{shared_id}/end",
                                          json={"ended_by": binding.contributor})
                 if resp.status_code == 403:
                     # The service's message names the creator; pass it through
                     # rather than re-wording it to "forbidden", because the
                     # agent's next useful act is telling the user who to ask.
-                    return (f"Refused: {_error_text(resp)}. The session is untouched. "
-                            "To detach only this conversation, call `leave_session`.")
+                    return (f"Refused: {_error_text(resp)} — talk to the owner: "
+                            "only the session's creator can end it for everyone. "
+                            "The session is untouched. To detach only this "
+                            "conversation, call `leave_session`.")
                 resp.raise_for_status()
         except (_httpx.HTTPError, OSError) as exc:
             return (f"Shared memory is unreachable right now ({exc.__class__.__name__}) "

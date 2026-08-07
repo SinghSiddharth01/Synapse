@@ -97,6 +97,13 @@ class SessionMeta:
 
     created_by: str | None = None
     purpose: str | None = None
+    # WHICH CONVERSATION ran `create_session` (its agent_session_id), recorded
+    # so `end_session` can tell "ending from where I started it" (clean) from
+    # "ending from another window" (ask the human to confirm first). None for
+    # sessions created before this field existed, joined sessions, and every
+    # other machine — an unknown here degrades to "no confirmation step", never
+    # to a refusal, because the service's creator-only gate is the real guard.
+    created_by_agent_session: str | None = None
 
 
 def sessions_path(state_dir: Path | str) -> Path:
@@ -139,14 +146,18 @@ def retained_sessions(state_dir: Path | str) -> dict[str, SessionMeta]:
             continue
         created_by = entry.get("created_by")
         purpose = entry.get("purpose")
+        creator_conv = entry.get("created_by_agent_session")
         out[shared_id] = SessionMeta(
             created_by=created_by if isinstance(created_by, str) else None,
-            purpose=purpose if isinstance(purpose, str) else None)
+            purpose=purpose if isinstance(purpose, str) else None,
+            created_by_agent_session=(creator_conv if isinstance(creator_conv, str)
+                                      else None))
     return out
 
 
 def record_session(state_dir: Path | str, shared_id: str, *,
-                   created_by: str | None, purpose: str | None) -> None:
+                   created_by: str | None, purpose: str | None,
+                   created_by_agent_session: str | None = None) -> None:
     """Remember who owns `shared_id` and what it is for. Never raises.
 
     FIRST WRITE WINS, per field. A field this machine already knows is never
@@ -206,7 +217,11 @@ def record_session(state_dir: Path | str, shared_id: str, *,
         merged = SessionMeta(
             created_by=(existing.created_by if existing.created_by is not None
                         else created_by),
-            purpose=existing.purpose if existing.purpose is not None else purpose)
+            purpose=existing.purpose if existing.purpose is not None else purpose,
+            created_by_agent_session=(
+                existing.created_by_agent_session
+                if existing.created_by_agent_session is not None
+                else created_by_agent_session))
         if shared_id in known and merged == existing:
             return
         known[shared_id] = merged
@@ -214,7 +229,8 @@ def record_session(state_dir: Path | str, shared_id: str, *,
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(path.suffix + ".tmp")
         tmp.write_text(
-            json.dumps({sid: {"created_by": m.created_by, "purpose": m.purpose}
+            json.dumps({sid: {"created_by": m.created_by, "purpose": m.purpose,
+                              "created_by_agent_session": m.created_by_agent_session}
                         for sid, m in sorted(known.items())}, indent=2),
             encoding="utf-8")
         os.replace(tmp, path)

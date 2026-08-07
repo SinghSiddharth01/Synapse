@@ -19,10 +19,26 @@ def _home(tmp_path, monkeypatch):
 
 def _args(**overrides) -> argparse.Namespace:
     base = dict(service_url=None, contributor=None, distiller=None,
-                claude_model=None, shared_id=None, purpose=None,
-                no_worker=False)
+                claude_model=None, no_worker=False)
     base.update(overrides)
     return argparse.Namespace(**base)
+
+
+def test_up_rejects_session_flags():
+    """`up` starts PROCESSES; sessions belong to the MCP tools. The mirror of
+    the installer's refused-flags test, one layer up: --shared-id/--purpose
+    were how session identity leaked into the runtime layer, and argparse
+    rejecting them outright is the decoupling made permanent."""
+    from synapse_cli.main import build_parser
+    parser = build_parser()
+    for flag in ("--shared-id", "--purpose"):
+        with pytest.raises(SystemExit):
+            parser.parse_args(["up", flag, "x"])
+
+
+def test_up_has_no_session_bootstrap():
+    """The whole create/adopt/bind block is gone, not just unreachable."""
+    assert not hasattr(up, "_bootstrap_session")
 
 
 def test_no_service_url_is_actionable():

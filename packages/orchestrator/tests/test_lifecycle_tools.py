@@ -361,7 +361,10 @@ async def test_create_session_retains_who_created_it_and_what_for(tmp_path):
         "create_session", {"purpose": "fec decode", "agent_session_id": "conv-mine"})
 
     assert retained_sessions(wiring.state_dir) == {
-        "sh-new": SessionMeta(created_by="siddsing", purpose="fec decode")}
+        "sh-new": SessionMeta(created_by="siddsing", purpose="fec decode",
+                              # which CONVERSATION created it — what
+                              # end_session's same-conversation check reads
+                              created_by_agent_session="conv-mine")}
 
 
 async def test_create_session_retains_the_session_even_when_binding_is_refused(tmp_path):
@@ -770,21 +773,58 @@ async def test_leave_session_unbinds_even_when_the_service_is_unreachable(tmp_pa
 
 # ── end ────────────────────────────────────────────────────────────────────
 
-async def test_end_session_refuses_while_other_contributors_are_members(tmp_path):
-    """Layer 3 of the spec's three gates: "refuse when others are still
-    members — and name them". Ending is the one call that destroys the whole
-    team's memory at once, and the member list is the only local evidence that
-    somebody else would lose it."""
+async def test_end_session_ends_for_everyone_even_with_members_still_in(tmp_path):
+    """⟨REVERSED 2026-08-06, Sidd's review⟩ The creator ends the session for
+    EVERYONE — that is what ending means. The old layer-3 gate ("refuse while
+    others are still members") made the owner unable to close their own
+    session without a round of leave-herding; the creator-only 403 in the
+    SERVICE remains the real guard, and the same-conversation confirm below is
+    the courtesy that replaces this one."""
     urls: list[str] = []
     wiring = _wire(tmp_path, _service(members=("sid", "akhil", "aditya"), urls=urls))
     _prejoin(wiring, "sh-1")
 
     text = str(await wiring.server.call_tool("end_session", {}))
 
-    assert "akhil" in text and "aditya" in text        # named, not just counted
-    assert "leave_session" in text                     # and what unblocks it
-    assert not any("/end" in url for url in urls)      # never even attempted
-    assert wiring.binding_file.exists()                # nothing was closed
+    assert any("/end" in url for url in urls)          # actually closed
+    assert "ended for everyone" in text
+    assert not wiring.binding_file.exists()
+
+
+async def test_end_from_another_conversation_asks_for_confirmation_first(tmp_path):
+    """The session was created from conversation A; ending it from
+    conversation B stops and tells the agent to confirm with the human —
+    nothing reaches the service until `confirm=true`."""
+    from synapse_orchestrator.session_meta import record_session
+    urls: list[str] = []
+    wiring = _wire(tmp_path, _service(urls=urls))
+    _prejoin(wiring, "sh-1")                            # binding is conv-1
+    record_session(wiring.state_dir, "sh-1", created_by="sid", purpose="p",
+                   created_by_agent_session="conv-creator")
+
+    text = str(await wiring.server.call_tool("end_session", {}))
+    assert "DIFFERENT" in text and "conv-creator" in text
+    assert "confirm=true" in text
+    assert not any("/end" in url for url in urls)       # nothing was ended
+    assert wiring.binding_file.exists()
+
+    confirmed = str(await wiring.server.call_tool("end_session", {"confirm": True}))
+    assert "ended for everyone" in confirmed
+    assert any("/end" in url for url in urls)
+
+
+async def test_end_from_the_creating_conversation_is_clean(tmp_path):
+    """Same conversation that created it → no confirmation step at all."""
+    from synapse_orchestrator.session_meta import record_session
+    urls: list[str] = []
+    wiring = _wire(tmp_path, _service(urls=urls))
+    _prejoin(wiring, "sh-1")                            # binding is conv-1
+    record_session(wiring.state_dir, "sh-1", created_by="sid", purpose="p",
+                   created_by_agent_session="conv-1")
+
+    text = str(await wiring.server.call_tool("end_session", {}))
+    assert "ended for everyone" in text
+    assert any("/end" in url for url in urls)
 
 
 async def test_end_session_surfaces_the_403_as_prose_naming_the_creator(tmp_path):
@@ -800,6 +840,7 @@ async def test_end_session_surfaces_the_403_as_prose_naming_the_creator(tmp_path
     text = str(await wiring.server.call_tool("end_session", {}))
 
     assert "only aditya can end this session" in text
+    assert "talk to the owner" in text       # who unblocks this, said plainly
     assert wiring.binding_file.exists()      # a refusal changes nothing, locally either
 
 

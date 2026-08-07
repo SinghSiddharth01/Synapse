@@ -14,6 +14,13 @@ Nothing here is a daemon. Everything is a child of this process, dies with
 Ctrl-C, and starts again on the next `synapse up`. Nothing is written at
 install time; everything read here comes from `synapse configure` /
 `synapse config`, overridable per-run by flags.
+
+And nothing here knows about SESSIONS — by decision (2026-08-06). `up`/`down`
+are the runtime layer: they start and stop processes. Shared Sessions are a
+separate artifact with their own lifecycle, owned by the MCP tools
+(`create_session` / `join_session` / `leave_session` / `end_session`) once an
+agent connects to the orchestrator this started. The worker idles until a
+session is bound (`--wait-for-binding`) instead of coupling its start to one.
 """
 
 from __future__ import annotations
@@ -21,8 +28,6 @@ from __future__ import annotations
 import argparse
 import os
 import time
-from datetime import datetime, timezone
-from pathlib import Path
 
 from synapse_contracts import userconfig
 
@@ -60,68 +65,6 @@ def _resolve(args: argparse.Namespace) -> dict[str, str]:
     worker = "off" if args.no_worker else (cfg.get("client.worker") or "on")
     return {"service_url": service_url, "contributor": contributor,
             "distiller": distiller, "worker": worker}
-
-
-def _bootstrap_session(service_url: str, args: argparse.Namespace,
-                       contributor: str, state_dir: Path) -> str:
-    """Create, join or adopt the Shared Session, then persist its identity
-    (session record + machine-scoped binding) exactly the way
-    scripts/serve_local.py does — see that file for the full why on each."""
-    if args.shared_id:
-        served = stack.http(
-            "POST", f"{service_url}/v1/sessions",
-            {"purpose": args.purpose or "shared session",
-             "created_by": contributor, "shared_id": args.shared_id}) or {}
-        shared_id = args.shared_id
-    elif args.purpose:
-        served = stack.http(
-            "POST", f"{service_url}/v1/sessions",
-            {"purpose": args.purpose, "created_by": contributor}) or {}
-        shared_id = served["shared_id"]
-    else:
-        # Neither --shared-id nor --purpose: adopt what the service already
-        # holds. Creating a fresh session here would put this developer alone
-        # in a Shared Session nobody else is in — the exact outcome joining
-        # exists to avoid.
-        try:
-            listed = (stack.http("GET", f"{service_url}/debug/stats.json")
-                      or {}).get("sessions") or []
-        except Exception:
-            listed = []
-        if not listed:
-            raise SystemExit(
-                f"{service_url} holds no Shared Session yet (or its /debug "
-                f"is disabled). Either start one:\n"
-                f"  synapse up --purpose \"what the team is working on\"\n"
-                f"or join one by id:\n"
-                f"  synapse up --shared-id sh-xxxxxxxx")
-        served = listed[0]
-        shared_id = served["shared_id"]
-        _say(f"session    adopted {shared_id}"
-             + (f"  (of {len(listed)}; --shared-id picks another)"
-                if len(listed) > 1 else ""))
-    stack.http("POST", f"{service_url}/v1/sessions/{shared_id}/members",
-               {"contributor": contributor})
-
-    # Same persistence the MCP tools use — records what the SERVICE returned
-    # (create-or-return semantics: the original creator), never what we sent.
-    from synapse_orchestrator.session_meta import record_session
-    record_session(state_dir, shared_id,
-                   created_by=served.get("created_by"),
-                   purpose=served.get("purpose"))
-
-    # Machine-scoped binding: this machine is joined; any conversation here
-    # speaks for it under its own real session id.
-    from synapse_contracts import SessionBinding, write_binding
-    scratch = state_dir / "scratch-transcript.jsonl"
-    scratch.parent.mkdir(parents=True, exist_ok=True)
-    scratch.touch(exist_ok=True)
-    write_binding(state_dir / "bindings" / "claude-code.json", SessionBinding(
-        agent_session_id=f"as-{contributor}",
-        shared_id=shared_id, contributor=contributor, agent="claude-code",
-        transcript_path=str(scratch), pinned_at=datetime.now(timezone.utc),
-        scope="machine"))
-    return shared_id
 
 
 def cmd_up(args: argparse.Namespace) -> int:
@@ -188,8 +131,6 @@ def cmd_up(args: argparse.Namespace) -> int:
              "`contribute` will decline (distilling your prose needs a model "
              "on YOUR machine).")
 
-    shared_id = _bootstrap_session(service_url, args, contributor, state_dir)
-
     orchestrator = procs.spawn("orchestrator", [
         str(stack.BIN / "synapse-orchestrator"),
         "--port", str(stack.ORCHESTRATOR_PORT),
@@ -212,15 +153,19 @@ def cmd_up(args: argparse.Namespace) -> int:
         }
         if distiller == "npu":
             worker_env["SYNAPSE_BASE_URL"] = MODEL_URL
+        # No session id anywhere on this command line, deliberately: `up`
+        # starts PROCESSES; sessions are created/joined later, from the
+        # agent. The worker idles until that happens rather than exiting or
+        # pushing under a placeholder id.
         worker = procs.spawn("worker", [
             str(stack.BIN / "synapse-worker"), "run",
-            "--contributor", contributor, "--shared-id", shared_id,
+            "--contributor", contributor, "--wait-for-binding",
         ], worker_env)
 
     _say(f"orchestr.  {ORCHESTRATOR_URL}/mcp  <- point Claude Code here")
-    _say(f"session    {shared_id}  (contributor: {contributor})")
+    _say(f"identity   {contributor}  (findings are attributed to this name)")
     if worker is not None:
-        _say(f"worker     following this machine's agent transcripts "
+        _say(f"worker     idling until a session is joined "
              f"(log: {procs.log_path('worker')})")
     _say()
     _say("  In the project you want shared memory in (once per project):")
@@ -228,10 +173,20 @@ def cmd_up(args: argparse.Namespace) -> int:
          f"{ORCHESTRATOR_URL}/mcp")
     _say("  …or `synapse configure --project <dir>` does it for you.")
     _say()
+    _say("  Sessions are managed FROM YOUR AGENT, not from here — in a "
+         "connected conversation:")
+    _say("    create_session(\"what the team is working on\")  — new session; "
+         "returns the id + dashboard")
+    _say("    join_session(\"sh-…\")                          — attach to a "
+         "teammate's")
+    _say()
     lan = lan_ip() or "<this-machine-lan-ip>"
+    shareable = (service_url if "127.0.0.1" not in service_url
+                 else f"http://{lan}:8899")
     _say("  A teammate joins with (after installing the client):")
-    _say(f"    synapse config set service.url {service_url if '127.0.0.1' not in service_url else f'http://{lan}:8899'}")
-    _say(f"    synapse up --shared-id {shared_id}")
+    _say(f"    synapse config set service.url {shareable}")
+    _say("    synapse up   — then join_session(\"<the id you share>\") from "
+         "their agent")
     _say()
     _say(f"  Logs: {procs.logs_dir}")
     _say("  Ctrl-C to stop everything `synapse up` started.")
@@ -276,11 +231,9 @@ def add_parser(sub: argparse._SubParsersAction) -> None:
                         help="override client.distiller for this run only")
         up.add_argument("--claude-model", metavar="MODEL",
                         help="model for the anthropic / claude-cli arms")
-        up.add_argument("--shared-id", metavar="ID",
-                        help="join this Shared Session (default: adopt the "
-                             "service's existing one)")
-        up.add_argument("--purpose", metavar="TEXT",
-                        help="create a NEW Shared Session with this purpose")
+        # NO --shared-id and NO --purpose, by decision (2026-08-06): `up`
+        # starts processes; sessions are a separate lifecycle owned by the
+        # MCP tools (create_session / join_session) once an agent connects.
         up.add_argument("--no-worker", action="store_true",
                         help="do not start the passive Edge Worker")
         up.set_defaults(func=cmd_up)

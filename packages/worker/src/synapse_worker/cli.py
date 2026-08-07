@@ -381,8 +381,45 @@ async def cmd_join(args: argparse.Namespace) -> int:
     return 0
 
 
+def _wait_for_binding(args: argparse.Namespace) -> None:
+    """Block until this machine holds a `join`-pinned binding `run` can follow.
+
+    `synapse up` starts this worker at PROCESS-start time, but sessions are a
+    separate lifecycle: they are created or joined later, from inside an
+    agent, by the MCP tools (or `synapse-worker join`). Until then there is
+    nothing this worker could honestly distil into — the un-joined fallback
+    would stamp findings into the `local-dev` placeholder nobody reads — and
+    exiting instead would mean the worker needs a restart at join time, which
+    is exactly the start/session coupling `synapse up` no longer has. So
+    under `--wait-for-binding` it idles on a cheap re-probe and falls through
+    to the normal path the moment a binding exists.
+    """
+    import time
+
+    config = load_config()
+    state_dir = Path(config.worker.state_dir)
+    interval = args.interval or config.worker.poll_interval_seconds
+    announced = False
+    while True:
+        _, resolved = _resolve_agent_and_transcript(args, state_dir)
+        if resolved is not None and resolved.local_binding is not None:
+            if announced:
+                print(f"bound to {resolved.local_binding.shared_id} — following "
+                      f"{resolved.path}", flush=True)
+            return
+        if not announced:
+            print("waiting for a Shared Session: nothing is distilled or pushed "
+                  "until one is created or joined (create_session/join_session "
+                  "from your agent, or `synapse-worker join <shared_id>`). "
+                  f"Re-checking every {interval:g}s.", flush=True)
+            announced = True
+        time.sleep(interval)
+
+
 async def cmd_run(args: argparse.Namespace) -> int:
     debug_port = _resolve_debug_port(args)
+    if getattr(args, "wait_for_binding", False) and not args.transcript:
+        _wait_for_binding(args)
     config, loop, transcript, _, source, stats = _build(args, debug_port)
     interval = args.interval or config.worker.poll_interval_seconds
 
@@ -692,6 +729,12 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--transcript", help="path to a transcript (default: auto-detect)")
     run.add_argument("--interval", type=float, help="seconds between checks")
     run.add_argument("--ticks", type=int, help="stop after N ticks (default: forever)")
+    run.add_argument(
+        "--wait-for-binding", action="store_true",
+        help="idle until a join-pinned binding exists instead of exiting or "
+             "falling back to the un-joined shared id. What `synapse up` "
+             "passes: processes start at up time, sessions bind later, from "
+             "the agent")
     run.add_argument("--contributor", default="aditya")
     run.add_argument("--shared-id", default=DEFAULT_SHARED_ID)
     run.add_argument(

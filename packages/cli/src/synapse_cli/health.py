@@ -110,16 +110,32 @@ def _check_running(cfg: dict[str, str]) -> list[Result]:
             "edge worker", "PASS",
             f"not started, by configuration ({why})"))
 
+    # Sessions are per CONVERSATION, not per machine (one Claude session maps
+    # to at most one Shared Session; several conversations may each hold their
+    # own). List what is actually bound rather than counting files — which
+    # conversation speaks into which session is the answer this line exists
+    # to give.
     state = userconfig.state_dir()
-    bindings = sorted((state / "bindings").glob("*.json")) if \
-        (state / "bindings").is_dir() else []
+    root = state / "bindings"
+    paths = (sorted(root.glob("*.json")) + sorted(root.glob("*/*.json"))
+             if root.is_dir() else [])
+    attached: list[str] = []
+    for path in paths:
+        try:
+            from synapse_contracts.binding import read_binding
+            b = read_binding(path)
+        except Exception:
+            b = None
+        if b is not None:
+            attached.append(f"{b.agent_session_id} -> {b.shared_id}")
     results.append(Result(
-        "session binding",
-        "PASS" if bindings else "WARN",
-        (f"{len(bindings)} binding(s) in {state / 'bindings'}"
-         if bindings else "none — this machine has not joined a Shared Session"),
-        "" if bindings else "`synapse up` (adopts the service's session, or "
-                            "--shared-id / --purpose)"))
+        "sessions",
+        "PASS" if attached else "WARN",
+        ("; ".join(attached) if attached
+         else "no conversation here is in a Shared Session"),
+        "" if attached else "sessions are managed from your agent once "
+                            "`synapse up` is running: create_session / "
+                            "join_session"))
     return results
 
 
