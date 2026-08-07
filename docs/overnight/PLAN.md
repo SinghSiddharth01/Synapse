@@ -484,18 +484,53 @@ Check the `claude` CLI exists first, offer rather than assume, and state which
 scope was used — a silent `--scope user` edit to someone's global config is the
 kind of thing that erodes trust in an installer.
 
-**The 4B model file — do not rehost blindly.** `config/synapse.toml` names
-`qualcomm/Qwen3-4B-Instruct-2507:W4A16`, which is a Qualcomm-published artifact.
-Order of preference:
+**The 4B model — researched 2026-08-06, and the slow default is avoidable.**
 
-1. **Pull from the canonical source** (Hugging Face / Qualcomm) if it is
-   published there. Rehosting someone else's weights is a licensing question
-   before it is an engineering one — **check the licence before mirroring**.
-2. If we must host it: **GitHub Release assets**, not LFS. Releases allow up to
-   **2 GB per file** and do not consume the LFS bandwidth quota, which a free
-   plan exhausts almost immediately. This is how open-source projects ship large
-   binaries.
-3. If it exceeds 2 GB, split with a checksum manifest and reassemble on install.
+*Where it comes from.* Two canonical sources, both Qualcomm's:
+
+- **Hugging Face** — [`huggingface.co/qualcomm/Qwen3-4B`](https://huggingface.co/qualcomm/Qwen3-4B)
+  carries **pre-exported per-device bundles**, including
+  `GENIEX_QAIRT w4a16 Snapdragon® X Elite` — exactly our target. It also ships
+  `GENIEX_LLAMACPP q4_0` variants at context 512 / 1024 / **4096**.
+- **Qualcomm AI Hub** — [`aihub.qualcomm.com/models/qwen3_4b`](https://aihub.qualcomm.com/models/qwen3_4b),
+  which is what `geniex pull ai-hub-models/Qwen3-4B-Instruct-2507` reaches.
+
+*Why the default is slow, and the fix.* `geniex pull` already accepts a local
+source — this is the whole answer:
+
+```
+geniex pull <model>[:<precision>] --model-hub {aihub|hf|localfs}
+geniex pull local/<name> --local-path /path/to/dir-or-zip
+```
+
+and the docs state: *"pull copies files into the GenieX cache. After a successful
+pull you can safely delete the source to avoid keeping two copies."* So we
+**fetch once, from wherever is fastest, then feed GenieX from disk** — no
+teammate ever waits on the aihub path.
+
+*Hosting, in order:*
+
+1. **For the demo — stage once and serve on the LAN.** Three people on one
+   network, and the host already exposes a LAN service. One WAN download instead
+   of three, and it raises no redistribution question at all. This is the
+   recommended path and the one to build first.
+2. **For public release — do NOT mirror yet.** The HF page lists the licence as
+   **"other"**, deferring to the original Qwen3-4B licence, and redistribution
+   rights are **not established on that page**. Reading the upstream licence is a
+   prerequisite, not a formality. Until then the installer pulls from the
+   canonical source and documents `--model-hub localfs` as the fast path.
+3. **If the licence permits mirroring** — GitHub Release assets (2 GB/file, no
+   LFS bandwidth quota). Split with a checksum manifest if it exceeds that.
+
+*Two compatibility gotchas the installer must handle:*
+
+- **The QAIRT SDK version on the device must match the one published alongside
+  the assets.** A mismatch is a real failure mode, so check it and say so rather
+  than letting `geniex serve` fail obscurely.
+- `config/synapse.toml`'s commented GGUF fallback assumes
+  `usable_context = 8192`, but the published llama.cpp variants stop at **4096**.
+  That placeholder is already marked UNMEASURED — this is why. Correct or delete
+  it; do not let a number that has no published bundle behind it sit in config.
 
 Whichever path: checksum-verify after download, resume on interrupt, and never
 re-download when the file is already present and valid.
