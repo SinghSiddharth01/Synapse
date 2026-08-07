@@ -1193,7 +1193,9 @@ def build_app(provider: ModelProvider, *, debug: bool = True,
         Route("/v1/sessions/{sid}/query", query, methods=["POST"]),
     ]
     if debug:
-        routes.extend(debug_routes(store, call_log, feed, wm_log))
+        # `provider` (not the RecordingProvider façades) because the rate limit
+        # belongs to the KEY, which both façades share.
+        routes.extend(debug_routes(store, call_log, feed, wm_log, provider))
 
     # THE RECOVERY MECHANISM. Everything else in this file makes a deferral
     # correct and visible; this is what makes a deferred merge actually run.
