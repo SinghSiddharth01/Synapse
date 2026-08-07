@@ -85,3 +85,92 @@ async def test_a_session_never_merged_before_is_drained():
         last_merge={}, affordable=lambda: (True, ""),
         interval_s=60.0, now=120.0)
     assert merged == ["sh-1"]
+
+
+# --------------------------------------------------------------------------
+# The loop wiring, end to end
+#
+# The unit tests above drive `drain_pending` directly. These two drive the
+# BACKGROUND TASK: a real app, a real Starlette lifespan, a real deferral, and
+# no second push. That is the actual reported failure -- findings landed at
+# 23:03 and 23:10 against a memory last written at 22:57 -- and nothing above
+# would have caught the task simply never being started.
+# --------------------------------------------------------------------------
+import time
+from datetime import datetime, timezone
+
+from starlette.testclient import TestClient
+from synapse_providers import FakeProvider
+
+from synapse_service.api import build_app
+
+TS = datetime(2026, 8, 6, tzinfo=timezone.utc)
+VERDICT = {"working_memory": "wm", "merges": [], "trivial_ids": [], "conflicts": []}
+
+# Long enough that the second push is reliably inside it on a loaded machine,
+# short enough that waiting out one tick does not dominate the suite.
+DRAIN_INTERVAL_S = 0.3
+
+
+def _finding(fid: str) -> dict:
+    return {"id": fid, "type": "learning",
+            "text": "the pool trips under allocation pressure",
+            "attributions": [{"contributor": "sid", "agent_session": "as-1",
+                              "agent": "claude-code"}],
+            "ts": TS.isoformat()}
+
+
+def _app(monkeypatch, interval: float = DRAIN_INTERVAL_S):
+    monkeypatch.setattr("synapse_service.api.MERGE_MIN_INTERVAL_S", interval)
+    return build_app(FakeProvider(scripts=[VERDICT] * 20),
+                     merge_min_interval_s=interval)
+
+
+def _deferred_session(client) -> tuple[str, int]:
+    """A session with one merged round and one DEFERRED push behind it.
+    Returns the sid and the memory_version the deferral left behind."""
+    sid = client.post("/v1/sessions", json={"purpose": "p", "created_by": "sid"}
+                      ).json()["shared_id"]
+    first = client.post(f"/v1/sessions/{sid}/findings",
+                        json={"findings": [_finding("f-1")]}).json()
+    assert first["deferred"] is False, "the first push should merge immediately"
+    second = client.post(f"/v1/sessions/{sid}/findings",
+                         json={"findings": [_finding("f-2")]}).json()
+    assert second["deferred"] is True, "the second push should be debounced"
+    assert second["pending"] == 1
+    return sid, second["memory_version"]
+
+
+def _version(app, sid: str) -> int:
+    """Read through `app.state.store`, the seam api.py documents as "no route
+    reads it". Going via a route would mean picking one that reports the
+    version AND mutates a watermark as it does so."""
+    return app.state.store.get_context(sid).memory_version
+
+
+def test_the_background_loop_drains_a_deferral_with_no_further_push(monkeypatch):
+    """THE regression test for the reported symptom. One push merges, the next
+    defers, and then NOTHING else happens -- no push, no /synthesize call. The
+    working memory must still catch up on its own."""
+    app = _app(monkeypatch)
+    with TestClient(app) as client:
+        sid, deferred_at = _deferred_session(client)
+
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and _version(app, sid) <= deferred_at:
+            time.sleep(0.05)
+
+        assert _version(app, sid) > deferred_at, (
+            "the deferred merge never ran: the drain loop is not wired to the "
+            "app lifespan, so `deferred: true` is a promise nothing keeps")
+
+
+def test_the_drain_can_be_switched_off(monkeypatch):
+    """The opt-out works -- and, by staying stale, proves the test above is
+    measuring the LOOP rather than some other path that happens to merge."""
+    monkeypatch.setenv("SYNAPSE_DRAIN_DISABLED", "1")
+    app = _app(monkeypatch)
+    with TestClient(app) as client:
+        sid, deferred_at = _deferred_session(client)
+        time.sleep(DRAIN_INTERVAL_S * 4)
+        assert _version(app, sid) == deferred_at
