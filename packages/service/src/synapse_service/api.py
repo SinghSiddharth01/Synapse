@@ -295,14 +295,26 @@ async def drain_pending(*, store, synthesizer, pending: dict[str, list],
             logger.info("Drain for %s held on budget (%s); %d finding(s) still "
                         "pending.", sid, why, len(findings))
             continue
-        try:
-            await synthesizer.merge(store, sid, findings)
-        except Exception:
-            logger.exception("Drain for %s failed; %d finding(s) stay pending "
-                             "for the next tick.", sid, len(findings))
-            continue
-        pending.pop(sid, None)
+
+        # CLAIM THE BATCH BEFORE THE AWAIT, exactly as `push_findings` does.
+        # A merge on the 70B runs ~50s and a live worker pushes every ~30s, so
+        # a push landing mid-merge is the ordinary case rather than a race: it
+        # extends the very list this function is holding. Popping afterwards
+        # would discard it. Those findings survive in the store -- they are
+        # upserted before the debounce decision -- but they would lose
+        # `new_findings` status and can then age out of synthesis.merge's
+        # candidate window without ever being considered.
+        claimed = pending.pop(sid, [])
         last_merge[sid] = now
+        try:
+            await synthesizer.merge(store, sid, claimed)
+        except Exception:
+            # Ahead of anything that arrived while the call was in flight: the
+            # batch that failed is the older one.
+            pending[sid] = claimed + pending.get(sid, [])
+            logger.exception("Drain for %s failed; %d finding(s) stay pending "
+                             "for the next tick.", sid, len(claimed))
+            continue
         merged.append(sid)
     return merged
 

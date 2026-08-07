@@ -174,3 +174,54 @@ def test_the_drain_can_be_switched_off(monkeypatch):
         sid, deferred_at = _deferred_session(client)
         time.sleep(DRAIN_INTERVAL_S * 4)
         assert _version(app, sid) == deferred_at
+
+
+async def test_a_push_arriving_during_the_merge_is_not_swallowed():
+    """The claim must happen BEFORE the await, as `push_findings` already does.
+
+    A merge on the 70B runs ~50s. A live worker pushes every ~30s. So a push
+    landing mid-merge is the common case, not a race: it extends the very list
+    `drain_pending` is holding, and popping AFTER the await would discard it.
+    The findings survive in the store either way -- they are upserted before
+    the debounce decision -- but they would lose `new_findings` status and can
+    then age out of synthesis.merge's candidate window entirely.
+    """
+    pending: dict[str, list] = {"sh-1": ["f-1"]}
+
+    class _SlowSynth:
+        def __init__(self):
+            self.seen: list[list] = []
+
+        async def merge(self, store, sid, findings):
+            self.seen.append(list(findings))
+            # A push lands while the model call is in flight.
+            pending.setdefault(sid, []).append("f-2")
+
+    synth = _SlowSynth()
+    merged = await drain_pending(
+        store=None, synthesizer=synth, pending=pending,
+        last_merge={"sh-1": 0.0}, affordable=lambda: (True, ""),
+        interval_s=60.0, now=120.0)
+
+    assert merged == ["sh-1"]
+    assert synth.seen == [["f-1"]]          # merged what it claimed
+    assert pending == {"sh-1": ["f-2"]}     # and kept what arrived after
+
+
+async def test_a_failed_drain_restores_the_batch_ahead_of_later_arrivals():
+    """Order matters on the way back: the batch that failed is older than
+    anything that landed while it was in flight."""
+    pending: dict[str, list] = {"sh-1": ["f-1"]}
+
+    class _BoomSynth:
+        async def merge(self, store, sid, findings):
+            pending.setdefault(sid, []).append("f-2")
+            raise RuntimeError("provider down")
+
+    merged = await drain_pending(
+        store=None, synthesizer=_BoomSynth(), pending=pending,
+        last_merge={"sh-1": 0.0}, affordable=lambda: (True, ""),
+        interval_s=60.0, now=120.0)
+
+    assert merged == []
+    assert pending == {"sh-1": ["f-1", "f-2"]}
