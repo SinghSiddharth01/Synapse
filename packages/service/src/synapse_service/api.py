@@ -97,9 +97,14 @@ SYNTHESIS_REQUESTS_PER_HOUR = 20
 
 # The dashboard enforces THREE request ceilings; the governor modelled one.
 # Read off the Cirrascale console for Llama-3.3-70B on 2026-08-06.
-# MERGE_MIN_INTERVAL_S=60 happens to keep ONE session under the per-minute
-# limit, but it is per-session state -- several sessions merging at once could
-# breach 5/min while `_affordable` saw nothing wrong.
+#
+# PER_MINUTE IS RECORDED HERE BUT DELIBERATELY NOT ENFORCED by `_affordable`
+# -- see the loop in `_affordable_from_ledger` for why. Short version: a burst
+# limit is what AIC100Provider's rotate-then-backoff is FOR, and pre-refusing
+# on it stalls the memory over traffic that would have cleared in seconds. It
+# stays here because the number is real and the next reader will want it
+# (and `_warn_if_the_key_pool_cannot_pay_for_the_budget`-style checks may want
+# it later); it is documentation of the ceiling, not a gate.
 SYNTHESIS_REQUESTS_PER_MINUTE = 5
 SYNTHESIS_REQUESTS_PER_DAY = 250
 MINUTE_S = 60.0
@@ -246,8 +251,22 @@ def _affordable_from_ledger(spend: list[tuple[float, int, str, int]], *,
     if skip_requests:
         return True, ""
 
+    # HOUR and DAY only -- deliberately NOT the per-minute limit.
+    #
+    # The 5/minute ceiling is a BURST limit, and the right tool for a burst is
+    # the backoff added to AIC100Provider (rotate every key, then wait the
+    # ~36s cooldown, then retry): a burst clears by itself in seconds. Refusing
+    # synthesis pre-emptively for it does not. Worse, `_spend` counts RETRIEVAL
+    # too, so five queries in a minute -- an ordinary thing for a team reading
+    # the memory -- would stop the memory being written at all, which is the
+    # exact "findings landed, memory unchanged" stall this whole change set
+    # exists to end. Measured against the real thing: the rehearsal's demo
+    # pace (two pushes, three queries, one push) trips 5/minute and never
+    # trips 20/hour.
+    #
+    # The hour and day figures are BUDGETS -- overrunning them means waiting up
+    # to an hour, which backoff cannot absorb -- so those stay pre-emptive.
     for label, seconds, per_key_cap in (
-            ("minute", MINUTE_S, SYNTHESIS_REQUESTS_PER_MINUTE),
             ("hour", HOUR_S, SYNTHESIS_REQUESTS_PER_HOUR),
             ("day", DAY_S, SYNTHESIS_REQUESTS_PER_DAY)):
         entries = window(seconds)

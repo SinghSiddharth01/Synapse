@@ -247,6 +247,12 @@ only for the dimensions the gateway did not report. A 429 rotates to the next
 key first, then waits and retries up to three times (~36s, capped at 45s total)
 before synthesis defers.
 
+The hour and day budgets are enforced ahead of time, because overrunning one
+means waiting up to an hour. The per-minute limit deliberately is not: a burst
+clears in seconds and the retry above absorbs it, whereas refusing synthesis
+pre-emptively would stall the memory over traffic — including ordinary
+`/query` reads, which spend the same key — that was about to succeed anyway.
+
 Current headroom shows on the brain page (`/debug`) as **Synthesis key**. A
 `LIMITED` reading there is the answer to *"findings are landing but the working
 memory is not moving"*; `—` means no headers have been recognised yet, which is

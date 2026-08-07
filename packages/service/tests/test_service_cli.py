@@ -123,7 +123,9 @@ def test_main_ctrl_c_during_boot_exits_quietly(monkeypatch) -> None:
     """Ctrl-C before uvicorn installs its own SIGINT handler (i.e. during
     _provider()'s boot preflights) used to escape as a raw traceback.
     Exit 130 (128+SIGINT) instead."""
-    seen = _stub_build_app(monkeypatch)
+    # Called for the stubbing side effect only: this test asserts on the exit
+    # code, not on what build_app received.
+    _stub_build_app(monkeypatch)
 
     def _interrupt(app, **kw):
         raise KeyboardInterrupt

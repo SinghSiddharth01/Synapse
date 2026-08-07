@@ -51,13 +51,20 @@ def test_the_hourly_request_ceiling_still_binds():
     assert "20 request(s) this hour" in why
 
 
-def test_the_per_minute_ceiling_binds_independently_of_the_hour():
-    """Six rounds in one minute is nothing against 20/hour and over the 5/min
-    limit the governor never modelled."""
+def test_a_burst_inside_one_minute_is_left_to_backoff_not_pre_refused():
+    """The 5/minute limit is real and deliberately NOT enforced here.
+
+    A burst clears itself in seconds, and AIC100Provider now rotates keys and
+    waits out the ~36s cooldown, so a burst is recoverable. A pre-emptive
+    refusal is not. And `_spend` counts RETRIEVAL, so five queries in a minute
+    -- an ordinary thing for a team reading the memory -- would otherwise stop
+    the memory being written at all: the exact stall this change set exists to
+    end. Measured: the demo rehearsal's pace (two pushes, three queries, one
+    push) trips 5/minute and never comes near 20/hour.
+    """
     spend = _ledger(6, spacing_s=5.0)
     ok, why = api_mod.affordable(spend, provider=_StubProvider())
-    assert not ok
-    assert "this minute" in why
+    assert ok, why
 
 
 def test_the_daily_ceiling_binds_when_hour_and_minute_are_clear():

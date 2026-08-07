@@ -5,7 +5,13 @@ written at 22:57. Both pushes deferred, and nothing retried them -- `_pending`
 is drained only by the NEXT push, so a session that goes quiet stays stale
 forever. `POST /synthesize` already does the work; nothing called it.
 """
-from synapse_service.api import drain_pending
+import time
+from datetime import datetime, timezone
+
+from starlette.testclient import TestClient
+from synapse_providers import FakeProvider
+
+from synapse_service.api import build_app, drain_pending
 
 
 class _Synth:
@@ -96,14 +102,6 @@ async def test_a_session_never_merged_before_is_drained():
 # 23:03 and 23:10 against a memory last written at 22:57 -- and nothing above
 # would have caught the task simply never being started.
 # --------------------------------------------------------------------------
-import time
-from datetime import datetime, timezone
-
-from starlette.testclient import TestClient
-from synapse_providers import FakeProvider
-
-from synapse_service.api import build_app
-
 TS = datetime(2026, 8, 6, tzinfo=timezone.utc)
 VERDICT = {"working_memory": "wm", "merges": [], "trivial_ids": [], "conflicts": []}
 
