@@ -31,7 +31,7 @@ Edge distillation on Snapdragon plus cloud synthesis on Cloud AI 100 is the divi
 - **On-device SLM inference** on the Snapdragon X Elite NPU
 - **Qualcomm Cloud AI 100** for synthesis and retrieval
 - **MCP** (Model Context Protocol) for the agent-facing interface
-- **Claude Code and Codex** as the demo pair — the worker auto-detects which agent is running; the design is agent-agnostic
+- **Claude Code** as the demo agent — the worker auto-detects which agent product is running, and a Codex adapter is registered alongside it (`packages/worker/src/synapse_worker/discovery.py:279-284`), built from the Codex source tree rather than against a live transcript. The design is agent-agnostic; Claude Code is the path with live evidence behind it.
 
 ## Five-Day Plan
 
@@ -56,15 +56,38 @@ Our demo highlights one concrete use case: a team debugging a shared issue, comb
 
 - Python 3.12+
 - [`uv`](https://docs.astral.sh/uv/) for dependency management and running the workspace
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) as the agent to connect (the worker auto-detects the agent product; Codex support is unbuilt — see Stretch Goals)
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) as the agent to connect (the worker auto-detects the agent product; the Codex adapter is registered but unverified against a live transcript — see `fixtures/raw_lines/codex/README.md`)
 - (Optional) a Snapdragon X Elite machine running `geniex serve` on `:18181` for real on-device NPU inference, and Cirrascale/Cloud AI 100 credentials for real cloud synthesis. Without either, `scripts/serve_local.py` (below) starts a model stand-in automatically, so the full pipeline is runnable on any machine.
 
 ### Setup (from scratch)
+
+**One command.** This installs `uv` if you need it, clones, syncs, creates `secrets.jsonc`, registers the MCP server, runs a pre-flight check, and starts the stack — from nothing.
+
+```bash
+# host a session
+curl -LsSf https://raw.githubusercontent.com/SinghSiddharth01/Synapse/main/install.sh | sh -s -- --purpose "demo session"
+
+# join a session someone is already hosting — one paste, nothing to transcribe
+curl -LsSf https://raw.githubusercontent.com/SinghSiddharth01/Synapse/main/install.sh | sh -s -- --service-url http://192.168.4.44:8899 --shared-id sh-bbe76a56 --contributor akhil
+```
+
+```powershell
+# Windows, host a session
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/SinghSiddharth01/Synapse/main/install.ps1))) -Purpose "demo session"
+
+# Windows, join one
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/SinghSiddharth01/Synapse/main/install.ps1))) -ServiceUrl http://192.168.4.44:8899 -SharedId sh-bbe76a56 -Contributor akhil
+```
+
+The host's own terminal prints both of those lines, filled in with its real LAN address and session id, ready to paste to a teammate. Any flag the installer does not recognise is forwarded verbatim to `scripts/serve_local.py`, so `--npu`, `--live` and the rest work here too. `install.bat` is the double-clickable Windows equivalent.
+
+Or, step by step:
 
 ```bash
 git clone https://github.com/SinghSiddharth01/Synapse.git
 cd Synapse
 uv sync
+cp secrets.example.jsonc secrets.jsonc   # paste keys here; none are needed for a first run
 ```
 
 > **Windows on ARM64:** point `uv` at the ARM64 interpreter explicitly (e.g. `uv venv --python <path-to-arm64-python.exe>` before `uv sync`) — a bare `uv venv` can silently provision an emulated x86_64 environment, which breaks NPU wheel installs. Also pin `mcp==1.9.4`; newer `mcp` releases pull a `cryptography` dependency with no ARM64 Windows wheel.
@@ -85,7 +108,9 @@ claude mcp add --transport http --scope project synapse http://127.0.0.1:8787/mc
 
 Start a **new** Claude Code session in that project and approve the `synapse` server when prompted — the `mcp__synapse__query` and `mcp__synapse__contribute` tools then become available (verify with `/mcp` inside the session). A second teammate joins the same Shared Session by re-running `serve_local.py --shared-id <the id printed above>` from their own machine, or by running `synapse-worker join <shared_id>` to passively observe an existing Claude Code transcript instead of calling `contribute` directly.
 
-Add `--npu` if a real `geniex serve` instance is already running, or `--live` to proxy the model seam to a real cloud model instead of the stand-in.
+Add `--npu` to use a real GenieX NPU seam — `serve_local.py` starts `geniex serve` itself if `:18181` is free, adopts one that is already running otherwise, and supervises it either way: it probes `GET /v1/models` every 15s and restarts the seam if it stops answering, because `geniex serve` is known to keep its process alive while its HTTP server goes silent. Every transition prints to your terminal and to `.synapse/logs/supervisor.log`. Add `--live` to proxy the model seam to a real cloud model instead of the stand-in, or `--npu --live` together for the split production topology: distil on the local NPU, synthesize on the real 70B.
+
+To check a machine *before* starting anything, run `./install.sh --doctor-only` (or `install.bat -DoctorOnly` on Windows). It starts no processes; it runs `scripts/doctor.py`, which is also runnable on its own with `uv run python scripts/doctor.py` and reports on `uv`, the interpreter, the `mcp==1.9.4` pin, console encoding, the three ports, `secrets.jsonc`, the awareness pack, and your `claude mcp` registration.
 
 ### Run the test suite
 
@@ -97,7 +122,7 @@ uv run pytest
 
 - [`docs/demo-script.md`](docs/demo-script.md) — the full scripted walkthrough (multiple contributors, cross-teammate retrieval, and recovery after a service restart)
 - [`packs/claude-code/INSTALL.md`](packs/claude-code/INSTALL.md) — optional awareness hooks that make shared-memory updates surface proactively inside a Claude Code session, rather than only on demand via `query`
-- [`docs/architecture.html`](docs/architecture.html) — architecture deep-dive
+- [`docs/architecture.md`](docs/architecture.md) — architecture deep-dive (`docs/architecture.html` is a standalone rendered copy of the same material; the Markdown is the one the docs site publishes and the one to edit)
 - [`CONTEXT.md`](CONTEXT.md) — vocabulary and design invariants
 
 ## Team

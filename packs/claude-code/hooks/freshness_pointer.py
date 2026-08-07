@@ -69,32 +69,77 @@ everything after the burst's first tick.
 SCOPED TO THE CONVERSATION THAT ACTUALLY INVOKED IT (post-review fix,
 2026-08-05). Signal ③ is specified per Agent Session ("since THIS agent
 last looked" — Plan D.6's Pack row), but a machine can have several Claude
-Code windows open on the same project while only one of them is "the
-joined" conversation on disk (`SessionBinding`'s own docstring: "one
-active Agent Session per Agent product per machine"). Every OTHER window
-still fires this hook on its own `UserPromptSubmit`. Claude Code writes
-each invocation's own conversation id to the hook's stdin as `session_id`
--- the same id `sources/claude_code.py` reads off each transcript line as
-`sessionId` and stores as `LocalBinding.agent_session_id`. `run()` reads
-that payload (`_read_stdin_session_id`) and returns immediately, before
-any network call or state read/write, when it disagrees with the joined
-binding -- otherwise a window that never joined would both (a) get shared
-memory injected into a conversation `docs/architecture.html` promises is
-"inert" until it joins, and (b) silently consume the joined window's own
-pending notice, because the two windows would otherwise share one state
-entry. State is additionally keyed by `(shared_id, agent_session_id)`, not
-`shared_id` alone, so a re-join to a fresh Agent Session under the same
-Shared Session starts its own "since I last looked" clock rather than
-inheriting a stranger session's baseline.
+Code windows open on the same project. Every window fires this hook on its
+own `UserPromptSubmit`. Claude Code writes each invocation's own
+conversation id to the hook's stdin as `session_id` -- the same id
+`sources/claude_code.py` reads off each transcript line as `sessionId` and
+stores as `LocalBinding.agent_session_id`. `run()` reads that payload
+(`_read_stdin_session_id`) and uses it to decide, before any network call
+or state read/write, whether this conversation is enrolled at all --
+otherwise a window that never joined would both (a) get shared memory
+injected into a conversation `docs/architecture.html` promises is "inert"
+until it joins, and (b) silently consume a joined window's own pending
+notice, because the two windows would otherwise share one state entry.
+State is keyed by `(shared_id, agent_session_id)`, not `shared_id` alone,
+so every conversation keeps its own "since I last looked" clock rather
+than inheriting a stranger session's baseline.
+
+SEVERAL WINDOWS, SEVERAL BINDINGS (W2, 2026-08-06). The premise the
+paragraph above was written against -- "only one of them is the joined
+conversation on disk", `SessionBinding`'s old "one active Agent Session
+per Agent product per machine" -- is exactly what W2 lifts. The worker now
+writes one binding per Agent SESSION, `bindings/claude-code/<session>.json`
+(`synapse_worker.discovery.binding_path_for_session`), and keeps refreshing
+the single `bindings/claude-code.json` as a compatibility mirror of the
+most recent one. So `_resolve_binding` looks in that order:
+
+  1. `bindings/claude-code/<stdin session id>.json` -- this conversation's
+     OWN binding. Matching is on the `agent_session_id` INSIDE the file,
+     never on the filename, because the filename is a sanitized convenience
+     (`_UNSAFE_IN_FILENAME`, mirroring the writer) and two ids could in
+     principle sanitize alike. Found: speak for it, under this
+     conversation's own id.
+  2. Otherwise the legacy mirror, whose `scope` field decides:
+     - `scope == "machine"` -- a stand-in written before any conversation
+       existed (`scripts/serve_local.py`), meaning "this MACHINE is joined;
+       any conversation here speaks for it under its own real session id."
+       Proceed, using the STDIN id as the identity, so each window still
+       keeps its own notice clock and its own watermark cursor.
+     - `scope == "session"` (the default, and every binding a real
+       `synapse-worker join` writes) -- the pre-W2 gate, unchanged: speak
+       only when the file names this exact conversation, silence otherwise.
+  3. Nothing at all -- silent.
+
+The leak the 2026-08-05 gate closed cannot come back through step 2:
+session-scoped files still gate exactly as before, and a machine-scoped
+file *means* every window on the machine is enrolled. A stdin id of None
+("can't tell" -- a tty, an unwritten pipe) still falls back to the legacy
+mirror's own identity, un-gated, as it did before.
+
+WHICH IDENTITY GOES ON THE WIRE (W2, 2026-08-06). `_fetch_watermark` sends
+BOTH `agent_session` (this conversation's real id) and `contributor` (the
+human, off the binding). They answer different questions and the Service
+keys them differently on purpose -- see CONTEXT.md: suppression is scoped
+to the Agent Session, the watermark to the Contributor. `new_since` counts
+against `store.last_seen(shared_id, contributor)`, so sending
+`contributor` is what makes the count in this notice mean "new to ME"
+rather than "new to this window", and what keeps opening a second window
+from reporting the whole memory as unseen. Before W2 this hook sent
+`agent_session` only, and the Service's `_asking_contributor` fell back to
+it -- functional, but a per-conversation watermark, which is not what the
+watermark is for.
 
 BOUNDED OUTPUT (post-review fix, 2026-08-05). `_compose_message` used to
 join every topic label from the watermark response with no length cap.
 The sibling this hook's own comments cite -- `synapse_orchestrator.
 briefing` -- hard-caps the identical composed-from-the-same-response
-string at 1200 characters, because `topics` is unbounded service-supplied
-content interpolated into agent-facing text. `_compose_message` now
-enforces the same cap (`_MAX_MESSAGE_CHARS`), so this hook actually holds
-the parity its own docstring claims rather than merely asserting it.
+string (`_MAX_BRIEFING_CHARS`), because `topics` is unbounded
+service-supplied content interpolated into agent-facing text.
+`_compose_message` now enforces a cap of its own (`_MAX_MESSAGE_CHARS`), so
+this hook actually holds the parity its own docstring claims rather than
+merely asserting it. The two numbers are deliberately NOT tied together --
+they were equal when this was written and the briefing's has since moved to
+pay for the purpose and members clauses, which this hook does not carry.
 
 COMPOSITION ORDER IS LOAD-BEARING (post-review fix, 2026-08-05), the same
 way it is in the sibling above. The cap truncates from the END, so
@@ -125,6 +170,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -218,15 +264,25 @@ def _state_dir() -> Path:
 _AGENT_PRODUCT = "claude-code"
 
 
-def _load_binding(state_dir: Path) -> dict | None:
-    """This pack's OWN product's binding, `bindings/claude-code.json`, and
-    only that — deliberately NOT "the most recently pinned binding across
-    every Agent product" the way `synapse_orchestrator.cli._resolve_binding`
-    picks for its single "current MCP connection" context. That pick is
-    correct for the orchestrator, which serves exactly one live connection
-    at a time and needs one answer to "which binding is current"; it is
-    wrong here, because this hook is a per-PRODUCT artifact that can only
-    ever legitimately speak for its own product's Agent Session.
+# Mirrors `synapse_worker.discovery._UNSAFE_IN_FILENAME`, which is what
+# names the per-session binding files this hook reads. Kept as a literal
+# copy rather than an import for the same stdlib-only reason everything
+# else here is (module docstring): the writer lives in a package a
+# teammate's machine has no reason to have installed. The sanitizer is
+# only ever used to GUESS a filename -- the match that counts is on
+# `agent_session_id` read back out of the file's contents.
+_UNSAFE_IN_FILENAME = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def _bindings_dir(state_dir: Path) -> Path:
+    """This pack's OWN product's bindings, and only that — deliberately NOT
+    "the most recently pinned binding across every Agent product" the way
+    `synapse_orchestrator.cli._resolve_binding` picks for its single
+    "current MCP connection" context. That pick is correct for the
+    orchestrator, which serves one live connection at a time and needs one
+    answer to "which binding is current"; it is wrong here, because this
+    hook is a per-PRODUCT artifact that can only ever legitimately speak
+    for its own product's Agent Session.
 
     Divergence across products is explicitly supported, not hypothetical
     (Plan D.2: "one laptop holds several bindings -- one per Agent Session;
@@ -241,12 +297,14 @@ def _load_binding(state_dir: Path) -> dict | None:
     `synapse_orchestrator.cli._resolve_binding_for_agent`'s docstring
     records fixing on the egress side (round 3 review), mirrored here on
     ingress.
-
-    Returns the raw dict, not a `SessionBinding` — no pydantic dependency
-    here (see module docstring) — or None if the file is missing, corrupt,
-    or not the expected shape.
     """
-    path = state_dir / "bindings" / f"{_AGENT_PRODUCT}.json"
+    return state_dir / "bindings"
+
+
+def _read_binding_file(path: Path) -> dict | None:
+    """One binding file as a raw dict — not a `SessionBinding`, because
+    there is no pydantic here (module docstring) — or None if it is
+    missing, corrupt, or not the expected shape."""
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -258,6 +316,76 @@ def _load_binding(state_dir: Path) -> dict | None:
             and isinstance(data.get("pinned_at"), str)):
         return None
     return data
+
+
+def _load_legacy_binding(state_dir: Path) -> dict | None:
+    """The compatibility mirror, `bindings/claude-code.json` — the most
+    recently joined conversation of this product, refreshed on every bind.
+
+    Before W2 this was the ONLY binding file and this function was the
+    whole of resolution. It is now the fallback arm of `_resolve_binding`;
+    see the module docstring's "SEVERAL WINDOWS, SEVERAL BINDINGS".
+    """
+    return _read_binding_file(_bindings_dir(state_dir) / f"{_AGENT_PRODUCT}.json")
+
+
+def _load_session_binding(state_dir: Path, agent_session_id: str) -> dict | None:
+    """This exact conversation's own binding out of
+    `bindings/claude-code/`, or None.
+
+    The sanitized filename is tried first because it is one stat call and
+    it is what the writer produces for every id anything real emits (Claude
+    Code session ids are uuids, which survive sanitization untouched). The
+    directory scan behind it is not redundant: the filename is lossy by
+    construction, so the authoritative comparison is always against the
+    `agent_session_id` stored INSIDE the file — the same discipline
+    `synapse_worker.discovery.read_bindings_for_agent` applies.
+    """
+    per_session = _bindings_dir(state_dir) / _AGENT_PRODUCT
+    stem = _UNSAFE_IN_FILENAME.sub("_", agent_session_id)
+    direct = _read_binding_file(per_session / f"{stem}.json")
+    if direct is not None and direct["agent_session_id"] == agent_session_id:
+        return direct
+    try:
+        paths = sorted(per_session.glob("*.json"))
+    except OSError:
+        return None
+    for path in paths:
+        binding = _read_binding_file(path)
+        if binding is not None and binding["agent_session_id"] == agent_session_id:
+            return binding
+    return None
+
+
+def _resolve_binding(state_dir: Path,
+                     stdin_session_id: str | None) -> tuple[dict, str] | None:
+    """`(binding, identity)` for the conversation that invoked this hook, or
+    None to stay silent — the whole of the lookup order documented under
+    "SEVERAL WINDOWS, SEVERAL BINDINGS" in the module docstring.
+
+    `identity` is the Agent Session id this invocation speaks as: its own
+    stdin id whenever one is available, which is what keeps two windows of
+    one machine on two separate notice clocks. It falls back to the
+    binding's own id only in the "can't tell" case (no stdin id at all),
+    where there is no other candidate and the pre-W2 behaviour is the
+    honest one.
+    """
+    if stdin_session_id is not None:
+        mine = _load_session_binding(state_dir, stdin_session_id)
+        if mine is not None:
+            return mine, stdin_session_id
+
+    legacy = _load_legacy_binding(state_dir)
+    if legacy is None:
+        return None
+    if stdin_session_id is None:
+        return legacy, legacy["agent_session_id"]
+    if legacy.get("scope") == "machine":
+        # "This machine is joined; any conversation here speaks for it."
+        return legacy, stdin_session_id
+    if legacy["agent_session_id"] == stdin_session_id:
+        return legacy, stdin_session_id
+    return None
 
 
 def _read_stdin_bounded() -> str:
@@ -355,8 +483,17 @@ def _read_stdin_session_id() -> str | None:
     return session_id if isinstance(session_id, str) else None
 
 
-def _fetch_watermark(service_url: str, shared_id: str, agent_session_id: str) -> dict:
-    query = urllib.parse.urlencode({"agent_session": agent_session_id})
+def _fetch_watermark(service_url: str, shared_id: str, agent_session_id: str,
+                     contributor: str | None = None) -> dict:
+    """BOTH identities on the wire — see the module docstring's "WHICH
+    IDENTITY GOES ON THE WIRE". `contributor` is omitted entirely when the
+    binding does not carry one (an old or hand-written file), which leaves
+    the Service's `_asking_contributor` falling back to `agent_session`
+    exactly as it did before this parameter existed."""
+    params = {"agent_session": agent_session_id}
+    if contributor:
+        params["contributor"] = contributor
+    query = urllib.parse.urlencode(params)
     path = urllib.parse.quote(shared_id, safe="")
     url = f"{service_url.rstrip('/')}/v1/sessions/{path}/watermark?{query}"
     request = urllib.request.Request(url, method="GET")
@@ -499,29 +636,29 @@ def _emit(message: str) -> None:
 
 def run() -> None:
     state_dir = _state_dir()
-    binding = _load_binding(state_dir)
-    if binding is None:
-        return  # not joined -- architecture.html: "before an agent joins, Synapse is inert"
-
-    shared_id = binding["shared_id"]
-    agent_session_id = binding["agent_session_id"]
 
     # Signal ③ is "since THIS agent last looked" (Plan D.6 Pack row), not
     # "since any Claude Code window on this machine last looked." See the
-    # module docstring's "SCOPED TO THE CONVERSATION" section: a window
-    # whose own stdin session_id disagrees with the joined binding never
-    # joined this Shared Session and must get nothing -- not a notice, not
-    # even a network call or a state read/write. `stdin_session_id is
-    # None` (can't tell) falls back to the old un-gated behavior rather
-    # than going silent for a case this hook cannot actually distinguish
-    # from "yes, this is the joined session."
+    # module docstring's "SCOPED TO THE CONVERSATION" and "SEVERAL WINDOWS,
+    # SEVERAL BINDINGS" sections: a window with no binding of its own, and
+    # no machine-scope stand-in to enrol it, never joined this Shared
+    # Session and must get nothing -- not a notice, not even a network call
+    # or a state read/write.
     stdin_session_id = _read_stdin_session_id()
-    if stdin_session_id is not None and stdin_session_id != agent_session_id:
-        return
+    resolved = _resolve_binding(state_dir, stdin_session_id)
+    if resolved is None:
+        return  # not joined -- architecture.html: "before an agent joins, Synapse is inert"
+    binding, agent_session_id = resolved
+
+    shared_id = binding["shared_id"]
+    contributor = binding.get("contributor")
+    if not isinstance(contributor, str):
+        contributor = None
 
     service_url = os.environ.get("SYNAPSE_SERVICE_URL", _DEFAULT_SERVICE_URL)
 
-    watermark = _fetch_watermark(service_url, shared_id, agent_session_id)
+    watermark = _fetch_watermark(service_url, shared_id, agent_session_id,
+                                 contributor)
     version = int(watermark["version"])
 
     state_path = _state_path(state_dir)

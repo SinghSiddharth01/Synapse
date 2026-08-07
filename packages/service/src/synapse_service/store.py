@@ -50,6 +50,27 @@ class InMemoryStore:
         self._contexts: dict[str, SessionContext] = {}
         self._memories: dict[str, SharedMemory] = {}
         self._last_seen: dict[tuple[str, str], int] = {}
+        # Contributors this PROCESS has watched leave, per session. Not the
+        # member list and not the log -- see `remove_member` for why departure
+        # is in neither. It exists so that "not in `members`" can be told
+        # apart from "left", which are three different situations wearing one
+        # shape: never registered, registered elsewhere before a restart, and
+        # actually departed. Anything that reads this must treat absence as
+        # UNKNOWN rather than as "did not leave".
+        self._departed: dict[str, set[str]] = {}
+        # How many findings had EVER entered a session's memory when this
+        # contributor last read it (W5). A second watermark alongside
+        # `_last_seen`, and deliberately not a replacement for it: they answer
+        # different questions and only one of them can answer each.
+        # `_last_seen` holds a `memory_version`, which counts VERDICT ROUNDS
+        # and is what "the memory has moved N versions" means; it cannot say
+        # WHICH findings moved, because a finding carries no version stamp and
+        # is queryable the instant it is pushed, whole synthesis rounds before
+        # any version bump covers it. This counts arrivals, so "what landed
+        # since you last looked" is a slice rather than an inference. Keyed by
+        # CONTRIBUTOR for the same reason `_last_seen` is (decisions/001): a
+        # new conversation is the same person and must not replay the memory.
+        self._seen_count: dict[tuple[str, str], int] = {}
 
     # ── sessions ────────────────────────────────────────────────────────────
     def create_session(self, purpose: str, created_by: str | None, *,
@@ -96,6 +117,10 @@ class InMemoryStore:
         session = self._sessions[shared_id]
         if contributor not in session.members:
             session.members.append(contributor)
+        # Re-joining retracts the departure. Someone who left and came back is
+        # present, not "left", and leaving the marker would make the next
+        # DELETE-less absence read as a second departure that never happened.
+        self._departed.get(shared_id, set()).discard(contributor)
 
     def remove_member(self, shared_id: str, contributor: str) -> None:
         """Detach one member. Leaving is not ending (2026-08-06 spec): the
@@ -119,10 +144,29 @@ class InMemoryStore:
         keying the watermark on the Contributor rather than on a conversation
         id (see `last_seen` below), and clearing it here would reinstate the
         exact "everything is new again" briefing the re-key removes.
+
+        `_departed` IS written, and it is not a second representation of
+        membership -- it is this process's record that it watched the DELETE
+        arrive. `members` alone cannot answer "did they leave?", because an
+        absent contributor may equally never have registered (nothing on the
+        ingest path calls `add_member`; only the relay does) or have
+        registered against a service that has since restarted. Callers that
+        need to tell those apart ask `has_departed`; callers that only need
+        the roster keep reading `members`.
         """
         session = self._sessions[shared_id]
         if contributor in session.members:
             session.members.remove(contributor)
+        self._departed.setdefault(shared_id, set()).add(contributor)
+
+    def has_departed(self, shared_id: str, contributor: str) -> bool:
+        """Did THIS PROCESS observe a `DELETE /members/{contributor}`?
+
+        `False` is not "they are still here" -- it is "no departure was
+        observed", which after a restart is true of everyone. The only honest
+        reading of `False` for a non-member is UNKNOWN.
+        """
+        return contributor in self._departed.get(shared_id, set())
 
     # ── lifecycle ───────────────────────────────────────────────────────────
     def end_session(self, shared_id: str, ended_by: str) -> str:
@@ -381,10 +425,75 @@ class InMemoryStore:
         """
         return self._last_seen.get((shared_id, contributor), 0)
 
-    def mark_seen(self, shared_id: str, contributor: str) -> None:
-        # Reads `_contexts` directly rather than `get_context`, deliberately:
-        # this is a write path and it wants the stored version number, not the
-        # status projection get_context performs (which would fold the log on
-        # every query for a value nothing here reads).
-        self._last_seen[(shared_id, contributor)] = (
-            self._contexts[shared_id].memory_version)
+    def has_looked(self, shared_id: str, contributor: str) -> bool:
+        """Has this CONTRIBUTOR ever read this session's memory?
+
+        Distinct from `last_seen(...) == 0`, which is also what a person who
+        read an untouched session gets. The arrival summary needs the
+        difference: "everything here is new to you" is true for a first-ever
+        joiner and false — and misleading — for someone returning to a session
+        that simply has not moved.
+        """
+        return (shared_id, contributor) in self._last_seen
+
+    def seen_count(self, shared_id: str, contributor: str) -> int:
+        """How many findings had entered this memory when they last read it."""
+        return self._seen_count.get((shared_id, contributor), 0)
+
+    def arrived_after(self, shared_id: str, count: int) -> list[Finding]:
+        """The RETRIEVABLE findings recorded after the first `count` were.
+
+        `count` is a `seen_count`. The fold records every finding once, in
+        arrival order, and never reorders — `View.findings` is keyed in that
+        same first-write order (`fold._record`) — so a position in it is a
+        stable "when did this arrive" and slicing past `count` is exactly
+        "everything since". Filtered back through `visible_ids` so a finding
+        that arrived and was then merged away or marked trivial is not
+        announced to a joiner as news, and projected like every other read.
+        """
+        view = self._memories[shared_id].view()
+        arrived = set(list(view.findings)[count:])
+        return [self._project(view, view.findings[fid])
+                for fid in view.visible_ids if fid in arrived]
+
+    def read_position(self, shared_id: str) -> tuple[int, int]:
+        """Where the memory stands RIGHT NOW: (memory_version, findings ever
+        recorded). What `mark_seen` would write if called at this instant.
+
+        Exists so a caller whose read takes measurable time can take the
+        snapshot at the moment the reader's view was actually fixed, rather
+        than at the moment the response is written — see `mark_seen`'s `at=`.
+
+        Reads `_contexts` directly rather than `get_context` for the version,
+        deliberately: this wants the stored number, not the status projection
+        `get_context` performs (which folds the log for a value nothing here
+        reads). The fold IS taken for the count, because there is no cheaper
+        way to count findings than the structure that holds them, and every
+        caller has already folded and left the result cached on
+        `SharedMemory._view`.
+        """
+        return (self._contexts[shared_id].memory_version,
+                len(self._memories[shared_id].view().findings))
+
+    def mark_seen(self, shared_id: str, contributor: str, *,
+                  at: tuple[int, int] | None = None) -> None:
+        """Move this contributor's watermark to `at`, or to right now.
+
+        ⟨`at=` ADDED 2026-08-06, adversarial review finding #3⟩ `/query`'s only
+        caller used to let this read the store AFTER awaiting the ranking
+        model — a call docs/FLOW.md measures at 12.6–52.8 seconds. Anything a
+        teammate pushed inside that window was counted as seen by an asker who
+        was never shown it, and for `_seen_count` that is not self-correcting:
+        `_last_seen` is a coarse version delta that the next verdict round
+        moves past anyway, but `_seen_count` is an ARRIVAL INDEX, so those
+        findings were excluded from that person's NEW SINCE slice permanently.
+        Reproduced end to end: push f-1, start /query as aditya, push f-2 while
+        the ranking is blocked, release — /arrival then reported `new: 0` with
+        `accumulated.total: 2`.
+
+        Passing a position taken before the await is the whole fix. `at=None`
+        keeps the old behaviour for callers whose read is instantaneous.
+        """
+        version, count = at if at is not None else self.read_position(shared_id)
+        self._last_seen[(shared_id, contributor)] = version
+        self._seen_count[(shared_id, contributor)] = count

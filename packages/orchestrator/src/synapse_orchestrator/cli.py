@@ -21,6 +21,7 @@ import getpass
 import logging
 import os
 import sys
+from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
 
@@ -29,11 +30,17 @@ import uvicorn
 
 from synapse_contracts import LocalBinding
 from synapse_contracts.binding import read_binding
+# The worker's per-session binding resolver, not a second implementation of
+# it: `bindings/<agent>/<session>.json` has one writer (discovery._bind) and
+# must have one reader, or the two halves silently disagree about which
+# conversation is bound. Same one-way edge server.py's import comment records
+# — the orchestrator may depend on the worker, never the reverse.
+from synapse_worker.discovery import resolve_agent_binding
 from synapse_orchestrator.app import build_app
 from synapse_orchestrator.briefing import (
     DEFAULT_REFRESH_SECONDS,
     attach_briefing_refresher,
-    build_briefing,
+    compose_instructions,
 )
 from synapse_orchestrator.ended import ended_session_ids, record_ended
 from synapse_orchestrator.relay import Relay
@@ -82,21 +89,42 @@ def _resolve_binding(state_dir: Path) -> LocalBinding | None:
     3 review's residual blocker: a Finding correctly attributed to codex
     still egressed to whatever session claude-code happened to be joined
     to, whenever both were joined at once.
+
+    ⟨W2, 2026-08-06⟩ BOTH layouts are read: the legacy mirrors
+    `bindings/<agent>.json` and the per-session `bindings/<agent>/<session>.json`
+    files. Globbing only the top level was correct exactly while a bind always
+    refreshed the mirror — and `leave_session(agent_session_id=…)` deliberately
+    breaks that, deleting one conversation's binding and the mirror it happened
+    to own while other conversations stay bound. Read one level only, this
+    returned None right after a sibling's leave and every tool answered "not
+    joined" to a conversation that was still joined and still feeding the
+    session (reproduced, 2026-08-06 review).
     """
     bindings_dir = _bindings_dir(state_dir)
     if not bindings_dir.is_dir():
         return None
-    found = [b for b in (read_binding(p) for p in sorted(bindings_dir.glob("*.json")))
-             if b is not None]
+    paths = sorted(bindings_dir.glob("*.json")) + sorted(bindings_dir.glob("*/*.json"))
+    found = [b for b in (read_binding(p) for p in paths) if b is not None]
     if not found:
         return None
-    return max(found, key=lambda b: b.pinned_at).to_local_binding()
+    return max(found, key=lambda b: _pinned_at_key(b)).to_local_binding()
 
 
-def _resolve_binding_for_agent(state_dir: Path, agent: str) -> LocalBinding | None:
-    """The binding for exactly ONE Agent product (`bindings/<agent>.json`),
-    read fresh from disk — never "most recently joined across every
-    product" like `_resolve_binding` above.
+def _pinned_at_key(binding) -> datetime:
+    """`pinned_at`, always comparable — mirrors
+    `synapse_worker.discovery._pinned_at_key`. A hand-authored fixture may
+    carry a naive datetime and Python raises TypeError rather than answering
+    when a naive and an aware stamp are compared; everything this codebase
+    writes is aware UTC, so a naive stamp is read as UTC."""
+    return (binding.pinned_at if binding.pinned_at.tzinfo is not None
+            else binding.pinned_at.replace(tzinfo=timezone.utc))
+
+
+def _resolve_binding_for_agent(state_dir: Path, agent: str,
+                               agent_session: str | None = None) -> LocalBinding | None:
+    """The binding for exactly ONE Agent product, optionally for exactly ONE
+    of its conversations, read fresh from disk — never "most recently joined
+    across every product" like `_resolve_binding` above.
 
     This is what lets the producer endpoint (app.py) route each incoming
     Finding to the Shared Session ITS OWN Agent product is joined to,
@@ -106,8 +134,21 @@ def _resolve_binding_for_agent(state_dir: Path, agent: str) -> LocalBinding | No
     two-different-sessions leak that surviving the round 2 fix pass left
     open (round 2 preserved attribution content but still routed via
     `_resolve_binding`'s single pick).
+
+    ⟨W2, 2026-08-06⟩ `agent_session` closes the same leak one level down, on
+    the axis W2 opened: two windows of ONE product can now be joined to two
+    different Shared Sessions, and `attributions[0].agent` alone cannot tell
+    them apart. Given, it selects that conversation's own binding; when that
+    conversation has no binding of its own, the answer falls back to the
+    product-level most-recent one, which is what this function always
+    returned and keeps every pre-W2 producer routing exactly as it did.
+    Reproduced before the fix: window A bound to sh-1, window B to sh-2, a
+    Finding attributed to A's conversation egressed to sh-2 because the
+    mirror named B.
     """
-    binding = read_binding(_bindings_dir(state_dir) / f"{agent}.json")
+    binding = resolve_agent_binding(state_dir, agent, agent_session)
+    if binding is None and agent_session is not None:
+        binding = resolve_agent_binding(state_dir, agent)
     return binding.to_local_binding() if binding is not None else None
 
 
@@ -449,6 +490,10 @@ def main(argv: list[str] | None = None, *,
     def resolve_binding_for_agent(agent: str) -> LocalBinding | None:
         return _resolve_binding_for_agent(state_dir, agent)
 
+    def resolve_binding_for_session(agent: str,
+                                    agent_session: str | None) -> LocalBinding | None:
+        return _resolve_binding_for_agent(state_dir, agent, agent_session)
+
     binding = resolve_binding()
     shared_id = binding.shared_id if binding is not None else None
     # Constructed with `shared_id` possibly None rather than the string
@@ -466,7 +511,12 @@ def main(argv: list[str] | None = None, *,
                   ended_sessions=ended_session_ids(state_dir),
                   on_session_ended=partial(record_ended, state_dir))
 
-    briefing = asyncio.run(build_briefing(binding, args.service_url, transport=transport))
+    # `compose_instructions`, not `build_briefing` (finding #1): on the path
+    # docs/JOIN.md documents, this string is the ONLY thing the joining agent is
+    # handed — serve_local.py writes the binding itself, so `join_session` (the
+    # other place the arrival body is delivered) is never called at all.
+    briefing = asyncio.run(compose_instructions(binding, args.service_url,
+                                                transport=transport))
     server = create_mcp(briefing)
     # Registered UNCONDITIONALLY, even when nothing is joined yet — round 3
     # review's fix for the tools-frozen-at-boot blocker. `resolve_binding` is
@@ -488,7 +538,13 @@ def main(argv: list[str] | None = None, *,
                    relay=relay, distiller_factory=build_npu_distiller, transport=transport,
                    state_dir=state_dir, cwd=Path.cwd(),
                    contributor=args.contributor or _default_contributor())
-    app = build_app(relay, server, resolve_binding_for_agent=resolve_binding_for_agent)
+    app = build_app(relay, server,
+                    resolve_binding_for_agent=resolve_binding_for_agent,
+                    # Wins over the per-agent resolver above: since W2 one
+                    # Agent product can hold several conversations bound to
+                    # different Shared Sessions, and only the Finding's own
+                    # `agent_session` picks between them (app.py).
+                    resolve_binding_for_session=resolve_binding_for_session)
     # The briefing above is a snapshot of this instant. Keep it true for
     # agents that arrive later, and for a `join` that happens after this
     # process started — see briefing.py's "Keeping the briefing TRUE after

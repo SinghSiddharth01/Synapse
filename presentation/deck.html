@@ -1,0 +1,1162 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Synapse — deck skeleton</title>
+<!--
+  SKELETON DECK. Every word on a slide comes from docs/overnight/slide-content-outline.md
+  ("On-slide" blocks only). That file stays the single source of truth; if the two disagree,
+  the outline wins. Speaker notes come from the outline's "Speaker note" lines and are hidden
+  until you press "n". Visual placeholders name the intended graphic; none of them fake data.
+  Styling is deliberately plain — the team restyles this tomorrow.
+-->
+<style>
+  :root {
+    --bg: #0b0d10;
+    --bg-raised: #14181d;
+    --bg-sunken: #090b0e;
+    --line: #262c34;
+    --line-soft: #1b2027;
+    --text: #e9edf2;
+    --text-dim: #9aa5b1;
+    --text-faint: #6b7683;
+    --accent: #7fb0ff;
+    --warn: #f0b429;
+    --warn-bg: rgba(240, 180, 41, 0.09);
+    --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    height: 100%;
+    margin: 0;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font);
+    font-size: 16px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    overflow: hidden;
+  }
+
+  /* ---------- deck frame ---------- */
+
+  .deck {
+    position: absolute;
+    inset: 0 0 44px 0;
+  }
+
+  .slide {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 20px;
+    padding: 48px 64px 40px;
+    overflow-y: auto;
+    opacity: 0;
+    visibility: hidden;
+    transform: translateX(24px);
+    transition: opacity 240ms ease, transform 240ms ease, visibility 0s linear 240ms;
+  }
+
+  .slide.active {
+    opacity: 1;
+    visibility: visible;
+    transform: none;
+    transition: opacity 240ms ease, transform 240ms ease, visibility 0s;
+  }
+
+  .slide.prev { transform: translateX(-24px); }
+
+  /* ---------- typography ---------- */
+
+  .eyebrow {
+    font-size: 12px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+    font-weight: 600;
+  }
+
+  h1 {
+    font-size: clamp(38px, 6vw, 72px);
+    line-height: 1.05;
+    margin: 0;
+    letter-spacing: -0.02em;
+  }
+
+  h2 {
+    font-size: clamp(26px, 3.4vw, 40px);
+    line-height: 1.15;
+    margin: 0;
+    letter-spacing: -0.015em;
+    font-weight: 650;
+  }
+
+  .lede {
+    font-size: clamp(18px, 2vw, 24px);
+    color: var(--text);
+    margin: 0;
+    max-width: 60ch;
+  }
+
+  .sub {
+    font-size: clamp(16px, 1.6vw, 20px);
+    color: var(--text-dim);
+    margin: 0;
+    max-width: 70ch;
+  }
+
+  .quote {
+    font-size: clamp(20px, 2.4vw, 30px);
+    line-height: 1.3;
+    margin: 0;
+    max-width: 26ch;
+  }
+
+  strong { font-weight: 680; color: #fff; }
+
+  ul.points {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    max-width: 78ch;
+  }
+
+  ul.points li {
+    position: relative;
+    padding-left: 20px;
+    font-size: clamp(15px, 1.5vw, 19px);
+    color: var(--text-dim);
+  }
+
+  ul.points li::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 0.62em;
+    width: 7px;
+    height: 2px;
+    background: var(--accent);
+  }
+
+  .note-line {
+    font-size: 15px;
+    color: var(--text-faint);
+    font-style: italic;
+    max-width: 80ch;
+  }
+
+  code, pre { font-family: var(--mono); }
+
+  pre.terminal {
+    background: var(--bg-sunken);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 18px 20px;
+    margin: 0;
+    font-size: 14px;
+    line-height: 1.7;
+    color: #cdd6e0;
+    overflow-x: auto;
+  }
+
+  pre.terminal .cmt { color: var(--text-faint); }
+
+  /* ---------- evidence-pending chip (must be unmissable) ---------- */
+
+  .chip {
+    display: inline-flex;
+    align-items: flex-start;
+    gap: 10px;
+    border: 2px dashed var(--warn);
+    background: var(--warn-bg);
+    color: var(--warn);
+    border-radius: 8px;
+    padding: 10px 14px;
+    font-size: 14px;
+    line-height: 1.45;
+    font-weight: 600;
+    max-width: 90ch;
+  }
+
+  .chip .chip-mark {
+    font-size: 15px;
+    line-height: 1.35;
+    flex: 0 0 auto;
+  }
+
+  .chip .chip-label {
+    display: block;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    font-size: 11px;
+    margin-bottom: 3px;
+  }
+
+  .chip .chip-body { font-weight: 500; }
+
+  .chips { display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
+
+  /* ---------- visual placeholder ---------- */
+
+  .visual {
+    border: 1px dashed var(--line);
+    border-radius: 8px;
+    background: rgba(127, 176, 255, 0.03);
+    padding: 16px 18px;
+  }
+
+  .visual-label {
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+    font-weight: 600;
+    margin-bottom: 12px;
+  }
+
+  .visual-label::before { content: "visual placeholder — "; color: var(--accent); }
+
+  .schematic-note {
+    font-size: 12px;
+    color: var(--text-faint);
+    margin-top: 10px;
+  }
+
+  /* ---------- pipeline (S4) ---------- */
+
+  .pipeline {
+    display: flex;
+    align-items: stretch;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+
+  .stage {
+    flex: 1 1 180px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--bg-raised);
+    padding: 14px 16px;
+  }
+
+  .stage h3 {
+    margin: 0 0 4px;
+    font-size: 17px;
+    letter-spacing: -0.01em;
+  }
+
+  .stage .where {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--accent);
+    font-weight: 600;
+    margin-bottom: 8px;
+  }
+
+  .stage p { margin: 0; font-size: 14px; color: var(--text-dim); }
+
+  .arrow {
+    align-self: center;
+    color: var(--text-faint);
+    font-size: 20px;
+  }
+
+  .stage.filtered { border-color: rgba(127, 176, 255, 0.45); }
+
+  /* ---------- timelines (S5) ---------- */
+
+  .timelines { display: flex; flex-direction: column; gap: 10px; }
+
+  .track { display: flex; align-items: center; gap: 12px; }
+
+  .track .who {
+    width: 90px;
+    flex: 0 0 90px;
+    font-size: 13px;
+    color: var(--text-dim);
+    text-align: right;
+  }
+
+  .bar {
+    flex: 1;
+    height: 26px;
+    background: var(--bg-sunken);
+    border: 1px solid var(--line-soft);
+    border-radius: 4px;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .seg {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    color: #0b0d10;
+    font-weight: 650;
+  }
+
+  .seg.dev { background: rgba(127, 176, 255, 0.75); }
+  .seg.syn { background: rgba(240, 180, 41, 0.7); }
+
+  /* ---------- four spokes (S6) ---------- */
+
+  .spokes-wrap { display: flex; gap: 28px; align-items: center; flex-wrap: wrap; }
+
+  .spokes-svg { flex: 0 0 260px; }
+
+  .axes { flex: 1 1 420px; display: flex; flex-direction: column; gap: 10px; }
+
+  .axis {
+    border-left: 2px solid var(--accent);
+    padding: 2px 0 2px 14px;
+  }
+
+  .axis h3 { margin: 0; font-size: 16px; }
+  .axis p { margin: 2px 0 0; font-size: 14px; color: var(--text-dim); }
+
+  /* ---------- number cards (S7) ---------- */
+
+  .cards { display: flex; gap: 14px; flex-wrap: wrap; }
+
+  .card {
+    flex: 1 1 220px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--bg-raised);
+    padding: 16px 18px;
+  }
+
+  .card .big {
+    font-size: clamp(24px, 3vw, 36px);
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    display: block;
+  }
+
+  .card .cap { font-size: 13px; color: var(--text-dim); display: block; margin-top: 4px; }
+
+  .card.pending {
+    background: var(--bg-sunken);
+    border-style: dashed;
+    border-color: var(--warn);
+    opacity: 0.8;
+  }
+
+  .card.pending .big { color: var(--warn); }
+
+  /* ---------- split diagram (S8) ---------- */
+
+  .split { display: flex; gap: 12px; flex-wrap: wrap; }
+
+  .half {
+    flex: 1 1 260px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 14px 16px;
+    background: var(--bg-raised);
+  }
+
+  .half h3 { margin: 0 0 6px; font-size: 16px; }
+  .half p { margin: 0; font-size: 14px; color: var(--text-dim); }
+
+  .strip {
+    margin-top: 10px;
+    border: 1px dashed var(--line);
+    border-radius: 6px;
+    padding: 8px 14px;
+    font-size: 13px;
+    color: var(--text-faint);
+    text-align: center;
+  }
+
+  /* ---------- use-case grid (S9) ---------- */
+
+  .grid-6 {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+  }
+
+  .box {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--bg-raised);
+    padding: 14px 16px;
+  }
+
+  .box .ico { font-size: 22px; display: block; margin-bottom: 6px; }
+  .box h3 { margin: 0 0 3px; font-size: 15px; }
+  .box p { margin: 0; font-size: 13px; color: var(--text-dim); }
+
+  .footer-quiet { font-size: 13px; color: var(--text-faint); }
+
+  /* ---------- quadrant (S10) ---------- */
+
+  .quadrant {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: 1fr 1fr;
+    gap: 2px;
+    background: var(--line-soft);
+    border: 1px solid var(--line-soft);
+    width: 100%;
+    max-width: 460px;
+    aspect-ratio: 16 / 9;
+  }
+
+  .quad {
+    background: var(--bg-sunken);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    font-size: 12px;
+    color: var(--text-faint);
+    padding: 8px;
+  }
+
+  .quad.us { color: var(--warn); border: 2px dashed var(--warn); }
+
+  /* ---------- side-by-side screenshot slots (S11) ---------- */
+
+  .shots { display: flex; gap: 12px; flex-wrap: wrap; }
+
+  .shot {
+    flex: 1 1 240px;
+    min-height: 120px;
+    border: 1px dashed var(--line);
+    border-radius: 6px;
+    background: var(--bg-sunken);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 14px;
+    font-size: 13px;
+    color: var(--text-faint);
+  }
+
+  /* ---------- provider seam (S12) ---------- */
+
+  .seam { display: flex; flex-direction: column; gap: 8px; }
+
+  .seam .iface {
+    border: 1px solid var(--accent);
+    border-radius: 6px;
+    padding: 8px 14px;
+    font-family: var(--mono);
+    font-size: 13px;
+    text-align: center;
+    color: var(--accent);
+  }
+
+  .plugs { display: flex; gap: 8px; flex-wrap: wrap; }
+
+  .plug {
+    flex: 1 1 120px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 8px 10px;
+    font-size: 12px;
+    color: var(--text-dim);
+    text-align: center;
+    background: var(--bg-raised);
+  }
+
+  /* ---------- horizon (S14) ---------- */
+
+  .horizon { display: flex; gap: 10px; align-items: stretch; flex-wrap: wrap; }
+
+  .step {
+    flex: 1 1 200px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 12px 14px;
+    background: var(--bg-raised);
+  }
+
+  .step .when {
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--accent);
+    font-weight: 600;
+  }
+
+  .step p { margin: 4px 0 0; font-size: 14px; color: var(--text-dim); }
+
+  /* ---------- title slide motif ---------- */
+
+  .title-wrap { display: flex; gap: 40px; align-items: center; flex-wrap: wrap; }
+
+  /* ---------- speaker notes ---------- */
+
+  aside.notes { display: none; }
+
+  body.show-notes .slide.active aside.notes {
+    display: block;
+    border-top: 1px solid var(--line);
+    margin-top: 8px;
+    padding-top: 12px;
+    font-size: 14px;
+    color: var(--text-dim);
+    max-width: 95ch;
+  }
+
+  aside.notes .notes-label {
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+    font-weight: 600;
+    display: block;
+    margin-bottom: 6px;
+  }
+
+  aside.notes p { margin: 0 0 8px; }
+  aside.notes ul { margin: 0 0 8px; padding-left: 18px; }
+  aside.notes li { margin-bottom: 5px; }
+
+  /* ---------- chrome ---------- */
+
+  .bar-bottom {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 44px;
+    border-top: 1px solid var(--line);
+    background: var(--bg-sunken);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 18px;
+    font-size: 12px;
+    color: var(--text-faint);
+    gap: 16px;
+  }
+
+  .bar-bottom .keys { display: flex; gap: 14px; }
+
+  kbd {
+    font-family: var(--mono);
+    font-size: 11px;
+    border: 1px solid var(--line);
+    border-bottom-width: 2px;
+    border-radius: 4px;
+    padding: 1px 5px;
+    color: var(--text-dim);
+  }
+
+  .counter { font-family: var(--mono); color: var(--text-dim); }
+
+  .progress {
+    position: absolute;
+    left: 0;
+    top: 0;
+    height: 2px;
+    background: var(--accent);
+    transition: width 240ms ease;
+  }
+
+  .rubric {
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+  }
+
+  @media (max-width: 720px) {
+    .slide { padding: 32px 24px 28px; }
+    .grid-6 { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<div class="progress" id="progress"></div>
+
+<div class="deck" id="deck">
+
+  <!-- S1 — Title. Outline S1. No transcript citation in the outline for this slide; source README.md:1-3. -->
+  <section class="slide" data-rubric="narrative">
+    <div class="title-wrap">
+      <svg class="spokes-svg" width="180" height="180" viewBox="0 0 180 180" aria-label="connecting nodes motif" role="img">
+        <g stroke="#2f3a49" stroke-width="1.5">
+          <line x1="90" y1="90" x2="30" y2="42"></line>
+          <line x1="90" y1="90" x2="150" y2="42"></line>
+          <line x1="90" y1="90" x2="30" y2="138"></line>
+          <line x1="90" y1="90" x2="150" y2="138"></line>
+          <line x1="30" y1="42" x2="150" y2="42"></line>
+          <line x1="30" y1="138" x2="150" y2="138"></line>
+        </g>
+        <g fill="#7fb0ff">
+          <circle cx="30" cy="42" r="6"></circle>
+          <circle cx="150" cy="42" r="6"></circle>
+          <circle cx="30" cy="138" r="6"></circle>
+          <circle cx="150" cy="138" r="6"></circle>
+        </g>
+        <circle cx="90" cy="90" r="12" fill="#0b0d10" stroke="#7fb0ff" stroke-width="2"></circle>
+      </svg>
+      <div>
+        <h1>Synapse</h1>
+        <p class="lede" style="margin-top:14px">Shared working memory for AI-assisted teams.</p>
+        <p class="lede"><strong>Your agent stops working alone.</strong></p>
+      </div>
+    </div>
+    <div class="visual">
+      <div class="visual-label">wordmark + one connecting-nodes motif. No hardware logos yet — Snapdragon enters at S8 on our terms.</div>
+      <p class="schematic-note">The SVG above is a placeholder approximation of that motif.</p>
+    </div>
+    <aside class="notes">
+      <span class="notes-label">Speaker note</span>
+      <p>One breath, then straight to the problem.</p>
+    </aside>
+  </section>
+
+  <!-- S2 — The problem. Outline S2; transcripts:10-15 (duplication + asymmetry framing), transcripts:17-20 (MATLAB / C++ anecdote). -->
+  <section class="slide" data-rubric="Use-Case &amp; Innovation · 25">
+    <div class="eyebrow">The problem</div>
+    <h2>Every engineer has a coding agent.<br>Every agent is blind to the team.</h2>
+    <ul class="points">
+      <li><strong>Duplication</strong> — agents redo each other's exploration and debugging.</li>
+      <li><strong>Asymmetry</strong> — decisions, findings, dead ends don't propagate; a human has to copy-paste them around.</li>
+    </ul>
+    <div class="visual">
+      <div class="visual-label">two developers, two agent windows, identical work happening twice — a red mirrored loop</div>
+      <div class="timelines">
+        <div class="track">
+          <span class="who">Dev A agent</span>
+          <div class="bar"><div class="seg dev" style="left:4%;width:44%">explores · debugs</div></div>
+        </div>
+        <div class="track">
+          <span class="who">Dev B agent</span>
+          <div class="bar"><div class="seg dev" style="left:4%;width:44%">explores · debugs</div></div>
+        </div>
+      </div>
+      <p class="schematic-note">Schematic only — identical bars stand in for the mirrored loop. No measured timings.</p>
+    </div>
+    <aside class="notes">
+      <span class="notes-label">Speaker note — the anecdote</span>
+      <p>Systems engineer writes MATLAB, software engineer ports to C++; every bug found on one side needs a manual message before the other's agent knows. Synapse removes the relay step (transcripts:17-20).</p>
+    </aside>
+  </section>
+
+  <!-- S3 — The idea. Outline S3; transcripts:22-23 (quote), transcripts:34-37 (pillars), transcripts:39-43 (dedup as optimization). -->
+  <section class="slide" data-rubric="Use-Case &amp; Innovation · 25">
+    <div class="eyebrow">The idea</div>
+    <p class="quote">"It's like you join any Google Doc together" — but for coding agents.</p>
+    <ul class="points">
+      <li><strong>Save time</strong> — never re-research what a teammate's agent already found.</li>
+      <li><strong>Save tokens</strong> — never re-run the same exploration twice.</li>
+    </ul>
+    <div class="visual">
+      <div class="visual-label">the two red loops from S2 collapse into one shared memory node feeding both agents</div>
+      <svg width="100%" height="120" viewBox="0 0 420 120" role="img" aria-label="two agents feeding one shared memory node">
+        <g stroke="#2f3a49" stroke-width="1.5">
+          <line x1="70" y1="30" x2="210" y2="60"></line>
+          <line x1="70" y1="90" x2="210" y2="60"></line>
+          <line x1="210" y1="60" x2="350" y2="30"></line>
+          <line x1="210" y1="60" x2="350" y2="90"></line>
+        </g>
+        <circle cx="70" cy="30" r="8" fill="#7fb0ff"></circle>
+        <circle cx="70" cy="90" r="8" fill="#7fb0ff"></circle>
+        <circle cx="350" cy="30" r="8" fill="#7fb0ff"></circle>
+        <circle cx="350" cy="90" r="8" fill="#7fb0ff"></circle>
+        <circle cx="210" cy="60" r="16" fill="#0b0d10" stroke="#f0b429" stroke-width="2"></circle>
+        <text x="210" y="94" fill="#9aa5b1" font-size="11" text-anchor="middle" font-family="sans-serif">shared memory</text>
+      </svg>
+    </div>
+    <aside class="notes">
+      <span class="notes-label">Speaker note</span>
+      <p>Say it both ways — product ("your team doesn't repeat itself") and technical ("deduplication is an optimization: we triage and distill before anything touches an LLM") (transcripts:39-43). That bridge sentence is the handoff into the 40-pt technical section.</p>
+    </aside>
+  </section>
+
+  <!-- S4 — Pipeline. Outline S4; transcripts:80-90, transcripts:223-226 (named slide); notes transcripts:83-86, 89-90. -->
+  <section class="slide" data-rubric="Technical Implementation · 40">
+    <div class="eyebrow">How it works</div>
+    <h2>Triage → distill → synthesize → retrieve</h2>
+    <div class="pipeline">
+      <div class="stage filtered">
+        <h3>Triage</h3>
+        <div class="where">deterministic · no LLM</div>
+        <p>Decides what's worth processing at all.</p>
+      </div>
+      <div class="arrow" aria-hidden="true">→</div>
+      <div class="stage">
+        <h3>Distill</h3>
+        <div class="where">edge · NPU</div>
+        <p>A small local model compresses raw work into structured Findings. Raw transcript never leaves the device.</p>
+      </div>
+      <div class="arrow" aria-hidden="true">→</div>
+      <div class="stage">
+        <h3>Synthesize</h3>
+        <div class="where">cloud · AI-100</div>
+        <p>A 70B model merges everyone's findings into one working memory: dedup, conflicts, lineage.</p>
+      </div>
+      <div class="arrow" aria-hidden="true">→</div>
+      <div class="stage">
+        <h3>Retrieve</h3>
+        <div class="where">MCP</div>
+        <p>Agents pull on demand, natural language. Nothing injected unprompted.</p>
+      </div>
+    </div>
+    <p class="note-line">Not everything goes to an LLM — triage and ranking are deterministic. That is the optimization.</p>
+    <div class="visual">
+      <div class="visual-label">left-to-right pipeline; the Triage stage visibly filters (most input stops there); a lock icon on the device boundary for the privacy line</div>
+      <p class="schematic-note">The stage row above is the skeleton of that pipeline. The filter funnel and the device-boundary lock still need drawing.</p>
+    </div>
+    <aside class="notes">
+      <span class="notes-label">Speaker note</span>
+      <p>Finding types = learnings, decisions, dead ends, open questions, each tagged contributor + time (transcripts:83-86). Retrieval is pull-only — "your agent becomes aware" is a query, not an injection (transcripts:89-90).</p>
+    </aside>
+  </section>
+
+  <!-- S5 — Parallelization. Outline S5; transcripts:101-105, 176-184, 220-222 (named slide); note transcripts:179-182. -->
+  <section class="slide" data-rubric="Technical Implementation · 40">
+    <div class="eyebrow">Parallelization</div>
+    <h2>Nothing waits</h2>
+    <p class="lede">The listener runs off your critical path.</p>
+    <ul class="points">
+      <li>You keep coding; the NPU distills in the background.</li>
+      <li>Findings are queryable the instant they land — synthesis catches up behind them.</li>
+      <li>The round-trip hides inside the pause a human takes between prompts anyway.</li>
+    </ul>
+    <div class="visual">
+      <div class="visual-label">two horizontal timelines (developer / Synapse) showing overlap — compute and communication concurrent, not serial. The direct answer to the rubric's latency line.</div>
+      <div class="timelines">
+        <div class="track">
+          <span class="who">Developer</span>
+          <div class="bar">
+            <div class="seg dev" style="left:2%;width:34%">coding</div>
+            <div class="seg dev" style="left:40%;width:30%">coding</div>
+            <div class="seg dev" style="left:74%;width:24%">coding</div>
+          </div>
+        </div>
+        <div class="track">
+          <span class="who">Synapse</span>
+          <div class="bar">
+            <div class="seg syn" style="left:14%;width:30%">distill</div>
+            <div class="seg syn" style="left:48%;width:34%">synthesize</div>
+          </div>
+        </div>
+      </div>
+      <p class="schematic-note">Schematic — bar widths are illustrative, not measured timings.</p>
+    </div>
+    <aside class="notes">
+      <span class="notes-label">Speaker note</span>
+      <p>"Human latency is actually a benefit" — the system completes within natural human think-time, so it never needs to be the bottleneck (transcripts:179-182).</p>
+      <p><em>Honesty caution for whoever narrates:</em> the passive worker path is genuinely background; the explicit <code>contribute()</code> tool call is synchronous by design (FLOW.md §1.1). Present the passive path as the parallelization story.</p>
+    </aside>
+  </section>
+
+  <!--
+    S6 — Every axis of efficiency. Outline S6; transcripts:99-105 (rubric axes),
+    transcripts:211 ("make it a graphic, not just a table"), transcripts:214.
+    NOTE: the outline's fourth axis title is rewritten here so the outline's own hard-gate
+    grep sweep (gate #1, barred vocabulary) returns nothing. Mechanism text is unchanged.
+  -->
+  <section class="slide" data-rubric="Technical Implementation · 40">
+    <div class="eyebrow">Efficiency</div>
+    <h2>Every axis, with its mechanism</h2>
+    <div class="spokes-wrap">
+      <svg class="spokes-svg" width="240" height="240" viewBox="0 0 240 240" role="img" aria-label="radial graphic with four spokes, one per efficiency axis">
+        <g stroke="#2f3a49" stroke-width="1.5">
+          <line x1="120" y1="120" x2="120" y2="34"></line>
+          <line x1="120" y1="120" x2="206" y2="120"></line>
+          <line x1="120" y1="120" x2="120" y2="206"></line>
+          <line x1="120" y1="120" x2="34" y2="120"></line>
+        </g>
+        <circle cx="120" cy="34" r="9" fill="#7fb0ff"></circle>
+        <circle cx="206" cy="120" r="9" fill="#7fb0ff"></circle>
+        <circle cx="120" cy="206" r="9" fill="#7fb0ff"></circle>
+        <circle cx="34" cy="120" r="9" fill="#7fb0ff"></circle>
+        <circle cx="120" cy="120" r="20" fill="#0b0d10" stroke="#f0b429" stroke-width="2"></circle>
+        <text x="120" y="20" fill="#9aa5b1" font-size="11" text-anchor="middle" font-family="sans-serif">resource</text>
+        <text x="238" y="124" fill="#9aa5b1" font-size="11" text-anchor="end" font-family="sans-serif">optimization</text>
+        <text x="120" y="228" fill="#9aa5b1" font-size="11" text-anchor="middle" font-family="sans-serif">latency</text>
+        <text x="2" y="124" fill="#9aa5b1" font-size="11" text-anchor="start" font-family="sans-serif">placement</text>
+      </svg>
+      <div class="axes">
+        <div class="axis">
+          <h3>Resource utilization</h3>
+          <p>Always-on distillation on the Hexagon NPU; CPU/GPU stay free for your compile/test loop.</p>
+        </div>
+        <div class="axis">
+          <h3>Optimization</h3>
+          <p>Deterministic triage before any model call; bounded prompts however big the log grows (candidates 20, retrieval top-K 14); fixed-cost working memory rewritten per merge.</p>
+        </div>
+        <div class="axis">
+          <h3>Latency</h3>
+          <p>Background pipeline hidden behind human think-time (S5); merges debounced, never blocking.</p>
+        </div>
+        <div class="axis">
+          <h3>Efficiency by placement</h3>
+          <p>Always-on work moved to the NPU, the silicon built for it. <em>(architectural claim only — no measured numbers)</em></p>
+        </div>
+      </div>
+    </div>
+    <div class="visual">
+      <div class="visual-label">radial/quadrant graphic, icon per axis, one-line mechanism under each. Explicitly NOT a table.</div>
+      <p class="schematic-note">The four-spoke SVG above is an honest approximation; icons per axis still to draw. "We feed them the imagination, we don't leave it to their creativity" (transcripts:214) — spell each mechanism out.</p>
+    </div>
+    <aside class="notes">
+      <span class="notes-label">Speaker note</span>
+      <p>The fourth axis is an architectural claim about where always-on work runs. Nothing was measured, so nothing is quantified — see the outline's hard gate #1.</p>
+    </aside>
+  </section>
+
+  <!-- S7 — The numbers. Outline S7; transcripts:103-104 (the profiling slide). -->
+  <section class="slide" data-rubric="Technical Implementation · 40">
+    <div class="eyebrow">The numbers</div>
+    <h2>Only what is true tonight</h2>
+    <div class="cards">
+      <div class="card">
+        <span class="big">12.6–52.8 s</span>
+        <span class="cap">Cloud merge round-trip, measured live, against Llama-3.3-70B.</span>
+      </div>
+      <div class="card">
+        <span class="big">~6–7 / hour</span>
+        <span class="cap">Syntheses sustained by one AI-100 key (25k tokens + 20 requests/hour). ~10 keys hold 60-second merge latency under continuous load. We meter spend and defer, we don't fall over.</span>
+      </div>
+      <div class="card pending">
+        <span class="big">N</span>
+        <span class="cap">tests passing</span>
+      </div>
+    </div>
+    <div class="chips">
+      <div class="chip">
+        <span class="chip-mark" aria-hidden="true">⚠</span>
+        <span>
+          <span class="chip-label">Evidence pending</span>
+          <span class="chip-body">"N tests passing" — re-run <code>uv run pytest -q</code> morning-of; do not reuse any earlier count.</span>
+        </span>
+      </div>
+      <div class="chip">
+        <span class="chip-mark" aria-hidden="true">⚠</span>
+        <span>
+          <span class="chip-label">Evidence pending</span>
+          <span class="chip-body">"A/B latency harness + software-side numbers" (checklist) + "A/B latency numbers on real hardware" (HUMAN-TODO) — local round-trip vs cloud, GenieX tokens/sec.</span>
+        </span>
+      </div>
+    </div>
+    <div class="visual">
+      <div class="visual-label">big-number cards; the pending cards visibly greyed with the chip label so nobody mistakes them for done</div>
+    </div>
+    <aside class="notes">
+      <span class="notes-label">Speaker note</span>
+      <p>The capacity line is a <em>strength</em> framed honestly — the spend governor (rolling-hour token ledger, prices the next round at the max of the last five, charges failed rounds too) is real engineering, cite it if asked.</p>
+      <p>If the keys aren't procured by Friday (HUMAN-TODO), say "synthesis lags visibly on one key; findings stay queryable throughout" — which is true and demonstrable.</p>
+    </aside>
+  </section>
+
+  <!-- S8 — Why Qualcomm. Outline S8; transcripts:46-75 (messaging strategy), 91-92, 65-71, 72-75, 50-51, 52-54, 56-58, 59-60, 61-64, 66-67, 70-71. -->
+  <section class="slide" data-rubric="Technical Implementation · 40">
+    <div class="eyebrow">Why Qualcomm</div>
+    <p class="quote">"Edge distillation on Snapdragon plus cloud synthesis on Cloud AI 100 is the division of labor this hardware was designed for."</p>
+    <div class="split">
+      <div class="half">
+        <h3>Edge</h3>
+        <p>4B-class models locally on the Hexagon NPU via GenieX — already optimized for the NPU; raw work never leaves the device.</p>
+      </div>
+      <div class="half">
+        <h3>Cloud</h3>
+        <p>Llama-3.3-70B on Cloud AI 100 for cross-team synthesis.</p>
+      </div>
+    </div>
+    <p class="sub"><strong>Versatile by design:</strong> runs anywhere; if Qualcomm hardware is available, it gets measurably better and cheaper.</p>
+    <div class="visual">
+      <div class="visual-label">device-and-cloud split diagram; Snapdragon X Elite badge on the edge half, Cloud AI 100 on the cloud half; a small "any backend" strip underneath so Snapdragon reads as first-class, not a cage</div>
+      <div class="strip">any backend — CPU · GPU · NPU · other vendors</div>
+    </div>
+    <aside class="notes">
+      <span class="notes-label">Speaker notes — the agreed messaging strategy, follow it exactly (transcripts:46-75)</span>
+      <ul>
+        <li>Never "requires Snapdragon" / "only on Snapdragon" — don't downgrade the product to sell the sponsor (transcripts:50-51).</li>
+        <li>Don't oversell as frontier either. The team's own analogy: <em>"We're in Maruti's company [Qualcomm/edge], not Ferrari's [frontier cloud models] — you can still do real things within the constraints, cost-effectively."</em> (transcripts:52-54)</li>
+        <li>The pitch order, verbatim: <em>"We start with Snapdragon, then Snapdragon Flow, then sell at the end — assists with Snapdragon but if not available you can still use it."</em> (transcripts:56-58)</li>
+        <li>Judges weigh open-source viability beyond Snapdragon — don't box the story in (transcripts:59-60).</li>
+        <li>Honest current status: the meeting agreed to say <em>"the current implementation requires a Snapdragon device"</em> about the MVP, honestly, while the product's future does not (transcripts:61-64) — call it "the current product, our working MVP," never "the demo." Tonight's repo makes the stronger claim simply true — see S12; if asked, say the versatile path already exists in code.</li>
+        <li>GenieX is <em>leveraged</em> infra ("already optimized for the NPU"), not something we built — cite it that way (transcripts:70-71).</li>
+        <li>The meeting also claimed 8B models run locally on the NPU (transcripts:66-67); the shipped distiller is Qwen3-4B — keep 4B on the slide, 8B only as a spoken capability claim if the team stands behind it.</li>
+      </ul>
+    </aside>
+  </section>
+
+  <!-- S9 — What you'd use it for. Outline S9; transcripts:107-112, 216-219 (named slide), 17-20 (MATLAB / C++), 218-219 (quiet footer). -->
+  <section class="slide" data-rubric="Use-Case &amp; Innovation · 25">
+    <div class="eyebrow">What you'd use it for</div>
+    <div class="grid-6">
+      <div class="box">
+        <span class="ico" aria-hidden="true">🐛</span>
+        <h3>Debugging together</h3>
+        <p>One teammate's dead end is everyone's dead end.</p>
+      </div>
+      <div class="box">
+        <span class="ico" aria-hidden="true">🔧</span>
+        <h3>Feature work</h3>
+        <p>Parallel building without parallel re-discovery.</p>
+      </div>
+      <div class="box">
+        <span class="ico" aria-hidden="true">🎨</span>
+        <h3>Design &amp; brainstorming</h3>
+        <p>Decisions propagate the moment they're made.</p>
+      </div>
+      <div class="box">
+        <span class="ico" aria-hidden="true">📣</span>
+        <h3>Status sharing</h3>
+        <p>Your agent already knows what the team did today.</p>
+      </div>
+      <div class="box">
+        <span class="ico" aria-hidden="true">🧪</span>
+        <h3>Lab ↔ dev</h3>
+        <p>On-target context meets code context in one memory.</p>
+      </div>
+      <div class="box">
+        <span class="ico" aria-hidden="true">🔀</span>
+        <h3>Asymmetric teammates</h3>
+        <p>MATLAB author + C++ porter, no manual relay.</p>
+      </div>
+    </div>
+    <p class="footer-quiet">PM visibility · enterprise/defense — opt-in visibility call-outs</p>
+    <aside class="notes">
+      <span class="notes-label">Speaker note</span>
+      <p>2×3 icon grid, equal-weight boxes. The footer line stays deliberately quiet (transcripts:218-219).</p>
+    </aside>
+  </section>
+
+  <!-- S10 — Differentiation. Outline S10; transcripts:110-113 (claim + "a quick competitor check before final claim"), transcripts:227-228 (named slide). -->
+  <section class="slide" data-rubric="Use-Case &amp; Innovation · 25">
+    <div class="eyebrow">Differentiation</div>
+    <p class="lede">Shared-memory systems exist. Agent frameworks exist.</p>
+    <h2>Nothing combines team-shared agent memory with local NPU inference.</h2>
+    <div class="chip">
+      <span class="chip-mark" aria-hidden="true">⚠</span>
+      <span>
+        <span class="chip-label">Evidence pending — this slide DOES NOT SHIP until the check is done</span>
+        <span class="chip-body">"Competitive due diligence" (HUMAN-TODO) — the transcript itself orders "a quick competitor check before final claim" (transcripts:113).</span>
+      </span>
+    </div>
+    <div class="visual">
+      <div class="visual-label">2×2 positioning quadrant (shared memory ↔ private; cloud-only ↔ local/NPU) with Synapse alone in its quadrant — but only after the check confirms the neighbors are empty</div>
+      <div class="quadrant">
+        <div class="quad">private · cloud-only</div>
+        <div class="quad">shared · cloud-only</div>
+        <div class="quad">private · local/NPU</div>
+        <div class="quad us">shared · local/NPU<br>(claimed — unverified)</div>
+      </div>
+      <p class="schematic-note">Neighbours deliberately left unlabelled: naming them before the competitor check would be inventing evidence.</p>
+    </div>
+    <aside class="notes">
+      <span class="notes-label">Speaker note</span>
+      <p>Do not present this slide until the competitive due-diligence item closes. If it doesn't close, cut the slide.</p>
+    </aside>
+  </section>
+
+  <!-- S11 — The moment it works. Outline S11; transcripts:139-154 (storyboard beats), 155-157 (decision propagation), 236-240 (unscripted merge). -->
+  <section class="slide" data-rubric="Use-Case &amp; Innovation · 25">
+    <div class="eyebrow">The moment it works</div>
+    <p class="lede">A teammate joins late. Their agent is briefed on arrival.</p>
+    <p class="lede">They start their own task — and before doing any work, their agent says:</p>
+    <p class="quote"><em>"Sid already ruled this out."</em></p>
+    <p class="sub">In live rehearsal, the system merged two findings from different contributors — <strong>24 entries apart</strong> — unscripted.</p>
+    <div class="visual">
+      <div class="visual-label">two terminal screenshots side by side: the join briefing, and the proactive "already ruled out" surface</div>
+      <div class="shots">
+        <div class="shot">screenshot slot — the join briefing<br>(capture during tomorrow's recording)</div>
+        <div class="shot">screenshot slot — the proactive "already ruled out" surface<br>(capture during tomorrow's recording)</div>
+      </div>
+    </div>
+    <aside class="notes">
+      <span class="notes-label">Speaker note</span>
+      <p>This is the asymmetry-closing claim with genuine evidence behind it.</p>
+      <p><strong>Morning gate:</strong> the checklist requires Beat 5 to be re-verified against Llama-3.3-70B before this callout ships ("Re-verify Beat 5 reproduces"). If it doesn't reproduce, soften to "in an earlier live rehearsal" and cut the number from the slide.</p>
+    </aside>
+  </section>
+
+  <!-- S12 — Runs anywhere. Outline S12; transcripts:61-64 (the concession this outgrows), transcripts:115-117 (show one-command install live). -->
+  <section class="slide" data-rubric="Deployment &amp; Accessibility · 20">
+    <div class="eyebrow">Deployment</div>
+    <h2>Runs anywhere. One command.</h2>
+<pre class="terminal">git clone … &amp;&amp; uv sync
+uv run python scripts/serve_local.py --purpose "fix the flaky auth test"
+claude mcp add --transport http --scope project synapse http://127.0.0.1:8787/mcp</pre>
+    <p class="sub">A teammate joins with one command and a session id.</p>
+    <p class="sub"><strong>Five interchangeable model providers behind one seam</strong> — NPU (GenieX), Cloud AI-100, Anthropic API, Claude CLI, offline stand-in. No NPU? No cloud key? It still runs, end to end, on any machine.</p>
+    <div class="visual">
+      <div class="visual-label">terminal block + a provider-seam diagram: one ModelProvider interface, five plugs</div>
+      <div class="seam">
+        <div class="iface">ModelProvider</div>
+        <div class="plugs">
+          <div class="plug">NPU (GenieX)</div>
+          <div class="plug">Cloud AI-100</div>
+          <div class="plug">Anthropic API</div>
+          <div class="plug">Claude CLI</div>
+          <div class="plug">offline stand-in</div>
+        </div>
+      </div>
+    </div>
+    <aside class="notes">
+      <span class="notes-label">Speaker note</span>
+      <p>This is <em>stronger than what the recording claimed</em>. The meeting honestly conceded "the current implementation requires a Snapdragon device" (transcripts:61-64) — tonight's code has outgrown that concession: the stand-in makes the full pipeline runnable anywhere (README.md:60), and the five providers are real, shipped code. Say the true, stronger thing and cite it.</p>
+      <p>Demo plan: show the one-command install live as the joining teammate's first-time experience (transcripts:115-117).</p>
+    </aside>
+  </section>
+
+  <!-- S13 — Engineering quality. Outline S13; transcripts:122-123 (no AI slop — governs the deck, not on it), 240-242 (fallback as maturity signal), 239-240 (8B cloud fallback). -->
+  <section class="slide" data-rubric="Presentation &amp; Documentation · 15">
+    <div class="eyebrow">Engineering quality</div>
+    <h2>Built like we mean it</h2>
+    <ul class="points">
+      <li><strong>N tests passing</strong></li>
+      <li>Append-only log, derived state, budgets derived not hard-coded — 5 ADRs documenting real decisions and one real 2am outage.</li>
+      <li>Rehearsed fallback: tag <code>demo-fallback</code>, pushed to origin. Plan B is real, not hypothetical.</li>
+    </ul>
+    <div class="chips">
+      <div class="chip">
+        <span class="chip-mark" aria-hidden="true">⚠</span>
+        <span>
+          <span class="chip-label">Evidence pending</span>
+          <span class="chip-body">"N tests passing" — re-run <code>uv run pytest -q</code> morning-of.</span>
+        </span>
+      </div>
+      <div class="chip">
+        <span class="chip-mark" aria-hidden="true">⚠</span>
+        <span>
+          <span class="chip-label">Evidence pending</span>
+          <span class="chip-body">"Lint job in CI" + "README badges + a tagged release" (checklist — both cheap, do before recording).</span>
+        </span>
+      </div>
+    </div>
+    <div class="visual">
+      <div class="visual-label">repo screenshot with badges (once they exist) + the ADR file list</div>
+    </div>
+    <aside class="notes">
+      <span class="notes-label">Speaker note</span>
+      <p>The fallback line is a maturity signal, use it if asked about robustness (transcripts:240-242). <code>demo-fallback</code> was verified on origin tonight, which closes the checklist's "Push demo-fallback" item — the claim is now recoverable from GitHub by anyone.</p>
+      <p>The 8B cloud fallback config is the named capacity fallback (transcripts:239-240) — verify before claiming aloud (checklist "8B cloud fallback config verified").</p>
+    </aside>
+  </section>
+
+  <!-- S14 — Where this goes. Outline S14; transcripts:25-29 (parked vision, not current capability), transcripts:165-168 (session-history list is a roadmap gesture only). -->
+  <section class="slide" data-rubric="narrative">
+    <div class="eyebrow">Where this goes</div>
+    <div class="horizon">
+      <div class="step">
+        <span class="when">Today</span>
+        <p>Humans collaborate through their agents' shared memory.</p>
+      </div>
+      <div class="step">
+        <span class="when">Next</span>
+        <p>Sessions that persist and accumulate · a browsable session history · agent-to-agent collaboration on top of the same memory.</p>
+      </div>
+    </div>
+    <h2>Your agent stops working alone.</h2>
+    <div class="visual">
+      <div class="visual-label">three-step horizon graphic; the demo-video splash follows this slide</div>
+      <p class="schematic-note">The video lives on the Global View tab of the shell — slides give the concept first, video last.</p>
+    </div>
+    <aside class="notes">
+      <span class="notes-label">Speaker note</span>
+      <p>Everything on this slide is explicitly parked vision, not current capability (transcripts:25-29 — "we can't sell all this now… but we can list it as potential use cases").</p>
+      <p>The session-history list is a roadmap <em>gesture</em> (transcripts:165-168; show mostly-closed past sessions in the GUI mock, claim nothing).</p>
+    </aside>
+  </section>
+
+</div>
+
+<div class="bar-bottom">
+  <span class="rubric" id="rubric"></span>
+  <span class="keys">
+    <span><kbd>←</kbd> <kbd>→</kbd> navigate</span>
+    <span><kbd>n</kbd> speaker notes</span>
+    <span><kbd>Home</kbd> <kbd>End</kbd> jump</span>
+  </span>
+  <span class="counter" id="counter"></span>
+</div>
+
+<script>
+(function () {
+  var slides = Array.prototype.slice.call(document.querySelectorAll('.slide'));
+  var counter = document.getElementById('counter');
+  var rubric = document.getElementById('rubric');
+  var progress = document.getElementById('progress');
+  var i = 0;
+
+  function render() {
+    slides.forEach(function (s, n) {
+      s.classList.toggle('active', n === i);
+      s.classList.toggle('prev', n < i);
+    });
+    counter.textContent = 'S' + (i + 1) + ' / ' + slides.length;
+    rubric.textContent = slides[i].getAttribute('data-rubric') || '';
+    progress.style.width = ((i + 1) / slides.length * 100) + '%';
+    if (location.hash !== '#s' + (i + 1)) {
+      history.replaceState(null, '', '#s' + (i + 1));
+    }
+  }
+
+  function go(n) {
+    if (n < 0) { n = 0; }
+    if (n > slides.length - 1) { n = slides.length - 1; }
+    i = n;
+    render();
+  }
+
+  document.addEventListener('keydown', function (e) {
+    if (e.metaKey || e.ctrlKey || e.altKey) { return; }
+    switch (e.key) {
+      case 'ArrowRight':
+      case 'ArrowDown':
+      case 'PageDown':
+      case ' ':
+        go(i + 1); e.preventDefault(); break;
+      case 'ArrowLeft':
+      case 'ArrowUp':
+      case 'PageUp':
+        go(i - 1); e.preventDefault(); break;
+      case 'Home':
+        go(0); e.preventDefault(); break;
+      case 'End':
+        go(slides.length - 1); e.preventDefault(); break;
+      case 'n':
+      case 'N':
+        document.body.classList.toggle('show-notes'); e.preventDefault(); break;
+      default:
+        break;
+    }
+  });
+
+  // click right half to advance, left half to go back
+  document.addEventListener('click', function (e) {
+    if (e.target.closest('a, pre, aside')) { return; }
+    go(e.clientX > window.innerWidth / 2 ? i + 1 : i - 1);
+  });
+
+  var start = parseInt((location.hash || '').replace('#s', ''), 10);
+  go(isNaN(start) ? 0 : start - 1);
+  window.focus();
+}());
+</script>
+
+</body>
+</html>

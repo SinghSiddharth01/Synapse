@@ -118,7 +118,9 @@ def _trust_violation(findings: list[Finding]) -> str | None:
 
 
 def build_app(relay: Relay, mcp_server=None, *,
-             resolve_binding_for_agent: Callable[[str], LocalBinding | None] | None = None
+             resolve_binding_for_agent: Callable[[str], LocalBinding | None] | None = None,
+             resolve_binding_for_session: (
+                 Callable[[str, str | None], LocalBinding | None] | None) = None,
              ) -> Starlette:
     """`resolve_binding_for_agent`, when given, is called fresh on every POST,
     once per distinct Agent found among the batch's Findings (each Finding's
@@ -135,6 +137,20 @@ def build_app(relay: Relay, mcp_server=None, *,
     joined — the endpoint 503s rather than accepting a Finding it has
     nowhere to route. Attribution itself is NOT rewritten from any binding;
     see the module docstring's round 2 amendment note.
+
+    `resolve_binding_for_session` (W2, 2026-08-06) is the same thing one level
+    finer, and WINS when both are given: it is called with
+    `(attributions[0].agent, attributions[0].agent_session)`. It exists because
+    W2 made "one Agent product, two Shared Sessions" reachable — two Claude
+    Code windows, each joined somewhere different — and on that machine
+    `attributions[0].agent` no longer identifies a destination. Reproduced
+    before it existed: window A bound to sh-1, window B to sh-2, a Finding
+    correctly attributed to A egressed to sh-2, because the single
+    per-product binding file named whichever window joined last. It is a
+    SEPARATE parameter rather than a widened `resolve_binding_for_agent`
+    deliberately: that one's documented shape is `Callable[[str], ...]` and
+    in-tree callers pass things like `dict.get`, which would silently accept
+    a second positional argument and return it as a default.
     """
     server = mcp_server or create_mcp()
     app = server.streamable_http_app()
@@ -162,18 +178,23 @@ def build_app(relay: Relay, mcp_server=None, *,
         if violation is not None:
             return JSONResponse({"error": violation}, status_code=422)
 
-        if resolve_binding_for_agent is not None:
-            # Re-resolved on every call, per Agent — not captured once at
-            # boot and not a single request-wide binding; see the docstring
-            # above. Grouping first (rather than recording/rebinding as each
-            # Finding is matched) means a request with an unmatched agent
-            # never writes anything durably — same all-or-nothing guarantee
-            # the old single-binding 503 path had.
+        if resolve_binding_for_session is not None or resolve_binding_for_agent is not None:
+            # Re-resolved on every call, per Agent (and since W2 per Agent
+            # SESSION) — not captured once at boot and not a single
+            # request-wide binding; see the docstring above. Grouping first
+            # (rather than recording/rebinding as each Finding is matched)
+            # means a request with an unmatched agent never writes anything
+            # durably — same all-or-nothing guarantee the old single-binding
+            # 503 path had.
             groups: dict[str, list[Finding]] = {}
             unmatched_agents: set[str] = set()
             for f in findings:
                 agent = f.attributions[0].agent
-                binding = resolve_binding_for_agent(agent)
+                if resolve_binding_for_session is not None:
+                    binding = resolve_binding_for_session(
+                        agent, f.attributions[0].agent_session)
+                else:
+                    binding = resolve_binding_for_agent(agent)
                 if binding is None:
                     unmatched_agents.add(agent)
                     continue

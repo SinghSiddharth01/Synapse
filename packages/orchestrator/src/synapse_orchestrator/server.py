@@ -170,6 +170,42 @@ _NO_STATE_DIR = (
     "a session binding. Restart it with `--state-dir <dir>`."
 )
 
+# ⟨decision 008, 2026-08-06⟩ The sentence that makes a dead brain VISIBLY dead.
+#
+# Before this, a retrieval backend that was not answering produced an empty
+# 200 and the agent said "Team memory has nothing relevant to that. (Checked —
+# not skipped.)" — the single worst live outcome, because everything looks
+# fine while the memory is unreadable. The instruction not to report "no
+# relevant findings" is in the text on purpose: an agent that reads only the
+# first clause and paraphrases is the failure this is guarding against.
+_RETRIEVAL_DOWN = (
+    "Shared memory is DOWN, not empty: its model backend ({provider}) is not "
+    "answering, so the team's findings exist but cannot be searched right now. "
+    "Tell the user this is an outage — do NOT report 'no relevant findings'. "
+    "The stack self-heals within ~2 minutes; retry after that."
+)
+
+
+def _retrieval_down_text(response) -> str | None:
+    """The outage sentence for THE 503 that means "the retriever's model is
+    dead", or None for anything else.
+
+    Both halves are checked for the same reason `is_session_ended` checks
+    both: a 503 from an intermediary — a proxy, a load balancer, the LAN host
+    being restarted — is an ordinary outage and must keep falling through to
+    the generic handler, which says something true about it. Only the
+    service's own typed body earns this text.
+    """
+    if response.status_code != 503:
+        return None
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    if not isinstance(body, dict) or body.get("error") != "retrieval_unavailable":
+        return None
+    return _RETRIEVAL_DOWN.format(provider=body.get("provider") or "unknown")
+
 
 def register_tools(server: FastMCP, *, resolve_binding, service_url: str, relay,
                    distiller_factory, transport=None, state_dir=None, cwd=None,
@@ -206,6 +242,11 @@ def register_tools(server: FastMCP, *, resolve_binding, service_url: str, relay,
     from synapse_contracts import Provenance, Segment
     from synapse_contracts.binding import clear_binding, read_binding
 
+    # Function-local because `briefing` imports THIS module at import time
+    # (`SENTINEL`, `_DEFAULT_INSTRUCTIONS`); at module level the two would be a
+    # cycle. By the time `register_tools` runs, this module is fully loaded.
+    from synapse_orchestrator.briefing import fetch_arrival_summary
+
     # The ONE import of the worker from the orchestrator, and it is here on
     # purpose: the spec requires lifecycle binding writes to go through the
     # worker's existing writer ("one code path — the orchestrator must not
@@ -222,16 +263,77 @@ def register_tools(server: FastMCP, *, resolve_binding, service_url: str, relay,
         AMBIGUITY_WINDOW_SECONDS,
         bindings_dir,
         find_live_transcript_candidates,
+        resolve_agent_binding,
     )
     from synapse_worker.discovery import join_session as _worker_join_session
 
     base = service_url.rstrip("/")
     here = Path(cwd) if cwd is not None else Path.cwd()
 
-    def _client():
-        # 15s matches query()'s own client below. Deliberately NOT relay.py's
-        # synthesis-aware 120s: none of these routes runs a model.
-        return _httpx.AsyncClient(transport=transport, timeout=15.0)
+    # 15s for the lifecycle routes: create/join/leave/end run no model and a
+    # laptop on the same LAN answers them in milliseconds, so a longer timeout
+    # would only make a wedged host look like a slow one.
+    #
+    # `/query` is the exception and had been getting 15s by inheritance. It
+    # RANKS, which is a model call — docs/overnight/FLOW.md measures real
+    # rankings at 12.6-52.8s — so 15s cut off the majority of honest answers
+    # and delivered them as "Shared memory is unreachable right now
+    # (ReadTimeout)". That is the empty-200 failure wearing a different mask:
+    # the memory is fine, the answer exists, and the agent is told it does
+    # not. 90s clears the measured range with margin and still sits under the
+    # service's own synthesis timeout, so a genuinely dead backend surfaces as
+    # the typed 503 (decision 008) rather than as this client giving up first.
+    _LIFECYCLE_TIMEOUT_S = 15.0
+    _QUERY_TIMEOUT_S = 90.0
+
+    def _client(timeout: float = _LIFECYCLE_TIMEOUT_S):
+        return _httpx.AsyncClient(transport=transport, timeout=timeout)
+
+    def _effective_binding(agent_session_id: str | None):
+        """The binding the CALLING CONVERSATION speaks under — the whole of
+        W2's one-orchestrator-N-clients resolution, used by every tool that
+        acts on behalf of a conversation.
+
+        MCP has no per-call identity of its own: one orchestrator serves every
+        Claude Code window on the machine over one HTTP transport, and nothing
+        in the protocol says which window a `query` came from. So the caller
+        says, by passing `agent_session_id` (Claude Code exports it as
+        `CLAUDE_CODE_SESSION_ID`; SKILL.md instructs it), and this turns that
+        id into a binding:
+
+        1. **Absent** — exactly today's answer, `resolve_binding()`: the most
+           recently pinned binding on this machine. Byte-identical to the
+           pre-W2 behaviour, which is what keeps every existing caller and
+           every existing test correct without modification, and which is
+           right whenever only one conversation is open.
+        2. **Matches a per-session binding** for ANY registered agent — that
+           conversation's own binding, whatever any other window has done
+           since. This is the fix: before it, window A's `query` was routed by
+           whichever window joined LAST, so A read and wrote B's Shared
+           Session (reproduced, 2026-08-06 review).
+        3. **Matches nothing** — the machine's binding, with the CALLER'S REAL
+           id substituted as the acting identity. That is what makes the
+           documented demo path correct with no extra setup: `scripts/
+           serve_local.py` writes one machine-scope binding before any
+           conversation exists, so no per-session file can exist for the
+           window that then connects, and substituting its real id is what
+           gives suppression and attribution a true conversation to key on
+           rather than the `as-<contributor>` placeholder.
+
+        Which agent owns the id is never something the caller has to know —
+        every registered agent is probed, same discipline as `_bind`.
+        """
+        if agent_session_id is None:
+            return resolve_binding()
+        if state_dir is not None:
+            for agent in AGENT_REGISTRY:
+                found = resolve_agent_binding(Path(state_dir), agent, agent_session_id)
+                if found is not None:
+                    return found.to_local_binding()
+        fallback = resolve_binding()
+        if fallback is None:
+            return None
+        return fallback.model_copy(update={"agent_session_id": agent_session_id})
 
     def _identity() -> str | None:
         """Who this conversation is, for the service.
@@ -329,16 +431,47 @@ def register_tools(server: FastMCP, *, resolve_binding, service_url: str, relay,
         Code and Codex both open leaves two files pointing at the same
         `shared_id` — that is the documented path, not an exotic one.
 
+        BOTH binding layouts are swept (W2, 2026-08-06): the legacy
+        `bindings/<agent>.json` and the per-session
+        `bindings/<agent>/<agent_session_id>.json`. `_unbind` is this
+        function's only caller, and a leave/end that cleared only the legacy
+        mirror would leave the per-session file behind still naming the
+        session — the worker would resolve it and keep distilling into a
+        Shared Session the conversation was just told it had left, which is
+        the exact class of silent falsehood the multi-file `_unbind` fix
+        existed to end.
+
         Never raises: `read_binding` already answers None for an absent or
         corrupt file, and `glob` on a bindings dir that does not exist yields
         nothing. Callers here are MCP tools.
         """
         if state_dir is None:
             return []
+        root = bindings_dir(Path(state_dir))
+        paths = sorted(root.glob("*.json")) + sorted(root.glob("*/*.json"))
         return [(path, b)
-                for path, b in ((p, read_binding(p))
-                                for p in sorted(bindings_dir(Path(state_dir)).glob("*.json")))
+                for path, b in ((p, read_binding(p)) for p in paths)
                 if b is not None and b.shared_id == shared_id]
+
+    def _unbind_paths(attached: list) -> list:
+        """Delete the named binding files. Returns the bindings they held.
+
+        `attached` is `[(path, binding)]` as `_bindings_on` produces it, so a
+        caller can clear a SUBSET — which is what `leave_session
+        (agent_session_id=…)` does: one conversation detaches while its
+        siblings on the same machine stay bound. Splitting this out of
+        `_unbind` below is the whole mechanism; `_unbind` is now "all of
+        them", spelled once.
+        """
+        for path, _ in attached:
+            try:
+                clear_binding(path)
+            except OSError as exc:
+                # Nothing may raise out of an MCP tool, and a binding we could
+                # not delete is worth naming rather than crashing on: the
+                # conversation stays attached and the user needs to know.
+                logger.warning("Could not clear binding %s (%s)", path, exc)
+        return [b for _, b in attached]
 
     def _unbind(shared_id: str) -> list | None:
         """Clear EVERY binding file pointing at `shared_id`. Returns the
@@ -361,16 +494,7 @@ def register_tools(server: FastMCP, *, resolve_binding, service_url: str, relay,
         """
         if state_dir is None:
             return None
-        attached = _bindings_on(shared_id)
-        for path, _ in attached:
-            try:
-                clear_binding(path)
-            except OSError as exc:
-                # Nothing may raise out of an MCP tool, and a binding we could
-                # not delete is worth naming rather than crashing on: the
-                # conversation stays attached and the user needs to know.
-                logger.warning("Could not clear binding %s (%s)", path, exc)
-        return [b for _, b in attached]
+        return _unbind_paths(_bindings_on(shared_id))
 
     def _forget_ended(binding) -> bool:
         """React to an observed close: clear the local bindings, remember the id.
@@ -482,23 +606,32 @@ def register_tools(server: FastMCP, *, resolve_binding, service_url: str, relay,
         # the system -- credit is what makes the collaboration visible.
         "A result is a teammate's verified experience, not a hypothesis: if one "
         "explains what you are looking at, say so to the user immediately and "
-        "name who found it, before investigating further."))
-    async def query(question: str) -> str:
-        binding = resolve_binding()
+        "name who found it, before investigating further. "
+        "Pass agent_session_id set to your own session id (Claude Code exports "
+        "it as CLAUDE_CODE_SESSION_ID): one machine can have several "
+        "conversations joined at once, and it is what says which one is asking. "
+        "Without it this falls back to the most recently joined conversation on "
+        "the machine, which is a guess as soon as a second window is open."))
+    async def query(question: str, agent_session_id: str | None = None) -> str:
+        binding = _effective_binding(agent_session_id)
         if binding is None:
             return _NOT_JOINED
         url = f"{base}/v1/sessions/{binding.shared_id}/query"
         try:
-            async with _client() as client:
-                # BOTH identity fields, additively (2026-08-06). Suppression and
-                # the watermark are keyed on the Contributor now
-                # (`retrieval.visible_to`, `store.last_seen`), and the service
-                # reads `contributor` first and falls back to `agent_session`
-                # (`api._asking_contributor`). Sending both means this
-                # orchestrator is correct against the re-keyed service AND
-                # against one that has not been upgraded yet — the two are
-                # separate processes on separate laptops and deploy in either
-                # order.
+            # The one route here that runs a model — see _QUERY_TIMEOUT_S.
+            async with _client(_QUERY_TIMEOUT_S) as client:
+                # BOTH identity fields, and they now answer different questions
+                # (decisions/001, 2026-08-06): `agent_session` is what
+                # suppression is keyed on — "is this already in the context
+                # window asking?" is a fact about ONE conversation — while
+                # `contributor` keys the watermark, because "how much have I not
+                # seen?" is a fact about one person across their conversations.
+                # `binding.agent_session_id` is the CALLER's own id whenever it
+                # passed one (`_effective_binding`), which is what makes two
+                # windows of one human teammates rather than one participant.
+                # Sending both also keeps this orchestrator correct against a
+                # service that has not been upgraded yet — the two are separate
+                # processes on separate laptops and deploy in either order.
                 resp = await client.post(url, json={
                     "query": question,
                     "agent_session": binding.agent_session_id,
@@ -510,6 +643,16 @@ def register_tools(server: FastMCP, *, resolve_binding, service_url: str, relay,
                 # handler below and does NOT clear the binding.
                 if is_session_ended(resp):
                     return _ended_text(_forget_ended(binding))
+                # ALSO before raise_for_status, and for the same reason the
+                # ended-session check is (decision 008): a 503 whose body says
+                # `retrieval_unavailable` is not a generic outage, it is the
+                # one outage this agent must not paper over. Left to
+                # raise_for_status it would render "Shared memory is
+                # unreachable right now (HTTPStatusError)" — honest but
+                # unactionable, and indistinguishable from the service itself
+                # being down.
+                if (down := _retrieval_down_text(resp)) is not None:
+                    return down
                 resp.raise_for_status()
                 data = resp.json()
             # A well-formed empty result ({"findings": []}) and a response that
@@ -569,9 +712,13 @@ def register_tools(server: FastMCP, *, resolve_binding, service_url: str, relay,
     @server.tool(description=(
         "Push an insight to the team's shared memory. Call when you have learned "
         "something non-obvious a teammate would benefit from — a root cause, a "
-        "dead end, a decision and its why. A few sentences of plain prose."))
-    async def contribute(text: str) -> str:
-        binding = resolve_binding()
+        "dead end, a decision and its why. A few sentences of plain prose. "
+        "Pass agent_session_id set to your own session id (Claude Code exports "
+        "it as CLAUDE_CODE_SESSION_ID) so the finding is attributed to THIS "
+        "conversation: that is what lets another window of yours read it as "
+        "something learned elsewhere rather than as its own echo."))
+    async def contribute(text: str, agent_session_id: str | None = None) -> str:
+        binding = _effective_binding(agent_session_id)
         if binding is None:
             return _NOT_JOINED
         from datetime import datetime, timezone
@@ -598,9 +745,25 @@ def register_tools(server: FastMCP, *, resolve_binding, service_url: str, relay,
         except Exception as exc:
             logger.warning("contribute: distillation failed (%s: %s)",
                            exc.__class__.__name__, exc)
-            return (f"Couldn't process that right now ({exc.__class__.__name__}) — "
-                    "your note was not recorded. Try again in a moment, or mention it "
-                    "to a teammate directly.")
+            # ⟨decision 008's sibling, post-review⟩ The write half gets the
+            # same treatment the read half got. "Couldn't process that right
+            # now" named nothing: not the seam, not that this is an OUTAGE
+            # rather than a problem with the prose, and not the ~2-minute
+            # self-heal `_RETRIEVAL_DOWN` promises on the query side. An agent
+            # reading it rephrases and retries — burning the user's turn on a
+            # rewrite that cannot help, because the model that would have read
+            # it is not answering.
+            return (
+                f"Your note was NOT recorded, and the reason is on THIS "
+                f"machine, not in what you wrote: the local model seam that "
+                f"distils prose into findings failed "
+                f"({exc.__class__.__name__}). Tell the user this is a local "
+                f"outage — do NOT rewrite the note and retry, the same seam "
+                f"would read the rewrite. If `scripts/serve_local.py` is "
+                f"running it supervises that seam and restarts it within "
+                f"~2 minutes, so retrying after that is worth one attempt; "
+                f"check `.synapse/logs/supervisor.log` if it keeps failing. "
+                f"Otherwise say the insight to your teammates directly.")
         for f in findings:
             f.provenance = Provenance.CONTRIBUTED
         if not findings:
@@ -737,7 +900,17 @@ def register_tools(server: FastMCP, *, resolve_binding, service_url: str, relay,
         "conversation instead of the most recently active one. "
         "The result names the Shared Session id AND the transcript file it bound. "
         "Read both back to the user: a join that bound the wrong transcript looks "
-        "identical from inside this conversation to one that worked."))
+        "identical from inside this conversation to one that worked. "
+        # W5. The result now also carries the session's purpose and a summary
+        # of what the team has already established — the whole point of
+        # joining a session that is hours old. Said here as well as in the
+        # result itself because a tool description is read before the call and
+        # sets the expectation that there IS something to relay.
+        "The result also carries what this session is FOR and what the team has "
+        "already worked out in it, including anything new since you last looked. "
+        "Summarise that for the user in your own words as soon as you get it — "
+        "they cannot see tool results, and a join they hear nothing about is "
+        "indistinguishable from one that did not happen."))
     async def join_session(shared_id: str, agent_session_id: str | None = None) -> str:
         who = _identity()
         if who is None:
@@ -786,10 +959,36 @@ def register_tools(server: FastMCP, *, resolve_binding, service_url: str, relay,
             return (f"Registered as a member of {shared_id}, but this conversation was "
                     f"NOT bound to it — nothing here will reach the team until it is. "
                     f"{refusal}")
-        return (f"Joined Shared Session {shared_id} as {who}, and bound "
-                f"{_summarize(bindings)} to it. Findings from this conversation now go to "
-                f"{shared_id}. Call `query` before investigating anything — the team may "
-                "already know it.")
+        joined = (f"Joined Shared Session {shared_id} as {who}, and bound "
+                  f"{_summarize(bindings)} to it. Findings from this conversation now go "
+                  f"to {shared_id}.")
+        # THE ARRIVAL SUMMARY, delivered here rather than in `instructions` (W5).
+        #
+        # `instructions` is composed at MCP CONNECTION INIT, not at join
+        # (briefing.py's W5 amendment), so a conversation that connected before
+        # it joined — the demo's exact ordering, and the ordinary one for
+        # anybody who joins mid-conversation — was briefed about no session at
+        # all, and this result carried no memory content to make up for it. The
+        # join was silent: nothing the agent could read, therefore nothing it
+        # could say. Returning the summary IN THE TOOL RESULT is what makes the
+        # storyboard's awareness moment possible, because a tool result is the
+        # one surface an agent has just been handed and will speak from.
+        #
+        # AFTER the bind, deliberately. This is the only place the summary can
+        # be fetched with the identity the conversation actually holds, and a
+        # summary is worth nothing attached to a join that did not bind.
+        summary = await fetch_arrival_summary(
+            base, shared_id, contributor=who,
+            agent_session=bindings[0].agent_session_id if bindings else agent_session_id,
+            transport=transport)
+        if summary is None:
+            # Fail open, and say what to do instead: the join WORKED, so the
+            # agent must not report it as broken — but "call `query`" is the
+            # advice that was in this string before the summary existed, and it
+            # is exactly what recovers the missing context by hand.
+            return (f"{joined} Call `query` before investigating anything — the team may "
+                    "already know it.")
+        return f"{joined}\n\n{summary}"
 
     @server.tool(description=(
         "Detach THIS conversation from the Shared Session it is in, leaving the "
@@ -797,10 +996,15 @@ def register_tools(server: FastMCP, *, resolve_binding, service_url: str, relay,
         "with this piece of shared work, or wants this conversation to stop "
         "feeding team memory. This is not how a session is closed — use "
         "`end_session` for that, and only for a session nobody else is in. "
+        "Pass agent_session_id set to your own session id (Claude Code exports "
+        "it as CLAUDE_CODE_SESSION_ID) to detach ONLY this conversation: "
+        "without it every conversation on this machine that is in the same "
+        "Shared Session is detached, because there is nothing else to tell "
+        "them apart. "
         "The result names the session left and the transcript unbound; after it, "
         "`query` and `contribute` report that you are not joined."))
-    async def leave_session() -> str:
-        binding = resolve_binding()
+    async def leave_session(agent_session_id: str | None = None) -> str:
+        binding = _effective_binding(agent_session_id)
         if binding is None:
             return _NOT_JOINED
         shared_id = binding.shared_id
@@ -811,8 +1015,35 @@ def register_tools(server: FastMCP, *, resolve_binding, service_url: str, relay,
         # member of a session this tool reported having left. The union with
         # `binding.contributor` keeps the single-binding case byte-identical and
         # covers the no-state-dir case, where `_bindings_on` can see nothing.
-        attached = [b for _, b in _bindings_on(shared_id)]
-        contributors = sorted({b.contributor for b in attached} | {binding.contributor})
+        attached = _bindings_on(shared_id)
+        # WHICH of them this call detaches (W2, 2026-08-06). With an explicit
+        # `agent_session_id`, exactly the one binding that names it: two windows
+        # of one machine are two participants, and one of them leaving must not
+        # silently unbind the other — the pre-W2 behaviour, where `leave` in
+        # window A cleared window B's binding too and B kept feeding a session
+        # it had been told nothing more would reach. Without the argument there
+        # is nothing to tell the conversations apart, so it stays what it has
+        # always been: this machine leaves, whole.
+        if agent_session_id is not None:
+            mine = [(p, b) for p, b in attached
+                    if b.agent_session_id == agent_session_id]
+        else:
+            mine = []
+        # An id that matches no binding on this machine is the machine-scope
+        # case (`serve_local.py`'s stand-in, which no conversation's id can
+        # ever match) — there is no per-conversation binding to clear, so what
+        # this call can honestly detach is the machine, and the result says so.
+        detaching_all = not mine
+        leaving = attached if detaching_all else mine
+        leaving_paths = {p for p, _ in leaving}
+        # Contributors that OTHER conversations still hold on this session must
+        # not be removed from its member list — the departing window is not the
+        # person. `Relay._register_members` would re-add them on the next push
+        # anyway, but a member list that flickers is a member list `end_session`
+        # reads to decide whether anyone else is still there.
+        staying = {b.contributor for p, b in attached if p not in leaving_paths}
+        contributors = sorted(
+            ({b.contributor for _, b in leaving} | {binding.contributor}) - staying)
         note = ""
         try:
             async with _client() as client:
@@ -839,7 +1070,7 @@ def register_tools(server: FastMCP, *, resolve_binding, service_url: str, relay,
                     "conversation will be sent there regardless.")
         except Exception as exc:                       # noqa: BLE001
             return _unexpected("leave_session", exc)
-        cleared = _unbind(shared_id)
+        cleared = None if state_dir is None else _unbind_paths(leaving)
         if cleared is None:
             # Nothing was unbound and nothing can be, so do not say it was.
             return (f"Removed you from Shared Session {shared_id} at the service, but the "
@@ -848,10 +1079,25 @@ def register_tools(server: FastMCP, *, resolve_binding, service_url: str, relay,
                     f"{note}")
         where = (" (was following "
                  + ", ".join(b.transcript_path for b in cleared) + ")") if cleared else ""
+        # Say how wide the detach actually was. Told "left", a user reasonably
+        # assumes "this conversation" — and without an `agent_session_id` there
+        # was no way for this tool to do anything narrower, so every sibling
+        # window on this machine has just been detached too and is entitled to
+        # be named rather than to find out by its next `query`.
+        siblings = ""
+        if detaching_all and len(cleared) > 1:
+            siblings = (f" This detached ALL {len(cleared)} conversations bound here "
+                        f"({_summarize(cleared)}) — with no agent_session_id there is "
+                        "nothing to tell them apart. Pass your own session id to "
+                        "detach only this conversation.")
+        remaining = len(attached) - len(cleared)
+        if remaining > 0:
+            siblings = (f" {remaining} other conversation(s) on this machine are still "
+                        f"bound to {shared_id} and still feeding it.")
         return (f"Left Shared Session {shared_id}{where}. This conversation is no longer "
                 f"bound to it and nothing more from here will reach {shared_id}. `query` "
                 f"and `contribute` will say you are not joined until you join another."
-                f"{note}")
+                f"{siblings}{note}")
 
     @server.tool(description=(
         "CLOSE a Shared Session for everyone, permanently. Its memory stops "

@@ -82,6 +82,37 @@ them. Keep every comparison pointing the same way the session pointed it. Use no
 identifiers, config keys or paths.
 """
 
+# READ THIS BEFORE EDITING EITHER FEW-SHOT BELOW.
+#
+# On 2026-08-06 these two example outputs came back as findings. One contributed
+# paragraph produced nine notes and six were these, paraphrased, filed under a
+# named engineer as their own verified experience — brokers and template caches
+# the contributor never mentioned. Recorded as F1 in
+# docs/overnight/w7-live-evidence.md, reproduced on both runs.
+#
+# Two things now stand between an example and a teammate's screen:
+#
+#   1. packages/providers/.../claude_cli_provider.py:_flatten_prompt marks these
+#      as examples in the prompt text. That arm gets one prompt string rather
+#      than a turn list, and joining the turns had erased every signal that they
+#      were examples at all, while the suffix above says "the session above".
+#   2. packages/distiller/.../distiller.py:is_example_echo drops any returned
+#      note that is a near-duplicate of an example, whatever produced it. Its
+#      corpus is derived from these few-shots via
+#      PromptPack.example_finding_texts, so an example added here is guarded the
+#      moment it is added — nothing to remember, nothing to keep in step.
+#
+# What that means for an editor: adding or rewording an example is safe, and the
+# guard follows you. Adding one whose note reads like something a real session
+# would genuinely produce is NOT safe — that is the one shape the guard cannot
+# separate from real work, and it would silently eat the real one instead.
+#
+# The prose in `system` and `task_suffix` above is deliberately untouched by that
+# fix, because calibration.overhead_tokens below is measured on the NPU's own
+# tokenizer and feeds the pinned segment_budget in config/synapse.toml with zero
+# headroom (4096 - 809 - 500 = 2787 exactly). Hardening that costs tokens has to
+# wait for a machine that can re-measure.
+
 # Few-shot 1 — the fidelity case. The session states a drawback of the option it
 # chose. The note keeps the drawback, and keeps it pointing the same way. This is
 # the behaviour the model failed at, so it is demonstrated first.

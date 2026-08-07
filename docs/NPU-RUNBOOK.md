@@ -61,10 +61,31 @@ GenieX would be, so you see the intended shape of the dashboards and the merge
 before any of it depends on the NPU. It measures nothing — that is what the
 rest of this runbook is for.
 
+**The one-command alternative, and what it buys you.** `uv run python
+scripts/serve_local.py --npu` replaces T1–T4 below and, more importantly,
+*supervises* the NPU seam: it launches `geniex serve` itself when `:18181` is
+free (adopting one you already started otherwise), probes `GET /v1/models`
+every 15 seconds, and restarts the seam after four consecutive failures —
+roughly a minute of continuous silence, and up to ~80 seconds from the last
+healthy answer, because a probe that fails by timing out burns its own 5
+seconds before the next one is due. (The DEAD line prints the span it actually
+measured, not that estimate.) That silence is the observed idle-death
+signature, where the process stays alive and its HTTP server stops answering.
+It kills the port owner before respawning,
+because that failure leaves the port bound with no crash to clear it. Restarts
+back off 0s/30s/120s and stop after three in ten minutes with a banner naming
+the fallbacks. Everything it does prints to your terminal and appends to
+`.synapse/logs/supervisor.log`.
+
+Nothing supervises a hand-started `geniex serve` — that is a developer probing
+the box, which is exactly what the four-terminal layout below is for. Use it
+when you want to watch each process; use `serve_local.py --npu` when you want
+the box to survive being left alone.
+
 Four terminals + a browser:
 
 ```powershell
-# T1: the NPU model
+# T1: the NPU model (unsupervised — see the note above)
 geniex serve
 # T2: the service — fake verdicts, or the real 70B (env trio below)
 uv run synapse-service
@@ -87,8 +108,11 @@ Open side by side:
 - `http://127.0.0.1:8790/debug` — the copper page: **NPU-now should tick
   live** while a segment distils; triage skips appear with reasons; `llm`
   entries expand to real prompt/output previews.
-- `http://127.0.0.1:8899/debug` — the teal page: `FindingAppended` entries,
-  then `Merged` the moment synthesis reconciles anything.
+- `http://127.0.0.1:8899/debug/log` — the teal log page: `FindingAppended`
+  entries, then `Merged` the moment synthesis reconciles anything.
+  (`http://127.0.0.1:8899/debug` is now the *brain page* — working memory,
+  its revisions, the participant roster. The log tail lives at `/debug/log`
+  since W4a, 2026-08-06.)
 
 **Gate:** a finding you can trace end to end — transcript line → triage keep
 → NPU distil (watch the seconds) → push → service log tail → retrievable by

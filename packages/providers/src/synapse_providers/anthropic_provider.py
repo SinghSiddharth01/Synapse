@@ -31,7 +31,7 @@ see the `anthropic` dependency in pyproject.toml. The SDK gets retries, typed
 exceptions, and the exact wire shape (including the two headers in point 1)
 right for free; re-deriving that over httpx would just recreate the SDK.
 
-Five corrections applied here, each commented at its call site below:
+Six corrections applied here, each commented at its call site below:
 
   1. RESPONSE_SCHEMA (synapse_distiller.prompt) has no `additionalProperties:
      false` on its object nodes -- nothing needed it before, because every
@@ -58,6 +58,12 @@ Five corrections applied here, each commented at its call site below:
      `input_tokens + cache_creation_input_tokens + cache_read_input_tokens`,
      not the SDK's bare `usage.input_tokens`. See the loud comment at the
      call site -- this one is subtle and load-bearing.
+  6. `output_config.effort` is sent ONLY to models that accept it. It errors
+     on Haiku 4.5 and Sonnet 4.5, and claude-haiku-4-5 is exactly the arm the
+     4096 pin below exists for -- sent unconditionally it 400s that arm on its
+     first request. `output_config.format` is NOT gated with it: structured
+     output is supported on Haiku 4.5, so the gate is on the key rather than
+     on the container. See `supports_effort`.
 
 capabilities.native_structured_output=True is purely descriptive here: the
 ONLY runtime reader of ProviderCapabilities is
@@ -88,10 +94,91 @@ DEFAULT_MODEL = "claude-opus-5"
 # provider this package otherwise talks to) -- see the module docstring.
 DEFAULT_MAX_TOKENS = 16000
 
+# Haiku's cap is OURS, not the endpoint's. claude-haiku-4-5 serves a 200K
+# context and will happily return up to 64K output tokens; 4096 is a spend and
+# shape decision, and saying so here is the point -- a number that looks like a
+# platform limit stops being questioned, and this one should be.
+#
+# Why 4096 specifically: Haiku is the arm someone reaches for to run the loop
+# cheaply and often, and a distil response is a small findings object. 16000 is
+# sized for Opus 5, where max_tokens caps thinking PLUS text and thinking is on
+# by default; Haiku has no such thinking overhead to cover, so the same ceiling
+# is ~4x more room than the task can use and 4x the exposure when a small model
+# degenerates into a repetition loop -- the failure this repo already
+# distinguishes by name (distiller.classify_drop). A cap is the only thing that
+# bounds a loop's cost, so it should be near what the task needs.
+#
+# Matched on a SUBSTRING rather than an exact id: the arm is selected by
+# SYNAPSE_ANTHROPIC_MODEL, a free-text env var, and both `claude-haiku-4-5` and
+# `claude-haiku-4-5-20251001` are in use in this repo (scripts/serve_local.py).
+# An exact-match table would silently fall back to 16000 for whichever spelling
+# it did not list -- failing OPEN on the number that costs money.
+HAIKU_MAX_TOKENS = 4096
+_MODEL_MAX_TOKENS: tuple[tuple[str, int], ...] = (("haiku", HAIKU_MAX_TOKENS),)
+
+# The operator override. Named to match INFERENCE_CLOUD_MAX_TOKENS on
+# AIC100Provider, which exists for exactly this reason and records it: the
+# service and the worker both construct their provider with NO arguments
+# (`worker/cli.py`, `orchestrator/cli.py`, `service/cli.py`), so a constructor
+# default is reachable only from Python and cannot be changed on a running
+# deployment. Config that cannot reach the code is not config.
+MAX_TOKENS_ENV = "SYNAPSE_ANTHROPIC_MAX_TOKENS"
+
+
+def default_max_tokens_for(model: str) -> int:
+    """The per-model output cap, before any explicit argument or env override.
+
+    Falls back to DEFAULT_MAX_TOKENS for anything unlisted, so adding a model
+    is never a prerequisite for using one.
+    """
+    lowered = model.lower()
+    for fragment, cap in _MODEL_MAX_TOKENS:
+        if fragment in lowered:
+            return cap
+    return DEFAULT_MAX_TOKENS
+
+
 # Correction #3. A distiller doing faithful compression is not a hard
 # reasoning task; "low" keeps the (always-on, by default) thinking shallow
 # rather than paying for depth nothing here needs.
 DEFAULT_EFFORT = "low"
+
+# Correction #6. Which models accept `output_config.effort` AT ALL. Not a
+# tuning question -- a 400. `effort` is accepted on Opus 4.5 and later, Sonnet
+# 5, Fable 5 and Mythos 5, and ERRORS on Sonnet 4.5 and Haiku 4.5.
+#
+# That matters here more than anywhere else in this file: the distiller arm the
+# 4096 pin above was written for IS claude-haiku-4-5. Sent unconditionally, the
+# field meant that arm 400s on its first request and the pin governed an arm
+# that had never run -- see docs/overnight/w6-live-stress.md section 5, which
+# is where this was found.
+#
+# Substring match, same shape as _MODEL_MAX_TOKENS and for the same reason: the
+# model arrives as free text through SYNAPSE_ANTHROPIC_MODEL, and this repo
+# already carries two Haiku spellings.
+#
+# But it falls back the OTHER way, and the asymmetry is deliberate. The
+# max-tokens table falls back to the generous default, so an unlisted model
+# keeps working. This table falls back to OMITTING the field, because omitting
+# `effort` is never an error while sending it to a model that rejects it always
+# is. An unlisted model loses a tuning knob -- cheap, and visible in the request
+# body. The other direction loses the arm.
+_EFFORT_MODELS: tuple[str, ...] = (
+    "opus-4-5", "opus-4-6", "opus-4-7", "opus-4-8", "opus-5",
+    "sonnet-5", "fable", "mythos",
+)
+
+
+def supports_effort(model: str) -> bool:
+    """Whether `output_config.effort` can be sent to this model without a 400.
+
+    See _EFFORT_MODELS for why this fails closed while the max-tokens table
+    fails open. Note the fragments are version-specific on purpose: a bare
+    `"opus"` would match `claude-opus-4-1`, which predates the parameter, and a
+    bare `"sonnet"` would match `claude-sonnet-4-5`, which rejects it outright.
+    """
+    lowered = model.lower()
+    return any(fragment in lowered for fragment in _EFFORT_MODELS)
 
 
 def _tighten_schema(node: Any) -> Any:
@@ -166,7 +253,7 @@ class AnthropicProvider(ModelProvider):
         *,
         model: str | None = None,
         api_key: str | None = None,
-        max_tokens: int = DEFAULT_MAX_TOKENS,
+        max_tokens: int | None = None,
         effort: str = DEFAULT_EFFORT,
         timeout: float | None = None,
         client: Any | None = None,
@@ -193,6 +280,24 @@ class AnthropicProvider(ModelProvider):
             self._client = AsyncAnthropic(**kwargs)
 
         self._model = model or os.environ.get("SYNAPSE_ANTHROPIC_MODEL", DEFAULT_MODEL)
+        # Resolution order, and the reason for it:
+        #   env  >  explicit argument  >  per-model pin  >  DEFAULT_MAX_TOKENS
+        #
+        # `max_tokens=None` (the default) means "decide from the model" rather
+        # than "use 16000" -- which is what lets a Haiku arm get 4096 through
+        # the three call sites that pass no arguments at all.
+        #
+        # Env beating an explicit argument is deliberate and matches
+        # AIC100Provider's `int(os.environ.get(...) or max_tokens)`. The whole
+        # purpose of the variable is to change the number on a deployment
+        # whose code you are not editing; a hard-coded argument winning over it
+        # would leave exactly the call sites that most need overriding
+        # unreachable. It is also the same precedence SYNAPSE_ANTHROPIC_MODEL
+        # already has one line above.
+        resolved = max_tokens if max_tokens is not None else default_max_tokens_for(
+            self._model
+        )
+        override = os.environ.get(MAX_TOKENS_ENV)
         # PUBLIC (2026-08-06): `SynthesisBudget.for_provider` reads `max_tokens`
         # off whichever provider is wired into synthesis, so a provider that
         # hides its cap behind a private name is silently budgeted at
@@ -200,8 +305,11 @@ class AnthropicProvider(ModelProvider):
         # the 500-word memory this provider can easily afford asked for as
         # 270. Named like AIC100Provider's and OpenAICompatibleProvider's for
         # exactly that reason: the budget reads one attribute across all of
-        # them or it reads none of them reliably.
-        self.max_tokens = max_tokens
+        # them or it reads none of them reliably. It is also why the Haiku pin
+        # belongs HERE rather than in config/synapse.toml: synthesis reads this
+        # attribute and never reads a capability record, so a config-only cap
+        # would be inert on the arm it was written for (decisions/006).
+        self.max_tokens = int(override) if override else resolved
         self._effort = effort
 
     @property
@@ -226,16 +334,30 @@ class AnthropicProvider(ModelProvider):
             # Correction #3: no `temperature` key at all -- deliberately
             # absent, not set to a default. Sending it (even 0.0) is a 400
             # on Opus 5 / 4.8 / 4.7 / Fable 5. Do not add it back.
-            "output_config": {"effort": self._effort},
         }
         if system:
             kwargs["system"] = system
+
+        # Correction #6: `effort` only for models that accept it (see
+        # supports_effort) -- but `format` regardless, because structured
+        # output IS supported on Haiku 4.5. The two share a container, so the
+        # gate has to be on the KEY, not on `output_config` as a whole:
+        # dropping the container for Haiku would take schema enforcement with
+        # it and hand the distiller un-enforced JSON on the one arm this
+        # provider pins a cap for.
+        output_config: dict[str, Any] = {}
+        if supports_effort(self._model):
+            output_config["effort"] = self._effort
         if response_schema is not None:
-            kwargs["output_config"]["format"] = {
+            output_config["format"] = {
                 "type": "json_schema",
                 # Correction #1: tightened, or the request 400s.
                 "schema": _tighten_schema(response_schema),
             }
+        # Omitted entirely when empty rather than sent as `{}` -- an empty
+        # object is not what "no output configuration" looks like on the wire.
+        if output_config:
+            kwargs["output_config"] = output_config
 
         started = time.perf_counter()
         response = await self._client.messages.create(**kwargs)

@@ -17,8 +17,8 @@ revision 2026-07-28, and — decisively — the passive worker is a separate
 process with no MCP session in either direction, so there is no client for it
 to ask. Investigated 2026-08-05; that route is closed, this one is open.
 
-TWO THINGS THAT MAKE THIS DIFFERENT FROM EVERY OTHER PROVIDER HERE
-------------------------------------------------------------------
+THREE THINGS THAT MAKE THIS DIFFERENT FROM EVERY OTHER PROVIDER HERE
+--------------------------------------------------------------------
 
 1. `usage.input_tokens` IS NOT THE PROMPT SIZE. Measured on 2.1.223, a call
    whose prompt was ~31,000 tokens reported:
@@ -42,6 +42,14 @@ TWO THINGS THAT MAKE THIS DIFFERENT FROM EVERY OTHER PROVIDER HERE
    in a pure text transform, and any of which could pull content into a
    Finding that the Segment never contained. `--allowedTools ""` and
    `--max-turns 1` reduce it to one turn of text in, text out.
+
+3. IT TAKES ONE PROMPT STRING, NOT A LIST OF TURNS. Every other arm here hands
+   the model a real conversation, so the few-shots arrive as *its own* prior
+   assistant turns and are structurally distinct from the material to work on.
+   `-p` has one argument, and until 2026-08-06 this provider produced it by
+   joining every non-system message with blank lines — which erases the only
+   thing marking which text was an example. See `_flatten_prompt` for the
+   measured consequence and what replaced it.
 
 WHAT THIS SHARES WITH THE OTHER CLOUD ARM: it is off by default
 (`SYNAPSE_DISTILLER=claude-cli` opts in), and it sends raw Agent Session
@@ -72,6 +80,81 @@ DEFAULT_TIMEOUT = 180.0
 # message naming the CLI, so a rename surfaces as one clear error rather than a
 # distiller that quietly stops producing findings.
 _REQUIRED_FIELDS = ("result", "usage")
+
+# --- flattening a chat into one prompt argument -----------------------------------
+#
+# `distiller.prompt.build_messages` emits system, then one user/assistant pair per
+# few-shot, then the real request. On an arm that takes a message list, those pairs
+# ARE examples: the wire format says the assistant already said that, about
+# something else. On this arm there is one string, and the roles have to survive in
+# the text or not at all.
+#
+# WHAT HAPPENED WHEN THEY DID NOT. Joining the turns with blank lines — this
+# provider's behaviour until 2026-08-06 — produced a prompt in which the few-shot
+# inputs are labelled "developer:"/"agent:" exactly like the rendered Segment, the
+# few-shot outputs are bare JSON objects with nothing marking them as answers, and
+# the pack's own suffix then says "rewrite the session above as notes". The session
+# above was the examples too, so the model did as it was told. Measured live in W7
+# (docs/overnight/w7-live-evidence.md, F1): one contributed paragraph in, nine
+# findings out, and six of them were v4-condense's own two few-shot outputs
+# paraphrased and filed as a named engineer's verified experience. Reproduced on
+# both runs; 2 + 4 example notes is exactly the six.
+#
+# So the blocks are named. The markers are deliberately loud and deliberately not
+# JSON: they must be unmistakable inside a prompt whose payload is a transcript
+# that could itself contain fences, braces or headings.
+#
+# These cost tokens, and prompt tokens on other arms are budgeted
+# (`promptpack.calibration.overhead_tokens` feeds the segment budget). They are
+# free here on both counts: this text exists only on this arm, and this arm has no
+# context ceiling to budget against — `segment_budget` is pinned in
+# config/synapse.toml and `max_tokens` is accepted and ignored here. Nothing in
+# scripts/calibrate_prompt.py's measurement path sees them.
+_EXAMPLE_INPUT_MARK = (
+    "=== EXAMPLE {n} · INPUT — an illustration of the format. "
+    "NOT the material you are working on. ==="
+)
+_EXAMPLE_REPLY_MARK = (
+    "=== EXAMPLE {n} · THE REPLY THAT WAS WANTED — shows the shape only. "
+    "It describes a different session; never repeat or paraphrase its content. ==="
+)
+_REQUEST_MARK = (
+    "=== THE MATERIAL TO WORK ON — everything above this line was an example. "
+    "Answer about what follows and about nothing above it. ==="
+)
+
+
+def _flatten_prompt(messages: list[dict[str, Any]]) -> str:
+    """The non-system turns as one string, with the examples marked as examples.
+
+    Leading user/assistant *pairs* are few-shots by construction — that is the
+    only thing `build_messages` puts there — and whatever remains after them is
+    the request. A caller that sends a single user turn (`guards.check_canary`,
+    any ad-hoc probe) has no examples to disambiguate from, so it gets no markers
+    at all and the prompt is byte-identical to what this provider sent before.
+    """
+    turns = [m for m in messages if m.get("role") != "system"]
+
+    blocks: list[str] = []
+    examples = 0
+    index = 0
+    while (
+        index + 1 < len(turns)
+        and turns[index].get("role") == "user"
+        and turns[index + 1].get("role") == "assistant"
+    ):
+        examples += 1
+        blocks.append(_EXAMPLE_INPUT_MARK.format(n=examples))
+        blocks.append(str(turns[index].get("content", "")))
+        blocks.append(_EXAMPLE_REPLY_MARK.format(n=examples))
+        blocks.append(str(turns[index + 1].get("content", "")))
+        index += 2
+
+    rest = [str(m.get("content", "")) for m in turns[index:]]
+    if examples and rest:
+        blocks.append(_REQUEST_MARK)
+    blocks.extend(rest)
+    return "\n\n".join(blocks)
 
 
 class ClaudeCliCallError(RuntimeError):
@@ -140,9 +223,10 @@ class ClaudeCliProvider(ModelProvider):
         # The CLI takes one prompt argument plus an optional appended system
         # prompt, so the roles are split rather than concatenated: folding the
         # system text into the prompt would put the pack's instructions where
-        # the Segment's content belongs.
+        # the Segment's content belongs. The remaining turns are flattened with
+        # their roles preserved as text — see `_flatten_prompt`.
         system = "\n\n".join(m["content"] for m in messages if m.get("role") == "system")
-        prompt = "\n\n".join(m["content"] for m in messages if m.get("role") != "system")
+        prompt = _flatten_prompt(messages)
 
         started = time.perf_counter()
         process = await asyncio.create_subprocess_exec(

@@ -94,8 +94,10 @@ async def test_debug_stats_json_is_read_only_and_touches_no_provider() -> None:
 
 
 async def test_debug_page_has_required_ids() -> None:
+    # ⟨W4a⟩ `/debug` is the brain page now; this page moved verbatim to
+    # `/debug/log`. Same constant, same script -- only the mount changed.
     async with _client(FakeProvider(scripts=[])) as client:
-        r = await client.get("/debug")
+        r = await client.get("/debug/log")
         assert r.status_code == 200
         assert "text/html" in r.headers["content-type"]
         assert 'id="log-tail"' in r.text
@@ -120,6 +122,7 @@ async def test_debug_routes_are_not_mounted_when_debug_is_disabled() -> None:
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
                                  base_url="http://svc") as client:
         assert (await client.get("/debug")).status_code == 404
+        assert (await client.get("/debug/log")).status_code == 404
         assert (await client.get("/debug/stats.json")).status_code == 404
         # The product API routes are unaffected by the flag.
         r = await client.post("/v1/sessions", json={"purpose": "p", "created_by": "s"})

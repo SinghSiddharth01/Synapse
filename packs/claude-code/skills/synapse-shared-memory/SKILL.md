@@ -41,8 +41,41 @@ dead end and why it was one, a decision and its reasoning — call
 through the same distiller as everything else Synapse learns, so a
 careless contribution is caught at the same check as everything else.
 
-There is nothing to attach to and no session id to pass — the server
-already knows which Shared Session this conversation is in from the local
-binding (`synapse-worker join`) made before this conversation connected.
-If this machine hasn't joined one yet, both tools say so plainly and tell
-you the command to run, rather than failing or not existing.
+## Say which conversation you are
+
+Pass `agent_session_id` on every `mcp__synapse__query` and
+`mcp__synapse__contribute` call, set to **this conversation's own session
+id** — Claude Code puts it in `CLAUDE_CODE_SESSION_ID`, and it is the same
+id that appears in this conversation's transcript filename. Pass it to
+`mcp__synapse__create_session` and `mcp__synapse__join_session` too; their
+tool descriptions already ask for it.
+
+This is not bookkeeping. One machine can have several Claude Code windows
+open at once, and each of them is a **different participant** in the Shared
+Session — a teammate to the others, with its own findings to share and its
+own place in the memory. The session id is the only thing that tells them
+apart:
+
+- **Attribution.** A finding you contribute is stamped with the
+  conversation that found it, so the other window sees it as something
+  learned elsewhere rather than as its own echo.
+- **Suppression.** `query` hides findings whose every contribution came
+  from the conversation asking — they are already in this context window.
+  Without the id the server falls back to the machine's most recently
+  joined binding, which is a guess the moment a second window is open, and
+  a wrong guess either hides a sibling window's work or replays your own
+  back at you as team knowledge.
+
+Omit it and nothing errors — the server uses that most-recent binding,
+which is exactly right when only one window is open.
+
+`leave_session` takes it too, and there it is the difference between
+detaching this conversation and detaching every conversation on the machine
+that is in the same Shared Session. Without it there is nothing to tell them
+apart, so it detaches all of them and says so in its result.
+
+There is otherwise nothing to attach to: the server already knows which
+Shared Session this conversation is in from the local binding
+(`synapse-worker join`) made before this conversation connected. If this
+machine hasn't joined one yet, both tools say so plainly and tell you the
+command to run, rather than failing or not existing.

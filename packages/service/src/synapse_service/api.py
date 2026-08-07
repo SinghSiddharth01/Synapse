@@ -24,10 +24,12 @@ from starlette.routing import Route
 from synapse_contracts import Finding, SessionStatus
 from synapse_providers import CallLog, ModelProvider, RecordingProvider
 
-from synapse_service.debug import Feed, debug_routes
+from synapse_service.arrival import SummaryCache
+from synapse_service.debug import Feed, WorkingMemoryLog, debug_routes
 from synapse_service.lanes import DEFAULT_TOP_K
 from synapse_service.log import MarkedTrivial, Merged
-from synapse_service.retrieval import query_findings, visible_to
+from synapse_service.retrieval import (RetrievalUnavailable, query_findings,
+                                       visible_to)
 from synapse_service.store import InMemoryStore
 from synapse_service.synthesis import Synthesizer
 
@@ -65,18 +67,28 @@ MERGE_MIN_INTERVAL_S = float(os.environ.get("SYNAPSE_MERGE_MIN_INTERVAL_S", 60))
 # numbers. Until then the governor degrades gracefully instead of 429ing,
 # which is the same "landed, memory unchanged" symptom by another road.
 #
-# WHAT THIS GOVERNOR DOES NOT SEE, stated because the names above overstate it
-# (2026-08-06 review): retrieval shares the SAME provider object, hence the same
-# key and the same hourly ceiling, and `/query` is never charged to `_spend`.
-# So a team that runs 20 queries and no pushes exhausts the key's request
-# budget while `_affordable()` still answers True, and the next merge 429s
-# inside the provider. That is a real gap and it is deliberately still open:
-# metering retrieval here would let query traffic DEFER synthesis, which is a
-# product decision (whose latency gives way to whose?) and not a bug fix. The
-# constants keep their SYNTHESIS_ prefix to say exactly what they cover. The
-# honest fix is one metered wrapper around the single provider before it is
-# split in two -- with a shared ledger and per-component policy -- and it
-# belongs with service-side persistence, post-demo.
+# ⟨CLOSED 2026-08-06, W3b, decisions/002⟩ This block used to say the governor
+# could not see retrieval, and that leaving it that way was deliberate. It is
+# no longer either. The gap was: retrieval shares the SAME provider object,
+# hence the same key and the same hourly ceiling, and `/query` was never
+# charged, so a team that ran 20 queries and no pushes exhausted the key's
+# request budget while `_affordable()` still answered True and the next merge
+# 429'd inside the provider -- reproducing, from a second cause, the exact
+# "findings landed, memory unchanged" symptom this governor exists to prevent.
+#
+# The reason for leaving it open was that metering retrieval lets query traffic
+# DEFER synthesis, and choosing whose latency gives way is a product decision.
+# That decision is now made, and it is made this way because the alternative
+# was never "synthesis keeps its budget" -- one key does not care which
+# component drained it. The choice was only ever between deferring synthesis
+# with a logged reason and 429ing it without one. A deferred merge says so on
+# the wire (`deferred: true`), keeps every finding queryable, and folds them in
+# next round; a 429 inside AIC100Provider is invisible from here.
+#
+# So `_spend` is now the KEY's ledger, not synthesis's: every entry carries
+# which component spent it. The names keep their SYNTHESIS_ prefix because the
+# numbers are still what the synthesis key allows -- what changed is that
+# everything spending that key is counted against them.
 SYNTHESIS_TOKENS_PER_HOUR = 25_000
 SYNTHESIS_REQUESTS_PER_HOUR = 20
 SYNTHESIS_KEYS = int(os.environ.get("SYNAPSE_SYNTHESIS_KEYS", 1))
@@ -84,6 +96,59 @@ SYNTHESIS_KEYS = int(os.environ.get("SYNAPSE_SYNTHESIS_KEYS", 1))
 # What one round is assumed to cost before we have measured one. Replaced by
 # real usage as soon as a merge reports it -- see `_record_spend`.
 ASSUMED_MERGE_TOKENS = 4_000
+
+# The same figure for a retrieval round, and much smaller because the call is:
+# working memory (~500 words / ~850 tok) + purpose + the query + at most TOP_K
+# one-line candidates (~40 tok each), out to a short list of integer indices.
+# ~1,500 is the arithmetic, not a guess. Used only when the provider reported
+# no usage -- which for AIC100Provider means the call raised, and the tokens
+# went out anyway.
+ASSUMED_QUERY_TOKENS = 1_500
+
+
+def _warn_if_the_key_pool_cannot_pay_for_the_budget(provider: ModelProvider) -> None:
+    """Say so, at boot, when SYNAPSE_SYNTHESIS_KEYS claims capacity the
+    provider's actual key pool does not have.
+
+    ⟨2026-08-06, W3b, decisions/002⟩ ADR 0005 calls multi-key round-robin
+    "dead code at both layers". Re-checked by grep before deleting anything,
+    that is not what it is: `AIC100Provider._post_rotating` is the ONLY POST
+    helper `complete()` uses (both the chat and the schema branch), and it has
+    a passing test; `SYNTHESIS_KEYS` is read by `_affordable` on every push.
+    Both are live. What is true is narrower and worse than dead code — the
+    shipped POOL holds one entry, and `SYNAPSE_SYNTHESIS_KEYS` multiplies the
+    governor's ceiling with nothing checking that the keys exist. Set it to 10
+    against one key and the governor authorises 250,000 tokens/hour that will
+    429 on the 25,001st, which is precisely the "more headroom than there is"
+    reading the setting invites.
+
+    So the misleading part is made loud rather than removed. A pool this
+    function cannot read (FakeProvider, NPUProvider) is silence, not a guess:
+    the only claim worth making here is one that is checked.
+    """
+    pool = getattr(provider, "api_keys", None)
+    if not isinstance(pool, list) or not pool:
+        return
+    if SYNTHESIS_KEYS > len(pool):
+        logger.warning(
+            "SYNAPSE_SYNTHESIS_KEYS=%d but %s holds %d key(s). The governor is "
+            "budgeting %d tokens and %d requests per hour that this pool cannot "
+            "pay for -- the excess does not defer, it 429s inside the provider, "
+            "which reads as 'findings landed, memory unchanged'. Add the keys "
+            "(INFERENCE_CLOUD_API_KEYS, comma-separated) or lower "
+            "SYNAPSE_SYNTHESIS_KEYS to %d.",
+            SYNTHESIS_KEYS, type(provider).__name__, len(pool),
+            SYNTHESIS_TOKENS_PER_HOUR * SYNTHESIS_KEYS,
+            SYNTHESIS_REQUESTS_PER_HOUR * SYNTHESIS_KEYS, len(pool),
+        )
+    elif len(pool) > SYNTHESIS_KEYS:
+        # The harmless direction, and still worth one line: the operator has
+        # paid for capacity the governor is refusing to spend.
+        logger.info(
+            "%s holds %d key(s) but SYNAPSE_SYNTHESIS_KEYS=%d, so the governor "
+            "will defer merges the pool could afford. Raise it to %d.",
+            type(provider).__name__, len(pool), SYNTHESIS_KEYS, len(pool),
+        )
 
 
 def _missing(body: dict, *required: str) -> JSONResponse | None:
@@ -102,47 +167,46 @@ def _missing(body: dict, *required: str) -> JSONResponse | None:
 
 
 def _asking_contributor(source: Mapping[str, str]) -> str:
-    """Who is asking. `contributor` if it is there, `agent_session` if it is
-    not -- one reader for the query body and the watermark query string.
+    """WHO is asking, as a person. `contributor` if it is there,
+    `agent_session` if it is not -- one reader for the query body and the
+    watermark query string.
 
-    ADDITIVE ON PURPOSE (2026-08-06). Suppression and the watermark are now
-    keyed on the Contributor (retrieval.py, store.last_seen), but the field
-    name on the wire cannot simply change: `orchestrator/server.py:141` and
-    `briefing.py:80` are separate processes on other people's laptops, and a
-    hard rename would make every un-upgraded client anonymous -- which does
-    not error, it silently switches their suppression off and resets their
-    watermark. Reading both means an old client keeps exactly the behaviour it
-    has today while a new one gets the re-key, and the two can be deployed in
-    either order.
+    This is the WATERMARK's key (`store.last_seen`/`mark_seen`), and only
+    that, since the 2026-08-06 split (decisions/001): "how much have I not
+    seen" is a fact about a person, and ending one conversation to start
+    another must not reset it. Suppression reads `_asking_agent_session`
+    below instead.
 
-    The `or` chain treats an empty string as absent, which is what makes a
-    client that sends `contributor: ""` for an agent it could not identify
-    fall back to its Agent Session id rather than being lumped in with every
-    other anonymous asker.
+    The `agent_session` fallback is what keeps the wire additive for a client
+    that sends no `contributor` at all: `briefing.py` and an un-upgraded
+    `orchestrator/server.py` run as separate processes on other people's
+    laptops, and reading nothing would make them anonymous -- which does not
+    error, it silently resets their watermark. The `or` chain treats an empty
+    string as absent, so a client that sends `contributor: ""` for an agent it
+    could not identify falls back to its Agent Session id rather than being
+    lumped in with every other anonymous asker.
     """
     return source.get("contributor") or source.get("agent_session") or ""
 
 
-def _legacy_agent_session(source: Mapping[str, str]) -> str | None:
-    """The asker's Agent Session id, but ONLY when this is an un-upgraded
-    client: one that sent `agent_session` and no `contributor` at all.
+def _asking_agent_session(source: Mapping[str, str]) -> str | None:
+    """WHICH CONVERSATION is asking, or None if the request did not say.
 
-    `_asking_contributor` above makes the wire additive; this makes the
-    BEHAVIOUR additive, and without it the second half was silently missing.
-    An old client's `agent_session` value became its identity string and was
-    then compared against `Attribution.contributor`, a field it never matches,
-    so invariant 3 stopped firing for it entirely: its own findings came back
-    as team knowledge, credited to itself. Verified by execution 2026-08-06 --
-    an old-shaped request to a session holding one of its own findings and one
-    teammate's got BOTH back, where the pre-re-key service returned only the
-    teammate's.
+    SUPPRESSION's key since the 2026-08-06 split (decisions/001,
+    retrieval.visible_to): "is this finding already in the context window
+    asking?" is a fact about one conversation, and one machine can now hold
+    several. A request that names none falls back to the Contributor
+    comparison inside `visible_to` -- which is the pre-W2 behaviour for a
+    contributor-only client, and no suppression at all for a wholly anonymous
+    one, since an anonymous asker owns nothing.
 
-    None the moment a `contributor` is present, so an upgraded client is
-    unaffected and the re-key is what runs for it. Transitional by
-    construction: it disappears when the last un-upgraded orchestrator does.
+    Read unconditionally, unlike the `_legacy_agent_session` hatch this
+    REPLACES: that one returned None the moment a `contributor` was present,
+    because the contributor was the key. Now `agent_session` is the key, so an
+    upgraded client sending both gets the conversation comparison, which IS
+    the W2 behaviour -- two windows of one human see each other's findings and
+    still never their own.
     """
-    if source.get("contributor"):
-        return None
     return source.get("agent_session") or None
 
 
@@ -175,6 +239,13 @@ def build_app(provider: ModelProvider, *, debug: bool = True,
     # nothing retains a call/prompt history no one can ever look at.
     call_log = CallLog() if debug else None
     feed = Feed() if debug else None
+    # ⟨W4a, decisions/003⟩ Same gating, same reason, third of a set: the
+    # Finding Log has no entry kind carrying the Working Memory prose, so a
+    # rewrite is overwritten and gone the moment the next merge lands. This
+    # retains the last ten per session so the brain page can show the memory
+    # CHANGING rather than only its current value. Nothing outside /debug
+    # reads it, and it does not exist at all when debug is off.
+    wm_log = WorkingMemoryLog() if debug else None
     synthesis_provider = (
         RecordingProvider(provider, "synthesis", call_log) if debug else provider
     )
@@ -182,6 +253,7 @@ def build_app(provider: ModelProvider, *, debug: bool = True,
         RecordingProvider(provider, "retrieval", call_log) if debug else provider
     )
     synthesizer = Synthesizer(synthesis_provider)
+    _warn_if_the_key_pool_cannot_pay_for_the_budget(provider)
 
     # Debounce state, per session and per app instance -- see
     # MERGE_MIN_INTERVAL_S. `_pending` carries the findings of every deferred
@@ -198,10 +270,27 @@ def build_app(provider: ModelProvider, *, debug: bool = True,
     interval_s = (MERGE_MIN_INTERVAL_S if merge_min_interval_s is None
                   else merge_min_interval_s)
 
-    # (monotonic ts, tokens) per completed synthesis round, last hour. App
-    # scope rather than per session: the ceiling belongs to the KEY, and two
-    # busy sessions share one.
-    _spend: list[tuple[float, int]] = []
+    # (monotonic ts, tokens, component) per model round that actually reached
+    # the provider, last hour. App scope rather than per session: the ceiling
+    # belongs to the KEY, and two busy sessions share one.
+    #
+    # ⟨2026-08-06, W3b⟩ The third element is what closed the metering hole.
+    # `synthesis_provider` and `retrieval_provider` are two RecordingProvider
+    # façades over ONE provider object (below), so they share one key and one
+    # hourly ceiling; a ledger that recorded only merges was describing a
+    # budget nobody was spending from. Tagging rather than splitting into two
+    # lists because the TOKEN and REQUEST ceilings are properties of the key
+    # and must be summed across everything, while merge PRICING must still
+    # look only at merges -- a run of cheap queries must not convince
+    # `_affordable` that the next 70B merge is cheap.
+    _spend: list[tuple[float, int, str]] = []
+
+    # The arrival summary's memo (W5, decisions/004). Closure scope like the
+    # debounce state above and for the same reason: two apps in one test
+    # process must not serve each other's cached summaries. Invalidation is
+    # structural -- the key holds the session's content fingerprint -- so no
+    # route has to remember to clear it; see `SummaryCache`.
+    _summaries = SummaryCache()
 
     def _record_spend() -> None:
         """Charge the round that just ran, at its real cost when the provider
@@ -233,31 +322,94 @@ def build_app(provider: ModelProvider, *, debug: bool = True,
         tokens = ASSUMED_MERGE_TOKENS
         if usage is not None:
             tokens = max(1, usage.input_tokens + usage.output_tokens)
-        _spend.append((time.monotonic(), tokens))
+        _spend.append((time.monotonic(), tokens, "synthesis"))
+
+    def _record_query_spend(usage) -> None:
+        """Charge a retrieval round to the SAME key ledger (W3b).
+
+        `/query` runs a real model call -- `query_findings` -> `retrieval.py`'s
+        `provider.complete` -- against the same object, the same key and the
+        same hourly ceiling synthesis uses. Before this, that spend was
+        invisible to `_affordable()`: twenty queries and no pushes exhausted
+        the key's 20 requests/hour while the governor still authorised the next
+        merge, which then 429'd inside AIC100Provider where the only mitigation
+        is key rotation that a one-key pool cannot perform.
+
+        `usage is None` means the call raised before reporting anything. It is
+        still charged, at ASSUMED_QUERY_TOKENS, for the same reason
+        `_record_spend` charges a failed merge: the request went out.
+
+        ⟨SCOPED 2026-08-06, W3b review⟩ That justification -- "the provider is
+        SHARED, so a retrieval that cannot complete is a merge that could not
+        have completed either" -- is TRUE OF SOME FAILURES AND NOT OTHERS, and
+        the code cannot currently tell them apart:
+
+          - a 5xx or a 429 from the shared endpoint: the argument holds
+            exactly. The key really is spent, and the merge really would fail.
+          - a local transport error (connection refused, DNS, a retrieval
+            backend configured to a host that is down): NOTHING was spent, and
+            the synthesis provider may be perfectly healthy. Charging 1,500
+            still defers merges -- ~17 failed queries against the 25,000/hour
+            ceiling block every merge for the rest of the hour.
+
+        Deliberately kept as one charge anyway, because the alternative is
+        worse in the direction that matters: not charging an un-costed failure
+        re-opens the hole this function exists to close, and the failure it
+        re-opens is silent (429 inside the provider) where this one is loud
+        (a deferral with a reason, naming `retrieval` as the spender). An
+        outage that over-defers is visible and self-correcting within the
+        hour; an outage that under-charges is the "findings landed, memory
+        unchanged" symptom again.
+
+        The one failure class that DID deserve better is now handled upstream:
+        a round that completed and reported usage but whose output failed the
+        schema is charged its REAL cost exactly once (retrieval.py's
+        ⟨CORRECTED⟩ note), not the assumed cost, and not twice.
+
+        If this needs to get smarter, the seam is a failure-kind argument on
+        this callback rather than more inference here -- `retrieval.py` is the
+        only place that knows whether a wire round trip happened.
+        """
+        tokens = ASSUMED_QUERY_TOKENS
+        if usage is not None:
+            tokens = max(1, usage.input_tokens + usage.output_tokens)
+        _spend.append((time.monotonic(), tokens, "retrieval"))
 
     def _affordable() -> tuple[bool, str]:
         """Whether one more synthesis round fits the hour's remaining budget.
 
-        Charges the NEXT round at the most expensive recent one rather than an
-        average: merge cost grows with the candidate listing, so an average
+        Charges the NEXT round at the most expensive recent MERGE rather than
+        an average: merge cost grows with the candidate listing, so an average
         lags the trend and the governor would keep authorising rounds the key
-        can no longer pay for. Requests are checked at 2 per round because
-        AIC100Provider retries once internally, and a failing round -- the
-        expensive kind -- always takes that retry.
+        can no longer pay for. Retrieval rounds are excluded from that pricing
+        on purpose -- they are several times cheaper, and letting a run of
+        queries drag `next_cost` down would price the next 70B merge as if it
+        were a ranking call. They are NOT excluded from the ceilings: those
+        belong to the key, and the key does not care who spent it.
+
+        Requests are checked at 2 per round because AIC100Provider retries once
+        internally, and a failing round -- the expensive kind -- always takes
+        that retry. True of retrieval too: it passes a `response_schema`, which
+        is the branch that retries.
         """
         cutoff = time.monotonic() - 3600
         while _spend and _spend[0][0] < cutoff:
             _spend.pop(0)
-        tokens_spent = sum(t for _, t in _spend)
-        next_cost = max([t for _, t in _spend[-5:]] or [ASSUMED_MERGE_TOKENS])
+        tokens_spent = sum(t for _, t, _c in _spend)
+        merges = [t for _, t, c in _spend if c == "synthesis"]
+        next_cost = max(merges[-5:] or [ASSUMED_MERGE_TOKENS])
         token_budget = SYNTHESIS_TOKENS_PER_HOUR * SYNTHESIS_KEYS
         request_budget = SYNTHESIS_REQUESTS_PER_HOUR * SYNTHESIS_KEYS
         if tokens_spent + next_cost > token_budget:
+            spenders = Counter(c for _, _t, c in _spend)
             return False, (f"token budget: {tokens_spent}+{next_cost} would exceed "
-                           f"{token_budget}/hour across {SYNTHESIS_KEYS} key(s)")
+                           f"{token_budget}/hour across {SYNTHESIS_KEYS} key(s) "
+                           f"({', '.join(f'{n} {c}' for c, n in sorted(spenders.items()))})")
         if (len(_spend) + 1) * 2 > request_budget:
+            spenders = Counter(c for _, _t, c in _spend)
             return False, (f"request budget: {len(_spend)} round(s) this hour against "
-                           f"{request_budget}/hour, 2 requests each worst case")
+                           f"{request_budget}/hour, 2 requests each worst case "
+                           f"({', '.join(f'{n} {c}' for c, n in sorted(spenders.items()))})")
         return True, ""
 
     def _session_or_404(sid: str):
@@ -305,6 +457,13 @@ def build_app(provider: ModelProvider, *, debug: bool = True,
         trivial = [e for e in entries if isinstance(e, MarkedTrivial)]
         trivial_count = sum(len(e.finding_ids) for e in trivial)
         ctx = store.get_context(sid)
+        # `synthesis.merge` does `set_context` then `bump_version`, so the ctx
+        # read here carries the new prose AND the new version together --
+        # which is the whole reason the recorder lives at this one call site
+        # rather than inside synthesis. `WorkingMemoryLog.record` drops an
+        # empty or unchanged text itself, so a verdict that omitted the
+        # rewrite books no revision.
+        wm_log.record(sid, ctx.working_memory, ctx.memory_version)
         feed.event(
             "synthesis",
             f"{sid}: {len(merged)} merge(s), {trivial_count} trivial, "
@@ -603,7 +762,7 @@ def build_app(provider: ModelProvider, *, debug: bool = True,
         if (gate := _unavailable(sid)) is not None:
             return gate
         contributor = _asking_contributor(request.query_params)
-        legacy = _legacy_agent_session(request.query_params)
+        asking_session = _asking_agent_session(request.query_params)
         ctx = store.get_context(sid)
 
         # Round-2 adjudication on watermark suppression, split deliberately
@@ -627,8 +786,15 @@ def build_app(provider: ModelProvider, *, debug: bool = True,
         # content-scoped). E4's briefing composer renders both, and is
         # expected to phrase them as separate signals, not force them to
         # agree.
-        visible = visible_to(store.retrievable(sid), contributor,
-                             asking_agent_session=legacy)
+        #
+        # ⟨SPLIT 2026-08-06, decisions/001⟩ The CONTENT fields suppress by the
+        # asking CONVERSATION and the CHANGE fields still count by the asking
+        # PERSON: `new_since` below reads `store.last_seen(sid, contributor)`,
+        # deliberately unchanged, so ending one conversation and starting
+        # another does not replay the whole memory at you.
+        visible = visible_to(store.retrievable(sid),
+                             asking_agent_session=asking_session,
+                             asking_contributor=contributor)
         by_type = Counter(f.type.value for f in visible)
 
         # A Conflict counts if at least one side is visible to this asker:
@@ -662,6 +828,43 @@ def build_app(provider: ModelProvider, *, debug: bool = True,
             "members": list(store.get_session(sid).members),
         })
 
+    async def arrival(request: Request) -> JSONResponse:
+        """What a JOINER is told (W5). Two parts: what has accumulated, and
+        what is new since this person last read the memory.
+
+        Sits alongside `/watermark` rather than inside it. The watermark is a
+        HEADLINE — counts and a version delta, composed into the MCP server's
+        `instructions` on every connection and refreshed on a timer, so it has
+        to stay small and cheap. This is a body, fetched once, at join, and
+        rendered into a tool result the joining agent reads out loud. Merging
+        them would make every ten-second briefing refresh pay for a summary
+        nobody asked for. `briefing.py` composes its headline within its own
+        hard cap and then appends THIS body, separately capped, so the two
+        surfaces stay separately bounded rather than one growing into the
+        other. (The number in that cap moved in the same branch that wrote this
+        docstring; naming it here would only give it a second place to go
+        stale, so it is named nowhere but `briefing._MAX_BRIEFING_CHARS`.)
+
+        DOES NOT `mark_seen`. Reading the summary is not reading the memory:
+        this route is idempotent, an orchestrator may call it on a join that
+        then fails to bind, and moving somebody's watermark here would mean the
+        first call silently erased the "new since" the second one is for. The
+        watermark still moves where it always did -- on `/query`.
+
+        Identity is read exactly as `/watermark` reads it: `contributor` for
+        the watermark half, `agent_session` for suppression (decisions/001),
+        with the same `_asking_*` fallbacks, so an un-upgraded client that
+        sends only one of them is not anonymous here either.
+        """
+        sid = request.path_params["sid"]
+        if (gate := _unavailable(sid)) is not None:
+            return gate
+        summary = _summaries.get(
+            store, sid,
+            contributor=_asking_contributor(request.query_params),
+            agent_session=_asking_agent_session(request.query_params))
+        return JSONResponse(summary.to_json())
+
     async def query(request: Request) -> JSONResponse:
         sid = request.path_params["sid"]
         if (gate := _unavailable(sid)) is not None:
@@ -670,7 +873,7 @@ def build_app(provider: ModelProvider, *, debug: bool = True,
         if (err := _missing(body, "query")) is not None:
             return err
         contributor = _asking_contributor(body)
-        legacy = _legacy_agent_session(body)
+        asking_session = _asking_agent_session(body)
 
         # Invariant 3 at the lanes seam. `visible_to` stays the ONE definition
         # of the rule (retrieval.py); here it computes what must be EXCLUDED
@@ -682,7 +885,8 @@ def build_app(provider: ModelProvider, *, debug: bool = True,
         # with no model and no prompt cost. What must be bounded is the
         # PROMPT, not the loop.
         visible = store.retrievable(sid)
-        allowed = visible_to(visible, contributor, asking_agent_session=legacy)
+        allowed = visible_to(visible, asking_agent_session=asking_session,
+                             asking_contributor=contributor)
 
         suppressed = frozenset(f.id for f in visible) - {f.id for f in allowed}
         if len(allowed) <= TOP_K:
@@ -722,15 +926,62 @@ def build_app(provider: ModelProvider, *, debug: bool = True,
             cands = store.candidates(sid, body["query"], top_k=TOP_K, exclude=suppressed)
             candidates = [c.finding for c in cands.candidates]
 
-        ranked = await query_findings(
-            retrieval_provider,
-            context=store.get_context(sid),
-            candidates=candidates,
-            query=body["query"],
-            asking_contributor=contributor,
-            asking_agent_session=legacy,
-        )
-        store.mark_seen(sid, contributor)
+        # THE WATERMARK IS TAKEN HERE, not after the await below. `candidates`
+        # is now fixed, so this is the instant the asker's view of the memory
+        # was decided; `query_findings` is a model call that docs/FLOW.md
+        # measures at 12.6–52.8 seconds, and every finding a teammate pushes
+        # inside that window belongs to the asker's NEXT read, not this one.
+        # Reading the position after the await marked those findings seen by
+        # somebody who was never shown them — and `_seen_count` is an arrival
+        # index, so they were dropped from that person's "new since" slice for
+        # good rather than until the next round (store.mark_seen's `at=`).
+        position = store.read_position(sid)
+        try:
+            ranked = await query_findings(
+                retrieval_provider,
+                context=store.get_context(sid),
+                candidates=candidates,
+                query=body["query"],
+                asking_agent_session=asking_session,
+                asking_contributor=contributor,
+                # THE METERING SEAM (W3b). Fires inside `query_findings`, on
+                # the success AND the failure path, so the charge lands even
+                # when this handler is about to return a 503 -- a retrieval
+                # that burned the key and then raised is the single most
+                # expensive round there is, and the one most worth counting.
+                on_usage=_record_query_spend,
+            )
+        except RetrievalUnavailable as exc:
+            # 503, not 502: this service is healthy and its DEPENDENCY is not.
+            # Relay's 5xx-retryable classification never sees this — Relay only
+            # posts /findings, never /query.
+            #
+            # Two side effects here are load-bearing and both are achieved by
+            # control flow rather than by a flag: `store.mark_seen` below is
+            # NOT reached, so a query that returned nothing does not advance
+            # the asker's watermark (they did not see anything, so the next
+            # briefing must still call it new); and the debug feed gets a
+            # DISTINCT event, so /debug shows a dead brain as dead instead of
+            # as a quiet query that ranked zero.
+            if feed is not None:
+                feed.event(
+                    "query_failed",
+                    f"{sid}: retrieval provider {exc.provider_id} DOWN — "
+                    f"{exc.cause_name}",
+                    session=sid,
+                    asked_by=contributor or "anonymous",
+                    provider=exc.provider_id,
+                    cause=exc.cause_name,
+                )
+            return JSONResponse(
+                {"error": "retrieval_unavailable", "provider": exc.provider_id,
+                 "detail": str(exc)},
+                status_code=503)
+        # By CONTRIBUTOR, unchanged by the split: the watermark is a fact
+        # about a person, so a query from either of one human's windows moves
+        # the place they resume from. `at=` is the position snapshotted before
+        # the ranking call, not the position now — see above.
+        store.mark_seen(sid, contributor, at=position)
         if feed is not None:
             # Counts alone could not answer "what did the asker actually get
             # back?", which is the only thing an operator watching a query
@@ -748,6 +999,12 @@ def build_app(provider: ModelProvider, *, debug: bool = True,
                 # `d.asked_by` (debug.py:549) and this is a Contributor now,
                 # which is what an operator wanted to read there anyway.
                 asked_by=contributor or "anonymous",
+                # ⟨W4a⟩ ...and the Agent Session alongside it, which was in
+                # scope and discarded. It is what makes the brain page's "last
+                # query" a fact about THIS CONVERSATION rather than about the
+                # person -- the distinction W2 made real, and the one the page
+                # labels explicitly when it has to fall back.
+                asked_by_session=asking_session,
                 candidates=len(candidates),
                 ranked=len(ranked),
                 suppressed=withheld,
@@ -768,14 +1025,18 @@ def build_app(provider: ModelProvider, *, debug: bool = True,
         Route("/v1/sessions/{sid}/findings", push_findings, methods=["POST"]),
         Route("/v1/sessions/{sid}/synthesize", synthesize, methods=["POST"]),
         Route("/v1/sessions/{sid}/watermark", watermark, methods=["GET"]),
+        Route("/v1/sessions/{sid}/arrival", arrival, methods=["GET"]),
         Route("/v1/sessions/{sid}/query", query, methods=["POST"]),
     ]
     if debug:
-        routes.extend(debug_routes(store, call_log, feed))
+        routes.extend(debug_routes(store, call_log, feed, wm_log))
 
     app = Starlette(routes=routes)
     app.state.store = store          # test seam: no route reads it
     # test seam: lets a test confirm no CallLog exists at all when debug is
     # disabled (not merely that it's unreachable) -- no route reads this.
     app.state.call_log = call_log
+    # Same seam, same reason: a disabled dashboard must not leave a ring of
+    # Working Memory prose retained where nothing can read it.
+    app.state.working_memory_log = wm_log
     return app
