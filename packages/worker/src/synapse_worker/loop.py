@@ -43,7 +43,8 @@ from synapse_distiller import Distiller
 from synapse_distiller.guards import PromptDropError
 
 from synapse_worker.compaction import compact
-from synapse_worker.discovery import has_per_session_bindings, resolve_agent_binding
+from synapse_worker.discovery import (has_per_session_bindings, resolve_agent_binding,
+                                      session_dirname)
 from synapse_worker.discovery import AGENT_REGISTRY
 from synapse_worker.follower import TranscriptFollower
 from synapse_worker.limiter import SeamLimiter
@@ -172,7 +173,43 @@ class WorkerLoop:
         # `rollout-<ts>-<uuid>.jsonl`). See `_sync_binding_from_disk`.
         self.session_identified = session_identified
 
-        self.follower = TranscriptFollower(self.state_dir / "follow-state.json")
+        # PER-CONVERSATION state, namespaced by Agent Session (2026-08-07).
+        #
+        # These three files — follow-state, pending events, deferred segments —
+        # are the loop's own view of ONE conversation, and `_persist_state`
+        # rewrites each of them WHOLESALE from that view. At the state_dir root
+        # they were shared by every `run` on the machine, which is exactly the
+        # topology this worker documents as the answer to two windows
+        # (`cli.py`: "two windows on one machine are therefore two `run`
+        # processes"). Two such processes clobbered each other three ways:
+        #
+        #  - follow-state: each loop saves only its OWN FollowState, so the
+        #    other's offset key is deleted and that transcript is re-read from
+        #    byte 0 on restart — the full re-distil `follower.py` refuses to
+        #    risk — or a stale offset is restored over real progress.
+        #  - pending-events: worse than loss. `_restore_pending` feeds whatever
+        #    survived into THIS loop's segmenter, so the other conversation's
+        #    half-turn is segmented here and stamped with THIS
+        #    `agent_session_id` — one conversation's words attributed to
+        #    another.
+        #  - deferred-segments: segments whose bytes are already behind the
+        #    follower's offset, so dropping them is losing conversation with no
+        #    way to re-read it (module docstring, top of this file).
+        #
+        # `triage-skips.jsonl` and the WAL stay at the root deliberately: both
+        # are append-only and `Finding.id`-idempotent, so sharing them across
+        # conversations is safe and keeps one readable audit trail.
+        #
+        # Migration is a non-event: an existing root-level follow-state is
+        # simply not found, and the loop attaches at EOF like any first run.
+        # Nothing is re-distilled and nothing is lost, because anything still
+        # pending at the root was already unreadable for whichever process did
+        # not write it last.
+        self.session_state_dir = (
+            self.state_dir / "sessions" / session_dirname(binding.agent_session_id))
+        self.session_state_dir.mkdir(parents=True, exist_ok=True)
+
+        self.follower = TranscriptFollower(self.session_state_dir / "follow-state.json")
         # Dispatched through AGENT_REGISTRY rather than hard-coded, so a
         # transcript resolved (or explicitly requested) for a registered
         # agent other than Claude Code is actually parsed by ITS adapter —
@@ -192,11 +229,11 @@ class WorkerLoop:
         # configured one. See limiter.py for the numbers and why.
         self.limiter = limiter if limiter is not None else SeamLimiter()
 
-        self._pending_path = self.state_dir / "pending-events.json"
+        self._pending_path = self.session_state_dir / "pending-events.json"
         # Segments drained but not yet distilled, oldest first. On disk for the
         # same reason `pending-events.json` is: their bytes are already behind
         # the follower's offset, so losing them is losing conversation.
-        self._deferred_path = self.state_dir / "deferred-segments.json"
+        self._deferred_path = self.session_state_dir / "deferred-segments.json"
         self._deferred: list[Segment] = []
         self._restore_pending()
         self._restore_deferred()

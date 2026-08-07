@@ -744,3 +744,72 @@ def test_two_codex_conversations_bind_separately_through_the_join_path(
     # And nothing was invented for the product that has no live conversation.
     assert read_binding(binding_path_for_agent(state_dir, "claude-code")) is None
     assert not binding_dir_for_agent(state_dir, "claude-code").exists()
+
+
+# ---------------------------------------------------------------------------
+# two loops, one state dir: the durable state must not be shared
+# ---------------------------------------------------------------------------
+
+async def test_two_loops_on_one_state_dir_do_not_clobber_each_others_state(tmp_path) -> None:
+    """The topology this worker DOCUMENTS as the answer to two windows —
+    `cli.py`: "two windows on one machine are therefore two `run` processes" —
+    silently corrupted itself until 2026-08-07.
+
+    `follow-state.json`, `pending-events.json` and `deferred-segments.json` are
+    one conversation's view, and `_persist_state` rewrites each WHOLESALE. At
+    the state_dir root, two `run` processes shared all three: whichever saved
+    last deleted the other's follower offset, so that transcript was re-read
+    from byte 0 on restart — the full re-distil `follower.py` refuses to risk.
+
+    The pending-events case is worse than loss and is why this asserts the
+    OFFSETS rather than just "two directories exist": `_restore_pending` feeds
+    whatever survived into the restoring loop's segmenter, which stamps it with
+    that loop's `agent_session_id`. One conversation's words, attributed to
+    another — invisible afterwards, because the finding looks perfectly valid.
+
+    Two loops, two transcripts of DIFFERENT lengths, one state dir. Each must
+    end up remembering its own position and nothing about the other's."""
+    state_dir = tmp_path / "state"
+    pack = load_pack_by_name("v4-condense")
+
+    def loop_for(session: str, transcript: Path):
+        binding = LocalBinding(agent_session_id=session, shared_id="sh-1",
+                               contributor="akhil", agent="claude-code")
+        return WorkerLoop(
+            transcript=transcript,
+            distiller=Distiller(FakeProvider(scripts=[]), binding, pack,
+                                ["text"], "labelled"),
+            producer=Producer(state_dir / "wal",
+                              FileSink(tmp_path / f"upstream-{session}.jsonl")),
+            binding=binding,
+            state_dir=state_dir,
+            budget_tokens=5000,
+        )
+
+    ta, tb = tmp_path / "a.jsonl", tmp_path / "b.jsonl"
+    ta.write_text('{"type":"user"}\n', encoding="utf-8")
+    tb.write_text('{"type":"user"}\n' * 4, encoding="utf-8")
+
+    loop_a, loop_b = loop_for(SESSION_A, ta), loop_for(SESSION_B, tb)
+    assert loop_a.session_state_dir != loop_b.session_state_dir
+
+    # Both read their own transcript to its end, then both persist — B second,
+    # so a shared file would leave B's view as the only survivor.
+    await loop_a.tick()
+    await loop_b.tick()
+
+    offsets_a = json.loads(
+        (loop_a.session_state_dir / "follow-state.json").read_text(encoding="utf-8"))["offsets"]
+    offsets_b = json.loads(
+        (loop_b.session_state_dir / "follow-state.json").read_text(encoding="utf-8"))["offsets"]
+
+    assert str(ta) in offsets_a, "window A lost its own offset"
+    assert str(tb) in offsets_b, "window B lost its own offset"
+    assert str(tb) not in offsets_a, "window B's position leaked into window A's state"
+    assert str(ta) not in offsets_b, "window A's position leaked into window B's state"
+    assert offsets_a[str(ta)] != offsets_b[str(tb)], (
+        "the two transcripts differ in length, so equal offsets mean one view "
+        "overwrote the other rather than each tracking its own file")
+
+    # A fresh process over the same state dir resumes A's position, not B's.
+    assert loop_for(SESSION_A, ta).follower.state.offsets.get(str(ta)) == offsets_a[str(ta)]

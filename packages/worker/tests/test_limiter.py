@@ -257,7 +257,10 @@ async def test_the_deferred_queue_survives_a_restart(tmp_path) -> None:
 
     first = await loop.tick()
     assert first.deferred == 2
-    assert (tmp_path / "state" / "deferred-segments.json").is_file()
+    # Per-conversation since 2026-08-07 — asserted through the loop rather than
+    # by rebuilding the path here, so this keeps testing "it is on disk" and not
+    # "it is at the layout I happened to type".
+    assert (loop.session_state_dir / "deferred-segments.json").is_file()
 
     # A whole new loop over the same state directory: the process died.
     revived, _, provider = build(
@@ -334,7 +337,7 @@ async def test_shutdown_requeues_what_the_provider_could_not_distil(tmp_path) ->
     # 3 deferred + the trailing open turn = 4 segments shutdown could not distil.
     assert len(loop._deferred) == 4, "a failed segment was dropped, not re-queued"
     on_disk = json.loads(
-        (tmp_path / "state" / "deferred-segments.json").read_text(encoding="utf-8"))
+        (loop.session_state_dir / "deferred-segments.json").read_text(encoding="utf-8"))
     assert len(on_disk) == 4, "the backlog did not survive to the next run"
 
     # And a fresh loop over the same state dir picks them back up.

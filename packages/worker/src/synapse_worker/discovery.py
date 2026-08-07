@@ -469,6 +469,20 @@ def binding_dir_for_agent(state_dir: Path, agent: str) -> Path:
 _UNSAFE_IN_FILENAME = re.compile(r"[^A-Za-z0-9._-]")
 
 
+def session_dirname(agent_session_id: str) -> str:
+    """An Agent Session id, safe to use as ONE path component.
+
+    Split out of `binding_path_for_session` (2026-08-07) because bindings are
+    no longer the only per-conversation thing on disk: the worker loop's
+    follow-state, pending events and deferred segments are per-conversation
+    too, and they must agree with the bindings directory about how an id
+    becomes a filename — otherwise the two halves name the same conversation
+    differently and nothing lines up when a human reads the state dir. Pure;
+    the substitution rationale in the comment above applies unchanged.
+    """
+    return _UNSAFE_IN_FILENAME.sub("_", agent_session_id)
+
+
 def binding_path_for_session(state_dir: Path, agent: str, agent_session_id: str) -> Path:
     """`bindings/<agent>/<agent_session_id>.json` — the per-session binding.
 
@@ -476,8 +490,7 @@ def binding_path_for_session(state_dir: Path, agent: str, agent_session_id: str)
     one machine now produce two files instead of one window clobbering the
     other's.
     """
-    stem = _UNSAFE_IN_FILENAME.sub("_", agent_session_id)
-    return binding_dir_for_agent(state_dir, agent) / f"{stem}.json"
+    return binding_dir_for_agent(state_dir, agent) / f"{session_dirname(agent_session_id)}.json"
 
 
 def _pinned_at_key(binding: SessionBinding) -> datetime:
