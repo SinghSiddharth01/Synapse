@@ -47,6 +47,18 @@ def _say(line: str = "") -> None:
     print(line, flush=True)
 
 
+def _ask(prompt: str) -> str:
+    """input(), with Ctrl-D meaning "no answer" — the caller's skip path
+    applies, same as an empty Enter. Ctrl-C is deliberately NOT caught here:
+    abandoning the whole command is main()'s job (exit 130), never a
+    traceback."""
+    try:
+        return input(prompt).strip()
+    except EOFError:
+        _say()          # move past the prompt line Ctrl-D left open
+        return ""
+
+
 def read_keys_file(path: Path) -> list[str]:
     """One key per line; blanks and #-comments ignored; order preserved
     (rotation starts at the first). Loud, specific errors — this is the one
@@ -146,7 +158,7 @@ def cmd_configure(args: argparse.Namespace) -> int:
     if keys_path is None and not userconfig.get("server.keys_file") and interactive:
         _say("Path to your API keys file (one key per line — the same file "
              "can hold the whole team's pool):")
-        keys_path = input("server.keys_file: ").strip() or None
+        keys_path = _ask("server.keys_file: ") or None
     if keys_path:
         resolved = Path(keys_path).expanduser().resolve()
         keys = read_keys_file(resolved)      # validates before storing
@@ -374,7 +386,20 @@ def main(argv: list[str] | None = None) -> int:
     health.set_defaults(func=cmd_health)
 
     args = parser.parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except KeyboardInterrupt:
+        # Ctrl-C at the configure prompt or during the key preflight probes
+        # is a normal way to leave, not a crash: newline past the echoed ^C,
+        # exit 130 (128+SIGINT), never a traceback. Once uvicorn is serving
+        # (`up`), SIGINT is its graceful shutdown and returns here normally.
+        print(file=sys.stderr)
+        return 130
+    except BrokenPipeError:
+        # `synapse-server health --json | jq .` closing the pipe early is
+        # routine, not an error: exit 141 (128+SIGPIPE), quietly.
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        return 141
 
 
 if __name__ == "__main__":

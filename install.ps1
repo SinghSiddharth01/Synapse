@@ -22,11 +22,12 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet('client', 'server')]
+    [ValidateSet('client', 'server', 'uninstall')]
     [string]$Component = 'client',
     [string]$Tag = '',
     [string]$Local = '',
-    [switch]$Update
+    [switch]$Update,
+    [switch]$KeepConfig
 )
 
 $ErrorActionPreference = 'Stop'
@@ -35,6 +36,89 @@ $RepoSlug = 'SinghSiddharth01/Synapse'
 function Say([string]$Line) { Write-Host $Line }
 function Step([string]$Line) { Write-Host "`n==> $Line" }
 function Die([string]$Line) { Write-Error "install.ps1: $Line"; exit 1 }
+
+if ($KeepConfig -and $Component -ne 'uninstall') {
+    Die "-KeepConfig only applies to -Component uninstall"
+}
+
+# ---------------------------------------------------------------------------
+# U -- uninstall: the mirror of install, plus config removal. Same shape and
+# same amendment as install.sh's uninstall (see that script and
+# docs/plans/2026-08-06-uninstall-mechanism.md): the state dir is REMOVED by
+# default -- a reinstall that silently inherits a stale service.url from a
+# surviving config.toml is the failure this exists to end. -KeepConfig
+# preserves it for an upgrade. Pack/MCP entries are listed, never deleted.
+# ---------------------------------------------------------------------------
+if ($Component -eq 'uninstall') {
+    Say "Synapse uninstaller"
+    $SynHome = if ($env:SYNAPSE_HOME) { $env:SYNAPSE_HOME } else { Join-Path $env:USERPROFILE '.synapse' }
+
+    Step "U1  stop running Synapse processes"
+    # By OUR ports only (8787 orchestrator, 8790 worker dashboard, 8899 local
+    # service) -- never by name, and never geniex (:18181).
+    $stopped = $false
+    foreach ($spec in @(@(8787, 'orchestrator'), @(8790, 'edge-worker'), @(8899, 'service'))) {
+        $port, $label = $spec
+        $conns = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
+        foreach ($pid_ in ($conns | Select-Object -ExpandProperty OwningProcess -Unique)) {
+            Stop-Process -Id $pid_ -Force -ErrorAction SilentlyContinue
+            Say "  stopped   $label (:$port)"
+            $stopped = $true
+        }
+    }
+    if (-not $stopped) { Say "  nothing running on :8787/:8790/:8899" }
+
+    Step "U2  remove installed tools"
+    $removed = $false
+    if (Get-Command uv -ErrorAction SilentlyContinue) {
+        $tools = (& uv tool list 2>$null) -join "`n"
+        foreach ($tool in @('synapse-cli', 'synapse-service')) {
+            if ($tools -match "(?m)^$([regex]::Escape($tool)) ") {
+                & uv tool uninstall $tool
+                Say "  removed   $tool"
+                $removed = $true
+            }
+        }
+    }
+    if (-not $removed) { Say "  no synapse uv tools installed -- nothing to remove" }
+
+    Step "U3  config and state"
+    if (Test-Path $SynHome) {
+        if ($KeepConfig) {
+            Say "  kept      $SynHome (-KeepConfig)"
+        } else {
+            Say "  removing  $SynHome -- config.toml, session bindings, the"
+            Say "            write-ahead log, and logs go with it. (-KeepConfig"
+            Say "            preserves it for a reinstall/upgrade.)"
+            Remove-Item -Recurse -Force $SynHome
+            Say "  removed   $SynHome"
+        }
+    } else {
+        Say "  no $SynHome -- nothing to remove"
+    }
+
+    Step "U4  left in place -- yours, listed with the removal command"
+    $claudeDir = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $env:USERPROFILE '.claude' }
+    $left = $false
+    foreach ($kind in @('skills', 'commands', 'agents')) {
+        $entries = Get-ChildItem -Path (Join-Path $claudeDir $kind) -Filter 'synapse*' -ErrorAction SilentlyContinue
+        foreach ($entry in $entries) {
+            Say "  pack      $($entry.FullName)"
+            Say "            Remove-Item -Recurse '$($entry.FullName)'"
+            $left = $true
+        }
+    }
+    if (Get-Command claude -ErrorAction SilentlyContinue) {
+        Say "  mcp       if 'synapse' is registered (user scope or per project):"
+        Say "            claude mcp remove synapse"
+        $left = $true
+    }
+    if (-not $left) { Say "  none found" }
+
+    Say ""
+    Say "Uninstalled."
+    exit 0
+}
 
 Say "Synapse installer -- $Component"
 $arch = $env:PROCESSOR_ARCHITECTURE

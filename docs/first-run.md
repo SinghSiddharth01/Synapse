@@ -97,11 +97,15 @@ With no flags a stand-in answers locally. It only knows this repo's fixture corp
 
 ## 5. Connect Claude Code
 
-From whatever project you want shared memory in:
+Once, for every project on your machine (user scope — the default
+`synapse configure` offers):
 
 ```bash
-claude mcp add --transport http --scope project synapse http://127.0.0.1:8787/mcp
+claude mcp add --transport http --scope user synapse http://127.0.0.1:8787/mcp
 ```
+
+(`--scope project` from inside one project writes its committable `.mcp.json`
+instead, if the team wants the registration shared through the repo.)
 
 Then start a **new** Claude Code session and **approve** the server when it asks. `claude mcp list` should say `✔ Connected  synapse`; `/mcp` inside the session shows the same. Already registered and showing "failed"? Pick Reconnect in `/mcp`.
 

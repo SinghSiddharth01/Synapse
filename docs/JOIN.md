@@ -82,11 +82,15 @@ scripts/serve_local.py` is unchanged — see the README's Developing section.)*
 
 ## 4. Connect Claude Code
 
-From whatever project you want shared memory in:
+Once, for every project on your machine (user scope — the default
+`synapse configure` offers):
 
 ```bash
-claude mcp add --transport http --scope project synapse http://127.0.0.1:8787/mcp
+claude mcp add --transport http --scope user synapse http://127.0.0.1:8787/mcp
 ```
+
+(To share the registration with teammates through one project's committed
+`.mcp.json` instead, use `--scope project` from inside that project.)
 
 Then start a **new** Claude Code session and **approve** the server when it
 asks. `claude mcp list` should say `✔ Connected  synapse`.

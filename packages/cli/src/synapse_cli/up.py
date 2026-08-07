@@ -166,12 +166,14 @@ def cmd_up(args: argparse.Namespace) -> int:
     _say(f"identity   {contributor}  (findings are attributed to this name)")
     if worker is not None:
         _say(f"worker     idling until a session is joined "
-             f"(log: {procs.log_path('worker')})")
+             f"(dashboard: http://127.0.0.1:{stack.WORKER_DEBUG_PORT}/debug, "
+             f"log: {procs.log_path('worker')})")
     _say()
-    _say("  In the project you want shared memory in (once per project):")
-    _say(f"    claude mcp add --transport http --scope project synapse "
+    _say("  Register the MCP server once for your user (all projects):")
+    _say(f"    claude mcp add --transport http --scope user synapse "
          f"{ORCHESTRATOR_URL}/mcp")
-    _say("  …or `synapse configure --project <dir>` does it for you.")
+    _say("  …or `synapse configure` offers it; `--project <dir>` registers "
+         "one project instead.")
     _say()
     _say("  Sessions are managed FROM YOUR AGENT, not from here — in a "
          "connected conversation:")

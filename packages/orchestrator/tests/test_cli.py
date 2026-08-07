@@ -1033,3 +1033,14 @@ def test_main_attaches_the_briefing_refresher_so_it_does_not_stay_a_boot_snapsho
 def cli_server_instructions(app) -> str | None:
     """The instructions string the next MCP client would receive."""
     return app.state.synapse_mcp._mcp_server.instructions
+
+
+def test_main_ctrl_c_exits_quietly(monkeypatch) -> None:
+    """Ctrl-C during boot or resync (before uvicorn's own SIGINT handling
+    exists) must not escape main() as a traceback: exit 130 (128+SIGINT)."""
+
+    async def _interrupted(args, *, transport=None):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "cmd_resync", _interrupted)
+    assert cli.main(["resync"]) == 130

@@ -1,4 +1,21 @@
-# Uninstall mechanism — design, parked for later
+# Uninstall mechanism — design (IMPLEMENTED 2026-08-06, with one amendment)
+
+Status (2026-08-06, later the same day): **implemented** as
+`install.sh uninstall` / `install.ps1 -Component uninstall`, per the decided
+shape below — with one deliberate amendment by the owner: **`~/.synapse` is
+REMOVED by default**, not kept. The keep-by-default design met reality within
+hours of being written: `uv tool uninstall` + reinstall silently inherited the
+previous machine's `service.url` from the surviving config.toml, which reads
+as a bug, not a convenience. `--keep-config` / `-KeepConfig` preserves it for
+the reinstall/upgrade intent; the plan's `--purge` flag is therefore gone
+(purge is the default; keeping is the flag). Everything else is as decided:
+processes stopped by our own ports only, `uv tool uninstall` absent-is-fine,
+pack/MCP entries listed with removal commands and never deleted. CI's
+uninstall leg and the README acceptance items below remain open.
+
+Original design follows.
+
+---
 
 Status (2026-08-06): **no first-class uninstall exists.** Because both halves
 install as isolated uv tools, removal of the software itself already works:

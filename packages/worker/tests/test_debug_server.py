@@ -52,7 +52,7 @@ def test_stats_json_matches_a_fresh_snapshot_and_stays_read_only_across_gets() -
             assert "json" in content_type
             payload = json.loads(body)
             assert payload["events"][0]["tag"] == "tick"
-            assert set(payload) == {"now", "current", "ticks", "events", "llm"}
+            assert set(payload) == {"now", "phase", "current", "ticks", "events", "llm"}
             got = dict(payload)
             got.pop("now")
             assert got == before
@@ -124,3 +124,31 @@ def test_stop_frees_the_port() -> None:
         raise AssertionError("expected the connection to be refused")
     except (urllib.error.URLError, ConnectionRefusedError):
         pass
+
+
+def test_transcript_can_be_bound_after_start() -> None:
+    """Under --wait-for-binding the worker idles long before it knows which
+    transcript it follows; the page must pick up a transcript set after
+    start() rather than baking "(no transcript bound)" in forever."""
+    stats = StatsBuffer(CallLog())
+    server = DebugServer(stats, 0)
+    port = server.start()
+    try:
+        _, _, page = _get(f"http://127.0.0.1:{port}/debug")
+        assert "(no transcript bound)" in page
+
+        server.transcript = "/tmp/sess.jsonl"
+        _, _, page = _get(f"http://127.0.0.1:{port}/debug")
+        assert "/tmp/sess.jsonl" in page
+    finally:
+        server.stop()
+
+
+def test_snapshot_carries_the_phase() -> None:
+    """/debug/stats.json is the worker's liveness signal; the phase is what
+    lets a prober tell "idling, waiting for a session" from "following" —
+    and from dead, which is the whole point."""
+    stats = StatsBuffer(CallLog(), phase="waiting for a session")
+    assert stats.snapshot()["phase"] == "waiting for a session"
+    stats.phase = "following"
+    assert stats.snapshot()["phase"] == "following"

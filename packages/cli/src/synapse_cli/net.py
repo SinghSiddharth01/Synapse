@@ -78,6 +78,13 @@ def ping_worker(port: int, host: str = "127.0.0.1",
         return False, f"not a Synapse worker — :{port} answered unparseably ({exc})"
     if not isinstance(payload, dict) or "ticks" not in payload:
         return False, f"not a Synapse worker — something else holds :{port}"
+    # `phase` (worker/stats.py) says what an alive worker is DOING: a worker
+    # under `synapse up` idles ("waiting for a session") until one is joined,
+    # and before the phase existed that state was invisible — the port only
+    # bound after a join, so health called a healthy idle worker dead.
+    phase = payload.get("phase")
+    if isinstance(phase, str) and phase and phase != "following":
+        return True, f"alive — {phase}"
     ticks = payload.get("ticks") or []
     return True, f"following transcripts — {len(ticks)} tick(s) recorded"
 

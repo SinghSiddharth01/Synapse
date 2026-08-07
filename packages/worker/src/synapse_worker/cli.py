@@ -50,6 +50,7 @@ from synapse_distiller import (
     load_config,
     load_pack_by_name,
 )
+from synapse_distiller.promptpack import PromptPackError
 from synapse_providers import CallLog, NPUProvider, RecordingProvider
 
 from synapse_worker.debug_server import DebugServer
@@ -250,7 +251,8 @@ def _other_bound_agents(state_dir: Path, followed_agent: str) -> list[str]:
     return others
 
 
-def _build(args: argparse.Namespace, debug_port: int = 0):
+def _build(args: argparse.Namespace, debug_port: int = 0,
+           stats: StatsBuffer | None = None):
     config = load_config()
     worker_cfg = config.worker
     state_dir = Path(worker_cfg.state_dir)
@@ -295,12 +297,13 @@ def _build(args: argparse.Namespace, debug_port: int = 0):
     # Debug instrumentation only exists when the dashboard is enabled -- an
     # untouched provider stays untouched, and RecordingProvider is transparent
     # (same result, exceptions re-raised) so this changes nothing else about
-    # what the distiller does.
-    stats: StatsBuffer | None = None
-    if debug_port:
-        call_log = CallLog()
-        stats = StatsBuffer(call_log)
-        distiller.provider = RecordingProvider(distiller.provider, "distiller", call_log)
+    # what the distiller does. cmd_run may have built the buffer already (the
+    # dashboard has to serve while the worker idles under --wait-for-binding,
+    # long before this function runs) -- stats.llm is its CallLog either way.
+    if debug_port and stats is None:
+        stats = StatsBuffer(CallLog())
+    if stats is not None:
+        distiller.provider = RecordingProvider(distiller.provider, "distiller", stats.llm)
 
     loop = WorkerLoop(
         transcript=transcript,
@@ -418,9 +421,42 @@ def _wait_for_binding(args: argparse.Namespace) -> None:
 
 async def cmd_run(args: argparse.Namespace) -> int:
     debug_port = _resolve_debug_port(args)
+
+    # The dashboard binds BEFORE any waiting: /debug/stats.json is the only
+    # liveness signal the worker has (net.ping_worker — what `synapse health`
+    # parses), and under --wait-for-binding the wait below can last forever.
+    # Binding it only after a session joined made `synapse health` report a
+    # healthy, deliberately-idle worker as "died after start" (2026-08-06).
+    # The dashboard is optional instrumentation; the transcript work is not.
+    # Binding can fail with a plain OSError -- e.g. two `run`s on the same
+    # machine racing for the default 8790, or a stale worker still holding it
+    # -- and that must not abort the core command.
+    stats: StatsBuffer | None = None
+    debug_server: DebugServer | None = None
+    if debug_port:
+        stats = StatsBuffer(CallLog())
+        debug_server = DebugServer(stats, debug_port)
+        try:
+            bound_port = debug_server.start()
+        except OSError as exc:
+            print(f"debug            disabled -- failed to bind port {debug_port}: {exc}",
+                  file=sys.stderr)
+            debug_server = None
+        else:
+            print(f"debug            http://127.0.0.1:{bound_port}/debug")
+    else:
+        print("debug            disabled (--debug-port 0)")
+
     if getattr(args, "wait_for_binding", False) and not args.transcript:
+        if stats is not None:
+            stats.phase = "waiting for a session"
         _wait_for_binding(args)
-    config, loop, transcript, _, source, stats = _build(args, debug_port)
+        if stats is not None:
+            stats.phase = "following"
+
+    config, loop, transcript, _, source, stats = _build(args, debug_port, stats=stats)
+    if debug_server is not None:
+        debug_server.transcript = str(transcript)
     interval = args.interval or config.worker.poll_interval_seconds
 
     print(config.describe())
@@ -440,26 +476,7 @@ async def cmd_run(args: argparse.Namespace) -> int:
     print(f"poll interval    {interval}s")
     print(f"idle flush       {config.worker.idle_flush_seconds}s")
     print(f"sink             {config.worker.sink}")
-    print(f"state            {config.worker.state_dir}")
-
-    debug_server: DebugServer | None = None
-    if debug_port:
-        debug_server = DebugServer(stats, debug_port, transcript=str(transcript))
-        # The dashboard is optional instrumentation; the transcript work is
-        # not. Binding can fail with a plain OSError -- e.g. two `run`s on
-        # the same machine racing for the default 8790, or a stale worker
-        # still holding it (the multi-agent case `resolve_binding_for_agent`
-        # exists for is real) -- and that must not abort the core command.
-        try:
-            bound_port = debug_server.start()
-        except OSError as exc:
-            print(f"debug            disabled -- failed to bind port {debug_port}: {exc}\n",
-                  file=sys.stderr)
-            debug_server = None
-        else:
-            print(f"debug            http://127.0.0.1:{bound_port}/debug\n")
-    else:
-        print("debug            disabled (--debug-port 0)\n")
+    print(f"state            {config.worker.state_dir}\n")
 
     # The prompt-drop guard, once, before any transcript content is processed.
     # A model that has stopped reading its prompt would otherwise write invented
@@ -482,7 +499,11 @@ async def cmd_run(args: argparse.Namespace) -> int:
 
     try:
         await loop.run(interval_seconds=interval, max_ticks=args.ticks)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        # Ctrl-C. On Python 3.11+ asyncio.Runner delivers it by CANCELLING
+        # the main task, so it arrives here as CancelledError, not
+        # KeyboardInterrupt; catching only the latter skipped the graceful
+        # shutdown below and let a traceback escape.
         pass
     result = await loop.shutdown()
     print(f"\nshutdown — {result.summary()}")
@@ -792,7 +813,27 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)-7s %(message)s",
         datefmt="%H:%M:%S",
     )
-    return asyncio.run(args.func(args))
+    try:
+        return asyncio.run(args.func(args))
+    except PromptPackError as exc:
+        # A broken INSTALL (no packaged prompt data), not a broken run. The
+        # error's own message names the remedy; a traceback buried it —
+        # 2026-08-06, this killed the worker with a raw traceback in
+        # worker.log the moment a session was joined. Exit 2: misconfigured,
+        # not crashed.
+        print(f"synapse-worker: {exc}", file=sys.stderr)
+        return 2
+    except KeyboardInterrupt:
+        # Ctrl-C outside cmd_run's own handler (status, replay, the
+        # wait-for-binding idle loop): newline past the echoed ^C, then
+        # exit 130 (128+SIGINT). Never a traceback.
+        print(file=sys.stderr)
+        return 130
+    except BrokenPipeError:
+        # `synapse-worker status | head` closing the pipe early is routine:
+        # exit 141 (128+SIGPIPE), quietly.
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        return 141
 
 
 if __name__ == "__main__":

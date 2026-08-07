@@ -26,6 +26,7 @@ import sys
 
 from synapse_contracts import userconfig
 
+from synapse_cli import pack
 from synapse_cli.net import ping_service
 
 DISTILLER_ARMS = ("npu", "anthropic", "claude-cli", "listen")
@@ -62,8 +63,20 @@ def _suggest_distiller() -> str:
     return "listen"
 
 
+def _ask(prompt: str) -> str:
+    """input(), with Ctrl-D meaning "no answer" — exactly like pressing Enter
+    on an empty line, so every caller's default/skip path applies. Ctrl-C is
+    deliberately NOT caught here: abandoning the whole command is main()'s
+    job (exit 130), never a traceback."""
+    try:
+        return input(prompt).strip()
+    except EOFError:
+        _say()          # move past the prompt line Ctrl-D left open
+        return ""
+
+
 def _prompt(question: str, default: str) -> str:
-    reply = input(f"{question} [{default}]: ").strip()
+    reply = _ask(f"{question} [{default}]: ")
     return reply or default
 
 
@@ -79,7 +92,7 @@ def cmd_configure(args: argparse.Namespace) -> int:
         _say("Where is the Synapse Service this machine should talk to?")
         _say("(Whoever hosts it ran `synapse-server up` and can read the URL "
              "off that terminal — e.g. http://192.168.4.44:8899)")
-        url = input("service.url: ").strip()
+        url = _ask("service.url: ")
     if not url:
         _say("no service.url given (non-interactive). Set it later with:")
         _say("  synapse config set service.url http://<host>:8899")
@@ -109,18 +122,40 @@ def cmd_configure(args: argparse.Namespace) -> int:
         return 2
     userconfig.set_value("client.distiller", distiller)
 
-    # MCP registration — a configure-time concern, never an install-time one:
-    # it writes into the PROJECT the user wants shared memory in, which only
-    # they can name.
+    # MCP registration — a configure-time concern, never an install-time one.
+    # USER scope is the default (2026-08-06 decision): one registration
+    # covers every project on this machine, which is what a person installing
+    # Synapse for themselves wants. Naming a project directory opts into
+    # project scope there instead (a committable .mcp.json for the team).
     project = args.project
-    if project is None and interactive and shutil.which("claude"):
-        answer = input("Register the synapse MCP server in a project directory? "
-                       "(path, or empty to skip): ").strip()
-        project = answer or None
     if project:
         rc = register_mcp(project)
         if rc != 0:
             return rc
+    elif interactive and shutil.which("claude"):
+        answer = _ask("Register the synapse MCP server with Claude Code for "
+                      "your user — all projects? [Y/n, or a project directory "
+                      "to register only there]: ")
+        lowered = answer.lower()
+        if lowered in ("", "y", "yes"):
+            rc = register_mcp()
+            if rc != 0:
+                return rc
+        elif lowered not in ("n", "no", "skip"):
+            rc = register_mcp(answer)
+            if rc != 0:
+                return rc
+
+    # The awareness pack, on exactly the reasoning above it: a configure-time
+    # concern. Gated on Claude Code actually being here — creating a ~/.claude
+    # for a tool this machine does not have is litter in someone else's home
+    # directory, and `synapse pack` is there for whoever installs it later.
+    if not args.no_pack:
+        if shutil.which("claude") or pack.claude_home().is_dir():
+            pack.install_and_report()
+        else:
+            _say("  pack      skipped — no Claude Code on this machine. "
+                 "`synapse pack` installs it later.")
 
     _say()
     _say("Configured. Next:")
@@ -131,34 +166,37 @@ def cmd_configure(args: argparse.Namespace) -> int:
     return 0
 
 
-def register_mcp(project: str) -> int:
-    """`claude mcp add` in `project`, idempotently. Always the LOCAL
-    orchestrator: pointing at someone else's :8787 would stamp their
-    attribution onto this machine's findings."""
+def register_mcp(project: str | None = None) -> int:
+    """`claude mcp add`, idempotently. USER scope with no argument — one
+    registration, every project on this machine; a project directory
+    registers project scope there instead (a committable .mcp.json). Always
+    the LOCAL orchestrator: pointing at someone else's :8787 would stamp
+    their attribution onto this machine's findings."""
+    scope = "project" if project else "user"
+    where = f"in {project}" if project else "for your user (all projects)"
+    mcp_url = "http://127.0.0.1:8787/mcp"
     claude = shutil.which("claude")
     if claude is None:
         _say("synapse: `claude` is not on PATH — install Claude Code, then run:")
-        _say("  claude mcp add --transport http --scope project synapse "
-             "http://127.0.0.1:8787/mcp")
+        _say(f"  claude mcp add --transport http --scope {scope} synapse {mcp_url}")
         return 1
-    mcp_url = "http://127.0.0.1:8787/mcp"
     try:
         listed = subprocess.run([claude, "mcp", "list"], cwd=project,
                                 capture_output=True, text=True, timeout=30)
         if listed.returncode == 0 and any(
                 line.split(":", 1)[0].strip() == "synapse"
                 for line in listed.stdout.splitlines()):
-            _say(f"  mcp       already registered in {project}")
+            _say(f"  mcp       already registered {where}")
             return 0
         done = subprocess.run(
-            [claude, "mcp", "add", "--transport", "http", "--scope", "project",
+            [claude, "mcp", "add", "--transport", "http", "--scope", scope,
              "synapse", mcp_url],
             cwd=project, capture_output=True, text=True, timeout=30,
             stdin=subprocess.DEVNULL)
         if done.returncode != 0:
             _say(f"  mcp       registration failed: {(done.stderr or done.stdout).strip()}")
             return 1
-        _say(f"  mcp       registered 'synapse' ({mcp_url}) in {project}")
+        _say(f"  mcp       registered 'synapse' ({mcp_url}) {where}")
         return 0
     except (OSError, subprocess.SubprocessError) as exc:
         _say(f"  mcp       registration failed: {exc}")
@@ -217,7 +255,12 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
     configure.add_argument("--contributor", metavar="NAME")
     configure.add_argument("--distiller", choices=DISTILLER_ARMS)
     configure.add_argument("--project", metavar="DIR",
-                           help="register the MCP server in this project directory")
+                           help="register the MCP server project-scoped in this "
+                                "directory (default when prompted: user scope, "
+                                "all projects)")
+    configure.add_argument("--no-pack", action="store_true",
+                           help="do not install the Claude Code awareness pack "
+                                "into ~/.claude")
     configure.add_argument("--yes", "-y", action="store_true",
                            help="never prompt; take flags, existing config and "
                                 "defaults")

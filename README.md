@@ -238,6 +238,20 @@ synapse health       # either side, any time: what is configured, what is runnin
 
 `synapse-server up` takes `--host`, `--port`, `--skip-key-check` and `--force`. Both sides have a `health` subcommand that reports what is configured and what is running, with a remedy per failing line; `synapse-server health --json` is machine-readable.
 
+### Uninstall
+
+```bash
+# macOS / Linux
+curl -LsSf https://raw.githubusercontent.com/SinghSiddharth01/Synapse/main/install.sh | sh -s -- uninstall
+```
+
+```powershell
+# Windows (PowerShell)
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/SinghSiddharth01/Synapse/main/install.ps1))) -Component uninstall
+```
+
+Stops any running Synapse processes (by our own ports only — never GenieX), removes whichever halves are installed, and **removes `~/.synapse`** (config and state) so a later reinstall starts clean instead of silently inheriting a stale `service.url`. Pass `--keep-config` / `-KeepConfig` to preserve `~/.synapse` when the intent is an upgrade rather than a removal. Awareness pack entries and `claude mcp` registrations are listed with the exact removal command, never deleted for you.
+
 ### Developing from a checkout
 
 ```bash
@@ -263,13 +277,13 @@ From a checkout, `uv run python scripts/doctor.py` additionally reports on `uv`,
 
 #### 1. Register the MCP server
 
-`synapse up` prints this line for you. Run it **from the project you want shared memory in** — identical on both platforms:
+`synapse up` prints this line for you, and `synapse configure` offers to run it. Once, for every project on your machine — identical on both platforms:
 
 ```bash
-claude mcp add --transport http --scope project synapse http://127.0.0.1:8787/mcp
+claude mcp add --transport http --scope user synapse http://127.0.0.1:8787/mcp
 ```
 
-`--scope project` writes a committable `.mcp.json`, so everyone who clones that repo gets the connection. `--scope user` (`~/.claude.json`) covers every project on your machine instead, and is not shared.
+`--scope user` (`~/.claude.json`) is the default `synapse configure` offers: every project on your machine, nothing to commit. `--scope project`, run from inside one project, writes a committable `.mcp.json` instead, so everyone who clones that repo gets the connection.
 
 > Always point at **your own** `127.0.0.1:8787`, never the host's. One orchestrator per laptop — otherwise your findings get stamped with someone else's contributor.
 

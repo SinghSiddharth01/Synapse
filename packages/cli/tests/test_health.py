@@ -34,6 +34,27 @@ def _line(results, prefix):
 # When the worker is expected — mirrors up.py's own spawn condition.
 # ---------------------------------------------------------------------------
 
+def test_ping_worker_reports_an_idling_worker_as_alive():
+    """A worker under `synapse up` idles (--wait-for-binding) until a session
+    is joined. Its dashboard answers with phase="waiting for a session", and
+    that must read as ALIVE — the 2026-08-06 misdiagnosis was health calling
+    exactly this state "the worker died after it". Real server, real probe."""
+    from synapse_providers import CallLog
+    from synapse_worker.debug_server import DebugServer
+    from synapse_worker.stats import StatsBuffer
+
+    stats = StatsBuffer(CallLog(), phase="waiting for a session")
+    server = DebugServer(stats, 0)
+    port = server.start()
+    try:
+        alive, detail = net.ping_worker(port)
+    finally:
+        server.stop()
+
+    assert alive is True
+    assert "waiting for a session" in detail
+
+
 def test_worker_answering_is_a_pass_that_reports_what_it_has_done(monkeypatch):
     monkeypatch.setattr(health, "ping_worker",
                         lambda *a, **k: (True, "following transcripts — 7 tick(s) recorded"))

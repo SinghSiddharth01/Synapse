@@ -26,8 +26,14 @@ class StatsBuffer:
     """Collects everything the debug page shows: the tagged feed, the tick
     history, the in-flight distil, and the LLM call log it was handed."""
 
-    def __init__(self, llm: CallLog) -> None:
+    def __init__(self, llm: CallLog, phase: str = "following") -> None:
         self.llm = llm
+        # The worker's lifecycle state: "following" a transcript, or
+        # "waiting for a session" under --wait-for-binding. Surfaced in
+        # snapshot() because /debug/stats.json is the worker's only liveness
+        # signal (net.ping_worker) — without it, an idling worker is
+        # indistinguishable from a dead one from the outside.
+        self.phase = phase
         self._events: deque[dict[str, Any]] = deque(maxlen=MAX_EVENTS)
         self._ticks: deque[dict[str, Any]] = deque(maxlen=MAX_TICKS)
         self.current: dict[str, Any] | None = None
@@ -58,6 +64,7 @@ class StatsBuffer:
     def snapshot(self) -> dict[str, Any]:
         return {
             "now": _now_iso(),
+            "phase": self.phase,
             "current": self.current,
             "ticks": list(self._ticks),
             "events": list(self._events),

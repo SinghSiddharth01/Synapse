@@ -32,6 +32,7 @@ COMPONENT="client"
 TAG=""
 LOCAL_DIR=""
 DO_UPDATE=0
+KEEP_CONFIG=0
 UV="uv"
 
 say()  { printf '%s\n' "$*"; }
@@ -42,15 +43,20 @@ usage() {
   cat <<USAGE
 Synapse installer — installs, and only installs.
 
-  install.sh [client|server] [options]
+  install.sh [client|server|uninstall] [options]
 
   client (default)  the 'synapse' CLI: orchestrator, MCP server, edge worker
   server            the 'synapse-server' CLI: the shared context service
+  uninstall         stop Synapse processes, remove both installed halves AND
+                    ~/.synapse (config + state) — a reinstall that inherits a
+                    stale service.url is worse than re-running configure.
+                    Pack/MCP leftovers are listed, never deleted.
 
 Options:
   --tag <tag>    install this release instead of the latest
   --local <dir>  install from a local bundle/checkout instead of GitHub
   --update       reinstall over an existing install (picks up new versions)
+  --keep-config  (uninstall) preserve ~/.synapse for a later reinstall
   -h, --help     this
 
 One-liners (no clone, no flags — install is just install):
@@ -71,10 +77,11 @@ USAGE
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    client|server) COMPONENT=$1 ;;
+    client|server|uninstall) COMPONENT=$1 ;;
     --tag)    [ $# -gt 1 ] || die "--tag needs a value";  TAG=$2; shift ;;
     --local)  [ $# -gt 1 ] || die "--local needs a path"; LOCAL_DIR=$2; shift ;;
     --update) DO_UPDATE=1 ;;
+    --keep-config) KEEP_CONFIG=1 ;;
     -h|--help) usage; exit 0 ;;
     --service-url|--shared-id|--purpose|--contributor)
       die "'$1' is not an installer flag any more. Install and configuration
@@ -86,6 +93,95 @@ are separate stages now:
   esac
   shift
 done
+
+[ "$KEEP_CONFIG" -eq 1 ] && [ "$COMPONENT" != "uninstall" ] && \
+  die "--keep-config only applies to 'uninstall'"
+
+# ---------------------------------------------------------------------------
+# U — uninstall: the mirror of install, plus config removal. In the INSTALLER
+# and not the CLI so it works when the installed CLI is broken (the decided
+# shape, docs/plans/2026-08-06-uninstall-mechanism.md). One amendment to that
+# plan (2026-08-06, by the owner): ~/.synapse is REMOVED by default — after
+# `uv tool uninstall`, a reinstall silently inherited the previous machine's
+# service.url from the surviving config, which is exactly the class of stale
+# state an uninstall exists to end. --keep-config preserves it for upgrades.
+# ---------------------------------------------------------------------------
+if [ "$COMPONENT" = "uninstall" ]; then
+  say "Synapse uninstaller"
+  SYN_HOME="${SYNAPSE_HOME:-$HOME/.synapse}"
+
+  step "U1  stop running Synapse processes"
+  # By OUR ports only (8787 orchestrator, 8790 worker dashboard, 8899 local
+  # service) — never by name-substring, which could match an editor with a
+  # synapse file open, and never geniex: the model seam is not ours to stop.
+  STOPPED=0
+  if command -v lsof >/dev/null 2>&1; then
+    for SPEC in "8787 orchestrator" "8790 edge-worker" "8899 service"; do
+      PORT=${SPEC%% *}; LABEL=${SPEC#* }
+      PIDS=$(lsof -ti "tcp:$PORT" 2>/dev/null || true)
+      if [ -n "$PIDS" ]; then
+        # shellcheck disable=SC2086
+        kill $PIDS 2>/dev/null || true
+        say "  stopped   $LABEL (:$PORT)"
+        STOPPED=1
+      fi
+    done
+    [ "$STOPPED" -eq 0 ] && say "  nothing running on :8787/:8790/:8899"
+  else
+    say "  lsof not available — if 'synapse up' or 'synapse-server up' is"
+    say "  running, stop it with Ctrl-C; this script will not guess at PIDs."
+  fi
+
+  step "U2  remove installed tools"
+  REMOVED=0
+  if command -v "$UV" >/dev/null 2>&1; then
+    for TOOL in synapse-cli synapse-service; do
+      if "$UV" tool list 2>/dev/null | grep -q "^$TOOL "; then
+        "$UV" tool uninstall "$TOOL" < /dev/null
+        say "  removed   $TOOL"
+        REMOVED=1
+      fi
+    done
+  fi
+  [ "$REMOVED" -eq 0 ] && say "  no synapse uv tools installed — nothing to remove"
+
+  step "U3  config and state"
+  if [ -d "$SYN_HOME" ]; then
+    if [ "$KEEP_CONFIG" -eq 1 ]; then
+      say "  kept      $SYN_HOME (--keep-config)"
+    else
+      say "  removing  $SYN_HOME — config.toml, session bindings, the"
+      say "            write-ahead log, and logs go with it. (--keep-config"
+      say "            preserves it for a reinstall/upgrade.)"
+      rm -rf "$SYN_HOME"
+      say "  removed   $SYN_HOME"
+    fi
+  else
+    say "  no $SYN_HOME — nothing to remove"
+  fi
+
+  step "U4  left in place — yours, listed with the removal command"
+  CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+  LEFT=0
+  for KIND in skills commands agents; do
+    for ENTRY in "$CLAUDE_DIR/$KIND"/synapse*; do
+      [ -e "$ENTRY" ] || continue
+      say "  pack      $ENTRY"
+      say "            rm -r '$ENTRY'"
+      LEFT=1
+    done
+  done
+  if command -v claude >/dev/null 2>&1; then
+    say "  mcp       if 'synapse' is registered (user scope or per project):"
+    say "            claude mcp remove synapse"
+    LEFT=1
+  fi
+  [ "$LEFT" -eq 0 ] && say "  none found"
+
+  say ""
+  say "Uninstalled."
+  exit 0
+fi
 
 say "Synapse installer — $COMPONENT"
 say "  os        $(uname -s) $(uname -m)"

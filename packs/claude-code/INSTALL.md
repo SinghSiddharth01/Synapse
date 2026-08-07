@@ -51,16 +51,16 @@ This repo ships a project-scoped [`.mcp.json`](../../.mcp.json):
 {"mcpServers": {"synapse": {"type": "http", "url": "http://127.0.0.1:8787/mcp"}}}
 ```
 
-Copy it to the root of whatever project you want shared memory in, or run the
-equivalent from that project:
+Register it once for your user (the default `synapse configure` offers) —
+`~/.claude.json` covers every project on your machine:
 
 ```bash
-claude mcp add --transport http --scope project synapse http://127.0.0.1:8787/mcp
+claude mcp add --transport http --scope user synapse http://127.0.0.1:8787/mcp
 ```
 
-`--scope project` writes `.mcp.json`, which is committable — everyone who
-clones the repo gets the connection. `--scope user` (in `~/.claude.json`)
-covers every project on your machine instead and is not shared.
+Or copy the JSON above into one project's `.mcp.json` (equivalently
+`--scope project` from that project) — that file is committable, so everyone
+who clones the repo gets the connection.
 
 Then **start a new Claude Code session** — the file is read at session start,
 not live — and **approve the server** when prompted. Project-scoped servers
@@ -116,17 +116,33 @@ Two locations work, and the repo uses both. Know which one you are in:
 | | skill goes to | commands go to | hook goes to | who does it |
 |---|---|---|---|---|
 | **Per project** (this section) | `<project>/.claude/skills/` | `<project>/.claude/commands/` | `<project>/.claude/synapse-pack/hooks/` | you, by hand |
-| **Per user** | `~/.claude/skills/` | `~/.claude/commands/` | *(not installed)* | `install.sh` / `install.ps1`, phase P5 |
+| **Per user** | `~/.claude/skills/` | `~/.claude/commands/` | *(not installed)* | `synapse configure`, or `synapse pack` |
 
-`install.sh` copies `skills/`, `commands/` and `agents/` into `~/.claude/`, so
-the skill is available in every project on the machine without repeating this
-section. It deliberately does **not** install the hook and does **not** touch
-`settings.json`: `settings-snippet.json`'s command is
+**`synapse configure` does the per-user row for you.** It copies `skills/`,
+`commands/` and `agents/` into `~/.claude/`, so the skill and `/synapse:health`
+are available in every project on the machine without repeating this section.
+`synapse pack` does the same thing on its own, and `synapse pack --update` is
+how you refresh them after upgrading Synapse — without it, an install that
+already has the files keeps its old copies forever.
+
+Not the installer, deliberately. `install.sh` and `install.ps1` install
+packages and nothing else — this CLI's contract is *install never configures;
+configure never starts* — and putting a Shared Session's tooling into your home
+directory is a configuration decision, made by the same command that decides
+which Service you talk to and which project gets the MCP registration. The pack
+travels inside the `synapse-cli` wheel to make that possible, so a machine that
+installed from a release bundle has it without ever seeing this repo.
+
+Two things `configure` still will not do. It does **not** install the hook and
+does **not** touch `settings.json`: `settings-snippet.json`'s command is
 `$CLAUDE_PROJECT_DIR/.claude/synapse-pack/hooks/freshness_pointer.py`, which is
-per-project by construction, and rewriting a settings file the installer does
-not own is an overwrite risk. If you want the hook, do the `hooks` half of the
-steps below even after running the installer — the installer prints the two
-commands for exactly that. `scripts/doctor.py`'s `awareness` check looks at
+per-project by construction, and rewriting a settings file it does not own is an
+overwrite risk. If you want the hook, do the `hooks` half of the steps below.
+And it never overwrites: anything already in `~/.claude` is left alone and
+reported, and `--update` moves the previous copy aside with a timestamp rather
+than deleting what may be a skill you edited by hand.
+
+`scripts/doctor.py`'s `awareness` check looks at
 `~/.claude/skills/synapse-shared-memory`, i.e. the per-user row; a per-project
 install is invisible to it and that WARN is then expected.
 

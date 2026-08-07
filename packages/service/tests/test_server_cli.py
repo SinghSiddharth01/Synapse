@@ -52,6 +52,36 @@ class TestReadKeysFile:
             server_cli.read_keys_file(path)
 
 
+class _Tty:
+    def isatty(self) -> bool:
+        return True
+
+
+class TestConfigurePrompt:
+    def test_ctrl_c_at_the_prompt_exits_quietly(self, monkeypatch):
+        """Ctrl-C at the keys-file prompt used to escape main() as a raw
+        KeyboardInterrupt traceback. Exit 130 (128+SIGINT) instead."""
+        monkeypatch.setattr("sys.stdin", _Tty())
+
+        def _interrupt(*_):
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr("builtins.input", _interrupt)
+        assert server_cli.main(["configure"]) == 130
+
+    def test_eof_at_the_prompt_means_no_answer(self, monkeypatch, capsys):
+        """Ctrl-D is "no answer" — the prompt is skipped, configure still
+        finishes (the keys file can be set later), no EOFError traceback."""
+        monkeypatch.setattr("sys.stdin", _Tty())
+
+        def _eof(*_):
+            raise EOFError
+
+        monkeypatch.setattr("builtins.input", _eof)
+        assert server_cli.main(["configure"]) == 0
+        assert "Configured" in capsys.readouterr().out
+
+
 class TestAssembleEnv:
     def test_aic100_without_keys_refuses(self):
         cfg = {"server.synthesizer": "aic100"}
