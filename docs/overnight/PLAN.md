@@ -455,8 +455,97 @@ is real or theatre:
 - Verify the installed thing actually runs, and say so, rather than exiting 0
   because the files landed.
 
+**Three platforms, not two:** macOS · Linux · Windows/ARM64. `install.sh` covers
+the first two, `install.ps1` the third.
+
+**Hardware detection drives what gets installed.** GenieX is Snapdragon-only —
+pulling it onto a Mac is wasted bandwidth and a confusing failure. So the
+installer detects first, then offers:
+
+- Windows/ARM64 + Snapdragon → NPU is real. Offer GenieX, install it, offer to
+  fetch the model.
+- macOS / x86 Linux → **never** fetch GenieX. Offer the Claude arms
+  (`anthropic` on a key, `claude-cli` on a subscription) or `--listen`.
+- Detection must be *reported*, not silent: "Snapdragon X Elite detected — NPU
+  path available" or "no compatible NPU — configuring the Claude arm". Someone
+  whose NPU was missed needs to see that it was missed.
+
+**`curl | bash` has no stdin — this breaks naive prompting.** Piping to bash
+gives bash the *script* on stdin, so `read` returns nothing and every prompt
+silently takes its default. Either read from `/dev/tty` when it exists, or detect
+non-interactive and drive everything from flags/env with the chosen configuration
+printed. Getting this wrong produces an installer that appears to ask and never
+listens.
+
+**MCP registration is part of install**, since otherwise every user hand-copies a
+command from `JOIN.md`:
+`claude mcp add --transport http --scope project synapse http://127.0.0.1:8787/mcp`
+Check the `claude` CLI exists first, offer rather than assume, and state which
+scope was used — a silent `--scope user` edit to someone's global config is the
+kind of thing that erodes trust in an installer.
+
+**The 4B model file — do not rehost blindly.** `config/synapse.toml` names
+`qualcomm/Qwen3-4B-Instruct-2507:W4A16`, which is a Qualcomm-published artifact.
+Order of preference:
+
+1. **Pull from the canonical source** (Hugging Face / Qualcomm) if it is
+   published there. Rehosting someone else's weights is a licensing question
+   before it is an engineering one — **check the licence before mirroring**.
+2. If we must host it: **GitHub Release assets**, not LFS. Releases allow up to
+   **2 GB per file** and do not consume the LFS bandwidth quota, which a free
+   plan exhausts almost immediately. This is how open-source projects ship large
+   binaries.
+3. If it exceeds 2 GB, split with a checksum manifest and reassemble on install.
+
+Whichever path: checksum-verify after download, resume on interrupt, and never
+re-download when the file is already present and valid.
+
 **CI:** a `release` job on tag — build both bundles, attach to a GitHub Release,
 publish `install.sh` / `install.ps1` from the tag so the curl URL is stable.
+
+**⚠️ API keys in CI reverses a decision already recorded in `ci.yml`.** Its
+header says, in those words:
+
+> Live-smoke runs stay manual and local — do NOT wire `INFERENCE_CLOUD_*` secrets
+> into Actions.
+
+To answer the question directly: **GitHub Actions encrypted secrets exist and
+work — but only inside Actions.** They are deliberately not fetchable by an
+installer on a user's machine, so they solve CI testing and nothing about
+distribution. Two further limits worth knowing: secrets are **not** exposed to
+workflows triggered by pull requests from forks, and every live run spends the
+shared key budget that ADR 0005 says needs ~10 keys to hold 60s latency.
+
+If we do it, do it as a **protected environment with required reviewers** on a
+manually-dispatched workflow — not plain repo secrets on every push, which is
+what the existing header is guarding against. Written up as
+`decisions/010-live-secrets-in-ci.md`, including that it overturns a prior
+decision, so the reversal is one revert.
+
+Keys are also **being rotated after the 7th** (`JOIN.md`), so anything wired now
+needs re-wiring then. That belongs in `HUMAN-TODO.md`.
+
+**Idempotent, and it re-runs like a modern tool.** Running the installer twice
+must be safe, boring, and fast. The convention `rustup`, `uv` and `brew` all
+share, and what we follow:
+
+- **Detect before installing.** For every dependency — `uv`, Python, the packages,
+  GenieX, the model file, the MCP registration — check whether it is present and
+  what version. Never install over something already correct.
+- **Report per component, not as one opaque blob:** `already current`,
+  `upgraded 1.2 → 1.4`, `installed`, `skipped (no NPU)`. A user re-running after a
+  failure needs to see which step actually did something.
+- **Never silently downgrade**, and never clobber a user's newer version because
+  our pin is older. Say what the mismatch is and let them choose — except
+  `mcp==1.9.4`, which is an exact pin for a real ARM64 reason and must be stated
+  as such when it is enforced.
+- **Ask before touching anything outside our own tree** — global config, the
+  Claude MCP registry, PATH. Non-interactive runs take the conservative default
+  and print what they skipped.
+- `--force` / `-Force` to reinstall regardless, because every tool eventually
+  needs the escape hatch.
+- End with a summary of what changed and what to run next. A successful re-run
+  should print roughly nothing and exit fast.
 
 **The verification that makes this trustworthy, and the thing most projects get
 wrong:** install must be tested in a **clean environment** — a container, or a
