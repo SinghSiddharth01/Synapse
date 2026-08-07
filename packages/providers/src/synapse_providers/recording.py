@@ -76,6 +76,12 @@ class RecordingProvider(ModelProvider):
         self.inner = inner
         self.component = component
         self.log = log
+        # HTTP requests the inner provider made on THIS façade's last call.
+        # Per-façade because synthesis and retrieval are two RecordingProviders
+        # over ONE provider object: reading the inner counter directly would
+        # return whichever component called most recently, and the governor
+        # would charge one component for the other's spend.
+        self.last_request_count = 0
 
     @property
     def provider_id(self) -> str:  # type: ignore[override]
@@ -135,6 +141,10 @@ class RecordingProvider(ModelProvider):
         try:
             result = await self.inner.complete(messages, response_schema)
         except Exception:
+            # The failure path matters as much as the success path: a round
+            # that raised still spent its requests, and that is exactly the
+            # spend the governor must not lose track of.
+            self._capture_request_count()
             self.log.append_raw(
                 {
                     **base,
@@ -147,6 +157,7 @@ class RecordingProvider(ModelProvider):
                 }
             )
             raise
+        self._capture_request_count()
         self.log.append_raw(
             {
                 **base,
@@ -159,3 +170,9 @@ class RecordingProvider(ModelProvider):
             }
         )
         return result
+
+    def _capture_request_count(self) -> None:
+        """Snapshot the inner provider's per-call request count onto this
+        façade. Providers without one (FakeProvider, NPUProvider) report a
+        single request, which is what they cost."""
+        self.last_request_count = getattr(self.inner, "last_request_count", 1)

@@ -1,6 +1,6 @@
 """ModelProvider implementations."""
 
-from synapse_providers.aic100 import AIC100Provider
+from synapse_providers.aic100 import AIC100Provider, RateLimitedError
 from synapse_providers.anthropic_provider import AnthropicProvider
 from synapse_providers.claude_cli_provider import ClaudeCliProvider
 from synapse_providers.base import ModelProvider, ProviderCapabilities
@@ -22,5 +22,6 @@ __all__ = [
     "OpenAICompatibleProvider",
     "ProviderCapabilities",
     "RateLimitSnapshot",
+    "RateLimitedError",
     "RecordingProvider",
 ]
