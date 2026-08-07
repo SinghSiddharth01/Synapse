@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from synapse_contracts import AgentEvent, Segment
-from synapse_worker.triage import TriageDecision, triage
+from synapse_worker.triage import triage
 
 TS = datetime(2026, 8, 4, tzinfo=timezone.utc)
 FIXTURES_DIR = Path(__file__).resolve().parents[3] / "fixtures"

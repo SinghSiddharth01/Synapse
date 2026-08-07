@@ -220,30 +220,39 @@ def test_install_sh_parses_under_a_posix_shell():
     assert done.returncode == 0, done.stderr
 
 
-def test_install_sh_never_pulls_or_switches_by_default():
-    """A checkout parked on `demo-fallback` is a legitimate state.
-
-    Exactly one `git pull`, inside the `--update` branch, and no checkout or
-    switch anywhere.
-    """
+def test_install_sh_never_touches_git():
+    """Install is INSTALL: wheels come from the release bundle (or are built
+    from the checkout the script already sits in). No clone, no pull, no
+    switch — the user never needs git to run Synapse."""
     text = INSTALL_SH.read_text(encoding="utf-8")
     code = "\n".join(ln for ln in text.splitlines() if not ln.lstrip().startswith("#"))
-    invocations = re.findall(r"^\s*git pull.*$", code, flags=re.MULTILINE)
-    assert invocations == ["  git pull --ff-only < /dev/null"]
-    assert not re.search(r"^\s*git (checkout|switch|reset)\b", code, flags=re.MULTILINE)
+    assert not re.search(r"^\s*git\b", code, flags=re.MULTILINE)
+    assert "git clone" not in code
+
+
+def test_install_sh_refuses_configure_flags():
+    """Install and configuration are SEPARATE STAGES. The old installer took
+    --service-url/--shared-id/--purpose and started the stack; every one of
+    those must now be a loud refusal that names the right stage."""
+    for flag in ("--service-url", "--shared-id", "--purpose", "--contributor"):
+        done = subprocess.run([str(INSTALL_SH), flag, "x"], capture_output=True,
+                              text=True, cwd=str(REPO), stdin=subprocess.DEVNULL)
+        assert done.returncode == 1, flag
+        assert "not an installer flag" in done.stderr, flag
+        assert "synapse config set service.url" in done.stderr, flag
 
 
 def test_install_sh_advertises_both_one_liners():
-    """`sh -s --` and the scriptblock form are the deliverable, not decoration.
-
-    They are what lets a joining teammate paste one line instead of
-    transcribing a URL and a session id.
-    """
+    """The curl and scriptblock one-liners are the deliverable: a teammate
+    installs with one paste and NO arguments — joining happens later, at run
+    time, through `synapse config set` + `synapse up`."""
     done = subprocess.run([str(INSTALL_SH), "--help"], capture_output=True, text=True,
                           cwd=str(REPO))
     assert done.returncode == 0
-    assert "| sh -s --" in done.stdout
+    assert "install.sh | sh" in done.stdout
     assert "scriptblock]::Create" in done.stdout
+    # and the next stage is named, not performed
+    assert "synapse configure" in done.stdout
 
 
 def test_windows_entry_points_exist():
@@ -258,14 +267,16 @@ def test_windows_entry_points_exist():
     assert bat.is_file()
 
     ps1_text = ps1.read_text(encoding="utf-8")
-    # The three things that decide whether a projector shows mojibake.
-    assert 'PYTHONUTF8 = "1"' in ps1_text
-    assert "chcp 65001" in ps1_text
-    assert "[Console]::OutputEncoding" in ps1_text
-    # Do not trust a directory called Python312 — ask the interpreter.
-    assert "platform.machine()" in ps1_text
-    assert "sync @pythonArg" in ps1_text
-    assert "ValueFromRemainingArguments" in ps1_text
+    # Install-only, mirrored: the same component grammar as install.sh…
+    assert "ValidateSet('client', 'server')" in ps1_text
+    # …the ARM64 interpreter trap stays handled (uv's managed CPython can be
+    # x86-under-Prism on Snapdragon, which breaks NPU wheels)…
+    assert "Python312-arm64" in ps1_text
+    # …geniex is hardware-gated, never installed where it cannot run…
+    assert "ARM64" in ps1_text and "geniex" in ps1_text
+    # …and none of the CONFIGURE-stage flags survived the rewrite.
+    for gone in ("-ServiceUrl", "-SharedId", "-Purpose", "$Contributor"):
+        assert gone not in ps1_text, gone
     # PowerShell-native removal only (scripts/rehearse_demo.py's shelled-out
     # removal once replaced a real failure with a FileNotFoundError traceback).
     assert "rm -rf" not in ps1_text.replace("`rm -rf`", "")

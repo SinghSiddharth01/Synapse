@@ -533,10 +533,10 @@ def main(argv: list[str] | None = None) -> int:
     guide.beat(
         "Aditya runs a linter — work that is not worth remembering",
         doing="append 8 lines to his transcript: a lint run that found and fixed 3 errors",
-        watch=[f"worker 8790 — TRANSCRIPT ticks up as the lines are read",
-               f"worker 8790 — a copper `triage` row appears saying SKIP",
-               f"worker 8790 — NPU NOW stays idle, PUSH stays 0: no model call at all",
-               f"service 8899 — nothing happens here. That is the point."],
+        watch=["worker 8790 — TRANSCRIPT ticks up as the lines are read",
+               "worker 8790 — a copper `triage` row appears saying SKIP",
+               "worker 8790 — NPU NOW stays idle, PUSH stays 0: no model call at all",
+               "service 8899 — nothing happens here. That is the point."],
         why="triage decides before the model runs, so routine work costs no NPU "
             "time. On a real day this is most of a transcript.",
     )

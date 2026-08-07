@@ -19,9 +19,22 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 PACK = ROOT / "packs" / "claude-code"
 SKILL_MD = PACK / "skills" / "synapse-shared-memory" / "SKILL.md"
+COMMANDS = PACK / "commands" / "synapse"
+HEALTH_MD = COMMANDS / "health.md"
 SETTINGS_SNIPPET = PACK / "settings-snippet.json"
 INSTALL_MD = PACK / "INSTALL.md"
 HOOK = PACK / "hooks" / "freshness_pointer.py"
+
+
+def _flat(text: str) -> str:
+    """Prose with every run of whitespace collapsed to one space.
+
+    These files are hard-wrapped markdown, so any asserted phrase long enough
+    to be worth pinning is one line-break away from a false failure — and,
+    worse, a phrase that happens to fit on one line today silently starts
+    passing for the wrong reason after an unrelated re-wrap.
+    """
+    return re.sub(r"\s+", " ", text)
 
 
 def _frontmatter(text: str) -> dict[str, str]:
@@ -250,6 +263,7 @@ def test_this_repos_own_claude_dir_is_not_where_the_pack_self_installed():
     # The exact paths `INSTALL.md`'s `mkdir -p .claude/skills
     # .claude/synapse-pack` step creates on a teammate's machine.
     assert not (claude_dir / "skills" / "synapse-shared-memory").exists()
+    assert not (claude_dir / "commands" / "synapse").exists()
     assert not (claude_dir / "synapse-pack").exists()
 
     tracked = subprocess.run(
@@ -262,3 +276,83 @@ def test_this_repos_own_claude_dir_is_not_where_the_pack_self_installed():
 
 def test_the_hook_file_the_snippet_and_install_doc_point_at_actually_exists():
     assert HOOK.is_file()
+
+
+# ---------------------------------------------------------------------------
+# The commands — not a signal. Signals ③ and ④ fire on their own judgement;
+# these are what a human types when they want an answer that does not depend
+# on a model deciding the question is relevant.
+# ---------------------------------------------------------------------------
+
+def test_health_command_lives_at_the_path_that_names_it_synapse_health():
+    """Claude Code derives the command name from the file's path, so the
+    directory IS the namespace: `commands/synapse/health.md` is
+    `/synapse:health`. Flattened to `commands/health.md` it would be
+    `/health` -- unnamespaced, colliding with every other pack's, and no
+    longer discoverable by typing `/syna`, which is the whole reason this
+    sits under a `synapse/` directory rather than being called
+    `synapse-health.md`."""
+    assert HEALTH_MD.is_file(), f"expected the command at {HEALTH_MD}"
+    assert HEALTH_MD.parent.name == "synapse"
+    assert HEALTH_MD.parent.parent.name == "commands"
+
+
+def test_health_command_has_a_human_readable_description():
+    """This string is what shows next to the command in the `/` menu. The
+    skill's description is written to trigger a *model* and reads like a
+    paragraph of documentation as a result; a command's is read by a person
+    scanning a list, and the two must not be written the same way."""
+    fields = _frontmatter(HEALTH_MD.read_text(encoding="utf-8"))
+    description = fields["description"]
+    assert description
+    assert len(description) < 200, (
+        "a command description is a menu label, not a trigger paragraph")
+    for component in ("MCP", "Service"):
+        assert component in description
+
+
+def test_health_command_separates_this_sessions_mcp_tools_from_the_open_port():
+    """The wrong diagnosis this command exists to prevent. `orchestrator
+    :8787` answering does NOT mean this session can call the tools: a
+    session opened before the orchestrator started never read `.mcp.json`,
+    and a project that never approved the server has no tools either. A
+    command that only shelled out to `synapse health` would report PASS to
+    someone whose tools are missing."""
+    text = _flat(HEALTH_MD.read_text(encoding="utf-8"))
+    assert "mcp__synapse__query" in text
+    assert "mcp__synapse__contribute" in text
+    assert "not the same question" in text
+    assert "/mcp" in text
+
+
+def test_health_command_probes_rather_than_repairs():
+    """The pack's standing constraint, inherited from the lifecycle plan:
+    nothing here may start a process on its own. `synapse up` is the user's
+    to run, and a command that "helpfully" started the stack to make its own
+    check go green would stamp this machine's identity onto a session nobody
+    asked to join."""
+    text = _flat(HEALTH_MD.read_text(encoding="utf-8"))
+    assert "synapse health" in text
+    assert "Do not start, restart or stop anything" in text
+    for forbidden in ("automatically", "on startup", "launchd", "daemon"):
+        assert forbidden not in text.lower(), forbidden
+
+
+def test_health_command_scopes_a_dead_worker_to_what_actually_breaks():
+    """A WARN on the worker line stops passive capture from this machine and
+    nothing else -- `query` reads the team's memory over the orchestrator and
+    is untouched. Reported as a bare failure it reads as "Synapse is down"
+    and sends someone restarting a stack whose useful half is fine."""
+    text = _flat(HEALTH_MD.read_text(encoding="utf-8"))
+    assert "edge worker :8790" in text
+    assert "querying the team's memory is unaffected" in text
+    # The configured-off case is a PASS, not a problem to chase.
+    assert "not started, by configuration" in text
+
+
+def test_install_md_documents_installing_the_commands_directory():
+    text = _flat(INSTALL_MD.read_text(encoding="utf-8"))
+    assert "commands/synapse" in text
+    assert "/synapse:health" in text
+    # The namespace is the one thing a copy-paste can silently get wrong.
+    assert "directory name is the namespace" in text

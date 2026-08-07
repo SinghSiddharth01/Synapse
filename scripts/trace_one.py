@@ -11,7 +11,6 @@ uses. Temperature is 0, so this is the same output the distiller would get.
 from __future__ import annotations
 
 import asyncio
-import json
 import sys
 
 from synapse_providers import NPUProvider

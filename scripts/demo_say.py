@@ -156,10 +156,10 @@ def main(argv: list[str] | None = None) -> int:
                       f"({detail.get('provider', 'unknown')}) is not answering, "
                       f"so the findings are all still there and cannot be "
                       f"searched.")
-                print(f"  This is the loud failure working: before decision 008 "
-                      f"this same outage came back as an empty list and a 200.")
-                print(f"  If serve_local.py is supervising the seam it restarts "
-                      f"within ~2 minutes — see .synapse/logs/supervisor.log.")
+                print("  This is the loud failure working: before decision 008 "
+                      "this same outage came back as an empty list and a 200.")
+                print("  If serve_local.py is supervising the seam it restarts "
+                      "within ~2 minutes — see .synapse/logs/supervisor.log.")
                 return 1
             raise SystemExit(
                 f"the service answered HTTP {exc.code} to that query "

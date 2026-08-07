@@ -20,79 +20,65 @@ like `http://192.168.4.44:8899`) and the current **shared-id** (looks like
 
 ---
 
-## 1. Get the code running
+## 1. Install (once — installs software and nothing else)
+
+No clone, no arguments. The installer checks each prerequisite and only
+installs what is missing (`uv`, a Python 3.12+); GenieX is only ever
+considered on Snapdragon hardware.
 
 ```bash
-git clone https://github.com/SinghSiddharth01/Synapse.git && cd Synapse
-uv sync
-uv run pytest -q          # expect all green — if not, stop and say so
+curl -LsSf https://raw.githubusercontent.com/SinghSiddharth01/Synapse/main/install.sh | sh
 ```
-
-**On Windows/ARM64 (the X Elite box), pin the interpreter or you get an
-x86 one under emulation and a Rust build error:**
 
 ```powershell
-uv sync --python "$env:LOCALAPPDATA\Programs\Python\Python312-arm64\python.exe"
+# Windows — handles the ARM64 interpreter trap for you
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/SinghSiddharth01/Synapse/main/install.ps1)))
 ```
 
-Do not "upgrade" `mcp` off `1.9.4` — newer pulls `cryptography`, which has no
-ARM64-Windows wheel.
-
-## 2. Clear anything already running
-
-`serve_local` starts **three** processes, and `pkill -f synapse-` only matches
-two of them — the model stand-in orphans and blocks the next start with *"ports
-already in use: 18181"*:
+## 2. Configure (reconfigurable any time, like `git config`)
 
 ```bash
-pkill -f synapse-service; pkill -f synapse-orchestrator; pkill -f local_model_server
-```
-
-## 3. Start your half, pointed at the host
-
-```bash
-uv run python scripts/serve_local.py \
-  --service-url http://<host-ip>:8899 \
-  --shared-id <shared-id> \
-  --contributor <your-name>
+synapse config set service.url http://<host-ip>:8899   # ping-tested on the spot
+synapse config set user.contributor <your-name>
+synapse config set client.distiller <arm>              # see the table
 ```
 
 **Which model does your distilling** — pick the row that matches your machine:
 
-| your situation | what to pass |
+| your situation | `client.distiller` |
 |---|---|
-| you have a GenieX NPU box | `--npu` — starts `geniex serve` for you if it is not already up, adopts it if it is, and supervises it either way |
-| GenieX for distilling **and** the real 70B for synthesis | `--npu --live` (needs `inference_cloud` credentials) |
-| Claude on your own API key | `--distiller anthropic --claude-model claude-haiku-4-5-20251001` |
-| Claude on your **subscription**, no key at all | `--distiller claude-cli --claude-model haiku` |
-| no NPU, no key, read-only | `--listen` |
-| just wiring up | *(nothing — a stand-in answers locally)* |
+| you have a GenieX NPU box | `npu` — `synapse up` starts `geniex serve` for you if it is not already up, adopts it if it is, and supervises it either way |
+| Claude on your own API key (`ANTHROPIC_API_KEY` in your env) | `anthropic` |
+| Claude on your **subscription**, no key at all | `claude-cli` |
+| no NPU, no key, read-only | `listen` |
 
-The two Claude arms want different spellings — `anthropic` takes a full Messages
-API id, `claude-cli` takes the short alias the binary accepts. The banner names
-whichever model actually got used, so read it rather than assuming.
+`synapse health` at any point shows what is configured, what is running, and
+what to fix, one remedy per line.
 
-This starts only what belongs to you: a model seam and your own orchestrator
-on `127.0.0.1:8787`. It does **not** start a service — you are using theirs.
+## 3. Run (services exist only while this command does)
 
-With none of those flags a stand-in answers locally. It only knows this repo's
-fixture corpus, so **your own words will not distil into findings** — it returns
-empty for anything unfamiliar, deliberately, because a stub that invented
-findings would be lying about which component did the work. Fine for proving the
-wiring, not for real use.
+```bash
+synapse up --shared-id <shared-id>
+```
 
-**No NPU, no key, nothing?** Add `--listen`. You still get the arrival
-briefing and full `query` — reading needs no model on your side at all,
-because the HOST's service does the ranking. Only `contribute` needs a
-distiller locally, and it declines politely rather than failing: *"Couldn't
-process that right now — your note was not recorded."* Verified against an
-orchestrator with nothing whatsoever on its model port. Listening and
-learning is the zero-setup path; contributing is what costs you a model.
+This starts only what belongs to you: your model seam (if the arm needs one),
+your own orchestrator on `127.0.0.1:8787`, and the edge worker. It does
+**not** start a service — you are using the host's. Ctrl-C stops everything
+it started; there are no daemons. Without `--shared-id` it adopts the
+session the host's service already holds.
+
+**No NPU, no key, nothing?** `listen` still gets you the arrival briefing and
+full `query` — reading needs no model on your side, because the HOST's
+service does the ranking. Only `contribute` needs a distiller locally, and it
+declines politely rather than failing.
 
 One machine runs one Synapse. If you are already hosting, you do not need a
-second instance to listen — your own orchestrator is already connected. The
-script refuses rather than starting one, because a second copy would
+second instance to listen — your own orchestrator is already connected.
+`synapse up` refuses rather than starting a second copy, because it would
 overwrite your binding and quietly turn your agent into somebody else.
+
+*(Developing on Synapse itself? `git clone` + `uv sync` + `uv run python
+scripts/serve_local.py` is unchanged — see the README's Developing section.)*
 
 ## 4. Connect Claude Code
 

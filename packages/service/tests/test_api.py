@@ -2,7 +2,6 @@
 import re
 
 import httpx
-import pytest
 from synapse_providers import FakeProvider
 
 from synapse_service.api import build_app

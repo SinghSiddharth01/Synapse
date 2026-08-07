@@ -1,6 +1,27 @@
+<div align="center">
+
 # Synapse
 
-> **Shared Working Memory for AI-Assisted Teams**
+**Shared working memory for AI-assisted teams — every agent learns what the whole team knows.**
+
+[![CI](https://github.com/SinghSiddharth01/Synapse/actions/workflows/ci.yml/badge.svg)](https://github.com/SinghSiddharth01/Synapse/actions/workflows/ci.yml)
+[![Docs](https://github.com/SinghSiddharth01/Synapse/actions/workflows/docs.yml/badge.svg)](https://SinghSiddharth01.github.io/Synapse/)
+[![Release](https://img.shields.io/github/v/release/SinghSiddharth01/Synapse?include_prereleases&label=release)](https://github.com/SinghSiddharth01/Synapse/releases/latest)
+[![License: MIT](https://img.shields.io/github/license/SinghSiddharth01/Synapse)](LICENSE)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue)](pyproject.toml)
+[![Platforms](https://img.shields.io/badge/runs%20on-macOS%20·%20Linux%20·%20Windows%2FARM64-8A2BE2)](docs/JOIN-WINDOWS.md)
+
+[Install](#getting-started) · [Documentation](https://SinghSiddharth01.github.io/Synapse/) · [Architecture](docs/architecture.md) · [Join a team](docs/JOIN.md) · [Demo script](docs/demo-script.md)
+
+</div>
+
+Install the client in one command, point it at your team's service, and your coding agent can ask what the team already learned — and put what it learns back:
+
+```bash
+curl -LsSf https://raw.githubusercontent.com/SinghSiddharth01/Synapse/main/install.sh | sh
+synapse config set service.url http://<your-team-host>:8899
+synapse up
+```
 
 ## The Problem
 
@@ -52,36 +73,54 @@ Our demo highlights one concrete use case: a team debugging a shared issue, comb
 
 ## Getting Started
 
-### Prerequisites
+The lifecycle has three separate stages — **install** puts commands on the machine, **configure** sets values (all re-settable, like `git config`), **run** starts processes (foreground only; nothing is a daemon, nothing starts at install time). Two packages ship independently: the **client** (`synapse` — orchestrator, MCP server, edge worker; what every consumer machine runs) and the **server** (`synapse-server` — the shared context service; one machine per team). CI builds both bundles on every release (`.github/workflows/release.yml`), so nobody clones this repo to use Synapse.
 
-- Python 3.12+
-- [`uv`](https://docs.astral.sh/uv/) for dependency management and running the workspace
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) as the agent to connect (the worker auto-detects the agent product; the Codex adapter is registered but unverified against a live transcript — see `fixtures/raw_lines/codex/README.md`)
-- (Optional) a Snapdragon X Elite machine running `geniex serve` on `:18181` for real on-device NPU inference, and Cirrascale/Cloud AI 100 credentials for real cloud synthesis. Without either, `scripts/serve_local.py` (below) starts a model stand-in automatically, so the full pipeline is runnable on any machine.
+### 1 · Install (no clone, no arguments, installs nothing but the software)
 
-### Setup (from scratch)
-
-**One command.** This installs `uv` if you need it, clones, syncs, creates `secrets.jsonc`, registers the MCP server, runs a pre-flight check, and starts the stack — from nothing.
+The installer checks each prerequisite and uses what already exists: `uv` is installed only if missing (a version warning if it is old), Python 3.12+ is downloaded by uv only if the machine has none, and GenieX is only ever considered on Snapdragon (ARM64 Windows) hardware — never installed where it cannot run.
 
 ```bash
-# host a session
-curl -LsSf https://raw.githubusercontent.com/SinghSiddharth01/Synapse/main/install.sh | sh -s -- --purpose "demo session"
+# client (macOS / Linux)
+curl -LsSf https://raw.githubusercontent.com/SinghSiddharth01/Synapse/main/install.sh | sh
 
-# join a session someone is already hosting — one paste, nothing to transcribe
-curl -LsSf https://raw.githubusercontent.com/SinghSiddharth01/Synapse/main/install.sh | sh -s -- --service-url http://192.168.4.44:8899 --shared-id sh-bbe76a56 --contributor akhil
+# server
+curl -LsSf https://raw.githubusercontent.com/SinghSiddharth01/Synapse/main/install.sh | sh -s -- server
 ```
 
 ```powershell
-# Windows, host a session
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/SinghSiddharth01/Synapse/main/install.ps1))) -Purpose "demo session"
+# client (Windows)
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/SinghSiddharth01/Synapse/main/install.ps1)))
 
-# Windows, join one
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/SinghSiddharth01/Synapse/main/install.ps1))) -ServiceUrl http://192.168.4.44:8899 -SharedId sh-bbe76a56 -Contributor akhil
+# server
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/SinghSiddharth01/Synapse/main/install.ps1))) -Component server
 ```
 
-The host's own terminal prints both of those lines, filled in with its real LAN address and session id, ready to paste to a teammate. Any flag the installer does not recognise is forwarded verbatim to `scripts/serve_local.py`, so `--npu`, `--live` and the rest work here too. `install.bat` is the double-clickable Windows equivalent.
+### 2 · Configure (separate step, reconfigurable any time)
 
-Or, step by step:
+```bash
+# the machine hosting the service — API keys live in a FILE, one key per line:
+synapse-server configure --keys /path/to/keys.txt
+
+# every client machine — the URL is ping-tested the moment you set it:
+synapse configure                       # guided, or non-interactively:
+synapse config set service.url http://192.168.4.44:8899
+synapse config set user.contributor akhil
+synapse config set client.distiller claude-cli   # npu | anthropic | claude-cli | listen
+```
+
+The service URL is expected to change (new LAN, new host) — `synapse config set service.url …` any time, exactly like pointing a git remote somewhere else.
+
+### 3 · Run (services exist only while these commands do)
+
+```bash
+synapse-server up    # host: health-checks every key against the cloud FIRST, then serves
+synapse up           # client: model seam + orchestrator + worker; Ctrl-C stops the lot
+synapse health       # either side, any time: what is configured, what is running
+```
+
+`synapse up` prints the MCP line for Claude Code (`claude mcp add --transport http --scope project synapse http://127.0.0.1:8787/mcp`) and the three lines a teammate needs. `synapse-server health` re-checks the key pool on demand.
+
+### Developing (from a checkout)
 
 ```bash
 git clone https://github.com/SinghSiddharth01/Synapse.git
@@ -90,7 +129,7 @@ uv sync
 cp secrets.example.jsonc secrets.jsonc   # paste keys here; none are needed for a first run
 ```
 
-> **Windows on ARM64:** point `uv` at the ARM64 interpreter explicitly (e.g. `uv venv --python <path-to-arm64-python.exe>` before `uv sync`) — a bare `uv venv` can silently provision an emulated x86_64 environment, which breaks NPU wheel installs. Also pin `mcp==1.9.4`; newer `mcp` releases pull a `cryptography` dependency with no ARM64 Windows wheel.
+> **Windows on ARM64:** point `uv` at the ARM64 interpreter explicitly (e.g. `uv venv --python <path-to-arm64-python.exe>` before `uv sync`) — a bare `uv venv` can silently provision an emulated x86_64 environment, which breaks NPU wheel installs. Also pin `mcp==1.9.4`; newer `mcp` releases pull a `cryptography` dependency with no ARM64 Windows wheel. (`install.ps1` handles both automatically.)
 
 ### Run it
 
@@ -110,7 +149,7 @@ Start a **new** Claude Code session in that project and approve the `synapse` se
 
 Add `--npu` to use a real GenieX NPU seam — `serve_local.py` starts `geniex serve` itself if `:18181` is free, adopts one that is already running otherwise, and supervises it either way: it probes `GET /v1/models` every 15s and restarts the seam if it stops answering, because `geniex serve` is known to keep its process alive while its HTTP server goes silent. Every transition prints to your terminal and to `.synapse/logs/supervisor.log`. Add `--live` to proxy the model seam to a real cloud model instead of the stand-in, or `--npu --live` together for the split production topology: distil on the local NPU, synthesize on the real 70B.
 
-To check a machine *before* starting anything, run `./install.sh --doctor-only` (or `install.bat -DoctorOnly` on Windows). It starts no processes; it runs `scripts/doctor.py`, which is also runnable on its own with `uv run python scripts/doctor.py` and reports on `uv`, the interpreter, the `mcp==1.9.4` pin, console encoding, the three ports, `secrets.jsonc`, the awareness pack, and your `claude mcp` registration.
+To check a machine *before* starting anything: `synapse health` (installed client) or `synapse-server health` (installed server) shows what is configured and what is running, with a remedy per failing line. From a checkout, `uv run python scripts/doctor.py` additionally reports on `uv`, the interpreter, the `mcp==1.9.4` pin, console encoding, the three ports, `secrets.jsonc`, the awareness pack, and your `claude mcp` registration.
 
 ### Run the test suite
 

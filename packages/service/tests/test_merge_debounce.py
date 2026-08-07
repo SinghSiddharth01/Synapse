@@ -17,7 +17,6 @@ worse with a write-ahead log that retries by design.
 
 from datetime import datetime, timezone
 
-import pytest
 from starlette.testclient import TestClient
 from synapse_contracts import ModelUsage
 from synapse_providers import FakeProvider

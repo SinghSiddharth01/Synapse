@@ -218,8 +218,9 @@ def test_serve_wires_register_tools_unconditionally_with_a_live_resolver(
                        agent="claude-code", transcript_path="/tmp/t.jsonl",
                        pinned_at=datetime(2026, 8, 4, tzinfo=timezone.utc)),
     )
-    handler = lambda r: httpx.Response(200, json={"version": 2, "new_since": 1,
-                                                  "by_type": {"learning": 1}, "conflicts": 0})
+    def handler(r):
+        return httpx.Response(200, json={"version": 2, "new_since": 1,
+                                         "by_type": {"learning": 1}, "conflicts": 0})
     cli.main(["--state-dir", str(tmp_path)], transport=httpx.MockTransport(handler))
 
     assert len(register_tools_calls) == 2

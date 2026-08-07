@@ -18,3 +18,16 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/synapse_distiller"]
+
+# The wheel must run WITHOUT a checkout: config.py and promptpack.py walk up
+# the tree for config/synapse.toml and config/prompts/, and installed from a
+# wheel there is nothing above the package to find. So the SDIST copies the
+# repo's canonical files into the package's own src layout
+# (synapse_distiller/data/…), and the wheel — which builds FROM the sdist —
+# then carries them as ordinary package data. Targeting the sdist rather than
+# the wheel is load-bearing: a wheel-level force-include of ../../config
+# resolves against the sdist's extracted tree, where ../../config does not
+# exist, and every build fails with "Forced include not found".
+[tool.hatch.build.targets.sdist.force-include]
+"../../config/synapse.toml" = "src/synapse_distiller/data/synapse.toml"
+"../../config/prompts" = "src/synapse_distiller/data/prompts"

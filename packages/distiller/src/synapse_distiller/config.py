@@ -209,6 +209,14 @@ def default_config_path() -> Path | None:
         candidate = parent / "config" / "synapse.toml"
         if candidate.is_file():
             return candidate
+    # Installed from a wheel there is no repo above this file to walk up to,
+    # so the wheel carries a copy of config/synapse.toml as package data (the
+    # release build force-includes it — see packages/distiller/pyproject.toml).
+    # The walk-up stays first so a checkout's live-edited config always wins
+    # over the frozen copy in an editable install.
+    packaged = Path(__file__).resolve().parent / "data" / "synapse.toml"
+    if packaged.is_file():
+        return packaged
     return None
 
 

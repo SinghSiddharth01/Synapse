@@ -1,0 +1,108 @@
+# Release — build the two installable bundles and attach them to a GitHub
+# Release, so nobody ever has to clone this repo to run Synapse.
+#
+# Two bundles, deliberately separate — the halves install, version and ship
+# independently, and long-term consumers only ever take the client:
+#
+#   synapse-client-wheels.zip   contracts + providers + distiller + worker +
+#                               orchestrator + cli  (the `synapse` command)
+#   synapse-server-wheels.zip   contracts + providers + service
+#                               (the `synapse-server` / `synapse-service` commands)
+#
+# The wheels are pure Python (one wheel serves macOS, Linux and Windows —
+# including ARM64, since nothing here compiles); the per-OS split lives in the
+# installer scripts, which each bundle carries: install.sh for macOS/Linux,
+# install.ps1 + install.bat for Windows. Asset names are STABLE (no version in
+# the filename) so `releases/latest/download/<name>` is a permanent URL the
+# installers can rely on.
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: build every workspace wheel
+        run: uv build --all-packages --out-dir dist/wheels
+
+      - name: verify the wheels are self-contained
+        # The distiller walks up the tree for config/synapse.toml and
+        # config/prompts/ in a checkout; installed from a wheel there is no
+        # tree, so the wheel MUST carry both as package data (the
+        # force-include in packages/distiller/pyproject.toml). A bundle
+        # missing them installs fine and then fails on the first distillation
+        # — this step makes that a release failure instead.
+        run: |
+          python - <<'EOF'
+          import glob, sys, zipfile
+          [wheel] = glob.glob("dist/wheels/synapse_distiller-*.whl")
+          names = zipfile.ZipFile(wheel).namelist()
+          required = ["synapse_distiller/data/synapse.toml",
+                      "synapse_distiller/data/prompts/v4-condense.toml"]
+          missing = [n for n in required if n not in names]
+          if missing:
+              sys.exit(f"{wheel} is missing packaged data: {missing}")
+          print(f"{wheel}: packaged data present")
+          EOF
+
+      - name: assemble the client and server bundles
+        run: |
+          set -eu
+          mkdir -p bundles/client bundles/server
+          cp dist/wheels/synapse_contracts-*.whl \
+             dist/wheels/synapse_providers-*.whl \
+             dist/wheels/synapse_distiller-*.whl \
+             dist/wheels/synapse_worker-*.whl \
+             dist/wheels/synapse_orchestrator-*.whl \
+             dist/wheels/synapse_cli-*.whl \
+             bundles/client/
+          cp dist/wheels/synapse_contracts-*.whl \
+             dist/wheels/synapse_providers-*.whl \
+             dist/wheels/synapse_service-*.whl \
+             bundles/server/
+          # Each bundle carries the installers for both OSs, so "download one
+          # zip" is a complete offline install for either half.
+          for half in client server; do
+            cp install.sh install.ps1 install.bat "bundles/$half/"
+            printf '%s\n' "${GITHUB_REF_NAME}" > "bundles/$half/VERSION"
+          done
+          (cd bundles/client && zip -qr ../../synapse-client-wheels.zip .)
+          (cd bundles/server && zip -qr ../../synapse-server-wheels.zip .)
+          ls -l synapse-*-wheels.zip
+
+      - name: publish to the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          # A tag push releases that tag; a manual dispatch refreshes the
+          # rolling dev prerelease so the installers are testable before any
+          # version is cut.
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            TAG="${GITHUB_REF_NAME}"
+            EXTRA=""
+          else
+            TAG="dev-latest"
+            EXTRA="--prerelease"
+            git tag -f "$TAG" && git push -f origin "$TAG"
+          fi
+          gh release view "$TAG" >/dev/null 2>&1 || \
+            gh release create "$TAG" $EXTRA --generate-notes \
+              --title "Synapse $TAG"
+          gh release upload "$TAG" --clobber \
+            synapse-client-wheels.zip synapse-server-wheels.zip

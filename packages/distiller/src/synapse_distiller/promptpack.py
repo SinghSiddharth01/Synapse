@@ -201,7 +201,16 @@ def packs_dir() -> Path:
         candidate = parent / "config" / "prompts"
         if candidate.is_dir():
             return candidate
-    raise PromptPackError("Could not locate config/prompts/ above the package")
+    # No repo above this file — installed from a wheel. The wheel carries
+    # config/prompts/ as package data (force-included at build time; see
+    # packages/distiller/pyproject.toml). Checkout wins when both exist.
+    packaged = Path(__file__).resolve().parent / "data" / "prompts"
+    if packaged.is_dir():
+        return packaged
+    raise PromptPackError(
+        "Could not locate config/prompts/ above the package, and this "
+        "install carries no packaged copy. Reinstall synapse-distiller from "
+        "a release wheel, or run from a checkout.")
 
 
 def load_pack_by_name(name: str) -> PromptPack:

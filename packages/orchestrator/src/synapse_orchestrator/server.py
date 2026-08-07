@@ -593,6 +593,44 @@ def register_tools(server: FastMCP, *, resolve_binding, service_url: str, relay,
                 "by filename across every project, not by directory.")
         return bindings, None
 
+    def _already_bound(agent_session_id: str | None):
+        """The PER-CONVERSATION binding this conversation already holds, or None.
+
+        The read-only front half of the one-conversation-one-session rule:
+        `create_session` (and any future caller) asks this BEFORE mutating the
+        service, because a refusal discovered after `POST /v1/sessions` has
+        already run leaves a live, unowned session stranded on the server.
+
+        Deliberately blind to machine-scope bindings: those say "this MACHINE
+        joined" (scripts/serve_local.py writes one before any conversation
+        exists), not "this conversation chose a session", and refusing a
+        create on one would break the documented demo path. Only exact
+        per-conversation matches count.
+
+        With an explicit id: exact match across every registered agent
+        (`resolve_agent_binding` never falls back). Without one: only an
+        UNAMBIGUOUSLY detected live conversation is checked — the ambiguous
+        case is left for `_bind`'s own refusal, which asks for the id rather
+        than guessing.
+        """
+        if state_dir is None:
+            return None
+        if agent_session_id is not None:
+            for agent in AGENT_REGISTRY:
+                found = resolve_agent_binding(Path(state_dir), agent, agent_session_id)
+                if found is not None:
+                    return found.to_local_binding()
+            return None
+        for agent in AGENT_REGISTRY:
+            live = find_live_transcript_candidates(here, projects_root, agent=agent)
+            if live.ambiguous or live.chosen is None:
+                continue
+            found = resolve_agent_binding(Path(state_dir), agent,
+                                          live.chosen.session_id)
+            if found is not None:
+                return found.to_local_binding()
+        return None
+
     @server.tool(description=(
         "Search the team's shared memory. Call BEFORE exploring an unfamiliar "
         "subsystem, when debugging something a teammate may also be working on, "
@@ -819,6 +857,19 @@ def register_tools(server: FastMCP, *, resolve_binding, service_url: str, relay,
             return ("No contributor identity is configured, so there is nobody to "
                     "create the session as. Restart the orchestrator with "
                     "`--contributor <your name>`.")
+        # BEFORE the POST, not after: one conversation maps to one Shared
+        # Session, and the refusal has to come before anything is created —
+        # a create that then fails to bind leaves a live session stranded on
+        # the service with nobody in it.
+        existing = _already_bound(agent_session_id)
+        if existing is not None:
+            return (
+                f"Not creating anything: this conversation is already in Shared "
+                f"Session {existing.shared_id} (as {existing.contributor}). One "
+                "conversation maps to one Shared Session, so tell the user "
+                "which they want: keep working here — `query` and `contribute` "
+                f"already go to {existing.shared_id} — or call `leave_session` "
+                "first and then `create_session` again to start fresh.")
         try:
             async with _client() as client:
                 resp = await client.post(f"{base}/v1/sessions",
@@ -864,6 +915,16 @@ def register_tools(server: FastMCP, *, resolve_binding, service_url: str, relay,
                 except (_httpx.HTTPError, OSError) as exc:
                     logger.info("create_session: member registration for %r on %r "
                                 "deferred (%s)", who, shared_id, exc.__class__.__name__)
+        except _httpx.HTTPStatusError as exc:
+            # The service ANSWERED and said no — a different failure from
+            # "unreachable", and the difference is what the user acts on: a
+            # full or refusing server needs its operator, not a network check.
+            detail = _error_text(exc.response)
+            return (f"Shared memory refused to create a session "
+                    f"(HTTP {exc.response.status_code}: {detail}). The server "
+                    "is reachable but not accepting new sessions right now — "
+                    "nothing was created. Ask whoever runs it, or try again "
+                    "later; `join_session` an existing session still works.")
         except (_httpx.HTTPError, OSError) as exc:
             return (f"Shared memory is unreachable right now ({exc.__class__.__name__}) "
                     "— no session was created. Is `synapse-service` running?")
@@ -888,8 +949,9 @@ def register_tools(server: FastMCP, *, resolve_binding, service_url: str, relay,
                     f"team until it is. {refusal}")
         return (f"Created Shared Session {shared_id} (purpose: {purpose!r}) as {who}, and "
                 f"bound {_summarize(bindings)} to it. Tell the user that id — it is what "
-                "teammates pass to `join_session`. Findings from this conversation now go "
-                f"to {shared_id} and nowhere else.")
+                f"teammates pass to `join_session` — and the dashboard to share with the "
+                f"team: {base}/debug (findings land there live). Findings from this "
+                f"conversation now go to {shared_id} and nowhere else.")
 
     @server.tool(description=(
         "Attach this conversation to an EXISTING Shared Session a teammate has "

@@ -570,7 +570,7 @@ async def main(argv: list[str]) -> int:
               f"{live_truncated_ratio:.3f} vs {live_loop_ratio:.3f}")
 
     # ---- report ------------------------------------------------------------
-    print(f"\n=== summary ===")
+    print("\n=== summary ===")
     print(f"  checks: {sum(1 for c in CHECKS if c.ok)}/{len(CHECKS)} passed")
     print(f"  API calls: {BUDGET.used}/{BUDGET.cap}", flush=True)
 

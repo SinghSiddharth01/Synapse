@@ -16,6 +16,15 @@ protocol itself:
   skill that auto-loads when the work looks like something a teammate may
   already have been through.
 
+It also ships `commands/synapse/`, which is not a signal and is not automatic:
+slash commands are things a human types. Both signals above fire on their own
+judgement — the hook when memory moved, the skill when the work smells
+familiar — and that is exactly why a deterministic escape hatch has to exist
+next to them. `/synapse:health` is the first: when someone asks "is this thing
+even on?", the answer should not depend on a model deciding the question is
+relevant. It checks the session's own MCP tools, then shells out to `synapse
+health` for the orchestrator, the Edge Worker and a live ping of the Service.
+
 (Signals ① and ② — ambient tool descriptions and the arrival briefing — need
 no pack at all; they ride the MCP `instructions` field and are already live
 the moment `synapse-orchestrator` is running and this project has joined a
@@ -104,10 +113,10 @@ a session. The tools appear as `mcp__synapse__query` and
 
 Two locations work, and the repo uses both. Know which one you are in:
 
-| | skill goes to | hook goes to | who does it |
-|---|---|---|---|
-| **Per project** (this section) | `<project>/.claude/skills/` | `<project>/.claude/synapse-pack/hooks/` | you, by hand |
-| **Per user** | `~/.claude/skills/` | *(not installed)* | `install.sh` / `install.ps1`, phase P5 |
+| | skill goes to | commands go to | hook goes to | who does it |
+|---|---|---|---|---|
+| **Per project** (this section) | `<project>/.claude/skills/` | `<project>/.claude/commands/` | `<project>/.claude/synapse-pack/hooks/` | you, by hand |
+| **Per user** | `~/.claude/skills/` | `~/.claude/commands/` | *(not installed)* | `install.sh` / `install.ps1`, phase P5 |
 
 `install.sh` copies `skills/`, `commands/` and `agents/` into `~/.claude/`, so
 the skill is available in every project on the machine without repeating this
@@ -124,10 +133,17 @@ install is invisible to it and that WARN is then expected.
 From this project's root:
 
 ```bash
-mkdir -p .claude/skills .claude/synapse-pack
+mkdir -p .claude/skills .claude/commands .claude/synapse-pack
 cp -r <path-to-synapse-repo>/packs/claude-code/skills/synapse-shared-memory .claude/skills/synapse-shared-memory
+cp -r <path-to-synapse-repo>/packs/claude-code/commands/synapse .claude/commands/synapse
 cp -r <path-to-synapse-repo>/packs/claude-code/hooks .claude/synapse-pack/hooks
 ```
+
+The `commands/synapse/` **directory name is the namespace**: a file at
+`commands/synapse/health.md` is the command `/synapse:health`. Copy the
+directory, not its contents — flattening it into `.claude/commands/` would
+give you `/health`, which collides with anyone else's and says nothing about
+whose health it is.
 
 Then merge `settings-snippet.json`'s contents into your project's
 `.claude/settings.json` (create the file if it doesn't exist yet). If you
