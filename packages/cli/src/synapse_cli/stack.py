@@ -46,9 +46,22 @@ WORKER_DEBUG_PORT = 8790
 # and a queued probe is indistinguishable from a dead one at the socket
 # (accepted, no bytes). A 5s timeout therefore struck against 81% of real
 # generations (n=16: median 12.9s, max 35.1s), and four of those in a row
-# restarted a healthy seam and killed the in-flight distillation. 55s is ~1.6x
-# the observed worst case, sized off the TAIL because a timeout near the mean
-# strikes on every above-average call.
+# restarted a healthy seam and killed the in-flight distillation. Sized off the
+# TAIL, because a timeout near the mean strikes on every above-average call.
+#
+# ⟨CORRECTED 2026-08-07, second pass⟩ 55s, the first attempt, was STILL too
+# short: a probe queues behind the CHAIN, not one call. A response truncated at
+# the token cap returns unparseable JSON and the distiller retries, so attempt
+# 2/2 runs straight after attempt 1 with no gap. Live at 55s: longest single
+# generation 29.9s but a probe waited 49.9s, and three strikes in six minutes
+# each condemned a seam that then came back on its own during the backoff —
+# 2 of the 3 restarts in the window burned on healthy hardware. 2 attempts x a
+# 500-token response at the 8-14 tok/s this box manages is ~72-124s, hence 150.
+# (geniex logs only COMPLETED requests, so the generations that cause strikes
+# are killed and never appear there — reading the tail off that file
+# under-reports it, which is how 55s looked sufficient.) The real fix is
+# stopping the truncation that forces the retry; this stops the supervisor
+# punishing it in the meantime.
 #
 # TWO strikes, not one — and not because of generation length. `probe_seam`
 # scores four flavours and only ONE spends the timeout: refused, reset and any
@@ -66,7 +79,7 @@ WORKER_DEBUG_PORT = 8790
 # which declares an EXITED process dead immediately, no strikes — on a fast
 # clock instead of inheriting the probe timeout, so a crash is caught in ~5s.
 PROBE_INTERVAL_S = 5
-PROBE_TIMEOUT_S = 55.0
+PROBE_TIMEOUT_S = 150.0
 DEATH_STRIKES = 2
 RESTART_DELAYS_S = (0, 30, 120)
 RESTART_WINDOW_S = 600
