@@ -267,8 +267,23 @@ def test_windows_entry_points_exist():
     assert bat.is_file()
 
     ps1_text = ps1.read_text(encoding="utf-8")
-    # Install-only, mirrored: the same component grammar as install.sh…
-    assert "ValidateSet('client', 'server')" in ps1_text
+    # Mirrored: the same component grammar as install.sh -- READ OFF install.sh
+    # rather than spelled out here.
+    #
+    # ⟨2026-08-07⟩ This assertion used to hard-code "ValidateSet('client',
+    # 'server')". `uninstall` was then added as a third component to BOTH
+    # installers (186b496), so the two sides this test exists to compare
+    # agreed with each other and disagreed only with the literal -- and CI
+    # stayed red on a mirroring test whose mirror was fine. A literal cannot
+    # track a file it is asserting about; deriving it can.
+    sh_components = re.search(r"^\s*([a-z|]+)\)\s*COMPONENT=\$1",
+                              (REPO / "install.sh").read_text(encoding="utf-8"),
+                              re.M)
+    assert sh_components, "install.sh's component case no longer parses"
+    expected = "ValidateSet({})".format(
+        ", ".join(f"'{c}'" for c in sh_components.group(1).split("|")))
+    assert expected in ps1_text, (
+        f"install.ps1 must offer install.sh's components: expected {expected}")
     # …the ARM64 interpreter trap stays handled (uv's managed CPython can be
     # x86-under-Prism on Snapdragon, which breaks NPU wheels)…
     assert "Python312-arm64" in ps1_text
