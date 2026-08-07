@@ -419,6 +419,61 @@ W3.
 
 ---
 
+### W12 — Release bundles and one-command install
+
+⟨ADDED 2026-08-06. Absorbs and extends W8 — same pipeline, bigger destination.
+W8 was "install scripts"; this is "a release a stranger can install".⟩
+
+There is **no release mechanism at all** today. `ci.yml` has exactly two jobs,
+`tests` and `rehearsal`, and neither produces an artifact. Every install so far
+has been `git clone` + `uv sync` + tribal knowledge.
+
+**Two bundles:**
+
+| bundle | contains | for |
+|---|---|---|
+| `synapse-client` | worker · orchestrator · providers · contracts · distiller | a teammate joining someone else's service. **Explicitly NOT the service** — per your instruction. |
+| `synapse-server` | the service, plus the client packages | the host, who also participates |
+
+**One command, both platforms:**
+
+```
+curl -fsSL https://<release-url>/install.sh | bash        # macOS / Linux
+irm https://<release-url>/install.ps1 | iex               # Windows / ARM64
+```
+
+**Assume nothing is present.** That is the requirement that decides whether this
+is real or theatre:
+- Bootstrap `uv` itself if absent — do not require it.
+- Windows/ARM64: pin the ARM64 interpreter, or `uv sync` silently builds an
+  emulated x86 venv where the NPU wheels cannot install and the error surfaces as
+  an unrelated Rust build failure.
+- Pin `mcp==1.9.4` — anything newer pulls `cryptography`, which has no
+  ARM64-Windows wheel.
+- The Windows Unicode/codepage fix from W8 belongs here, set by the installer
+  rather than documented as a step someone will skip.
+- Verify the installed thing actually runs, and say so, rather than exiting 0
+  because the files landed.
+
+**CI:** a `release` job on tag — build both bundles, attach to a GitHub Release,
+publish `install.sh` / `install.ps1` from the tag so the curl URL is stable.
+
+**The verification that makes this trustworthy, and the thing most projects get
+wrong:** install must be tested in a **clean environment** — a container, or a
+runner with nothing preinstalled — never on a dev box that already has `uv`,
+Python and a warm cache. An installer verified only on the author's machine
+tests the author's machine. If a clean Windows/ARM64 runner is not available in
+CI, that gap goes in `TLDR.md` in those words rather than being papered over.
+
+**Blockage risk:** low for the bundles, medium for clean-room Windows/ARM64
+verification, which may not be reachable in CI tonight. Park that half if so —
+the macOS/Linux path is independently valuable.
+
+**Models:** Fable (bundle boundary — what a client genuinely needs without the
+service) · Opus (installers, CI job) · Sonnet (packaging mechanics).
+
+---
+
 ### W10 — Documentation
 
 **Publishing: keep it in-repo, do NOT use the GitHub wiki.** Reasoning, since
@@ -489,8 +544,8 @@ revertable — which is your "if it's redoable, do it that way".
 
 | wave | workstreams | why |
 |---|---|---|
-| 1 | **W11 transcript** (5 lenses) · **W3 investigation** · **W10 docs audit** · **W8 scoping** | all pure-read, zero dependencies, start everything at once |
-| 2 | **W1 Geniex** · **W2 multi-session** · **W8 dev** · **W10 writers** | different subsystems, fully parallel |
+| 1 | **W11 transcript** (5 lenses) · **W3 investigation** · **W10 docs audit** · **W8/W12 scoping** | all pure-read, zero dependencies, start everything at once |
+| 2 | **W1 Geniex** · **W2 multi-session** · **W12 bundles+installers** · **W10 writers** | different subsystems, fully parallel |
 | 3 | **W5** · **W6** · **W7** · **W3 limiter** | W6 reads the other session's four commits first; W7 needs a stack on a shifted port |
 | 4 | **W4a** dashboard Page 1 | needs W2's per-session participants to show anything true |
 | 5 | **W4b** — *only if time remains* | explicitly expendable |
