@@ -92,7 +92,34 @@ MERGE_MIN_INTERVAL_S = float(os.environ.get("SYNAPSE_MERGE_MIN_INTERVAL_S", 60))
 # which component spent it. The names keep their SYNTHESIS_ prefix because the
 # numbers are still what the synthesis key allows -- what changed is that
 # everything spending that key is counted against them.
-SYNTHESIS_TOKENS_PER_HOUR = 25_000
+# ⟨RAISED 2026-08-07, 25_000 -> 100_000⟩ and made overridable.
+#
+# 25,000 was read off a dashboard once and never re-checked, and it is the only
+# ceiling here that is a GUESS: the request limits below (5/min, 20/hour,
+# 250/day) are confirmed against the provider console, and this one is not.
+# Probed live on 2026-08-07, the gateway sends NO rate-limit headers at all --
+# not `X-RateLimit-*`, not `Retry-After`, nothing -- so `affordable()`'s
+# reconciliation path can never activate against this provider and the ledger
+# is the only control there is. A wrong number here is therefore invisible AND
+# binding, which is the worst pair.
+#
+# What it cost: synthesis stalled for 45 minutes while the console read 1 of 20
+# requests for the hour and 7 of 250 for the day. Ten merges spent 31,157
+# tokens and retrieval another 5,664, so the hour's guessed budget was gone
+# while every CONFIRMED ceiling was barely touched.
+#
+# 125,000 is chosen so the confirmed ceiling binds FIRST. Spending the real
+# request allowance costs 20 x the most expensive round actually measured
+# (5,416 tokens) = 108,320, so the budget sits above that with headroom: a key
+# that spends its 20 requests/hour hits the CONFIRMED ceiling before this
+# guessed one. That makes the guess a backstop against runaway cost rather than
+# the thing that decides whether the memory moves.
+#
+# Lower it if a real 429 ever proves the token limit is tighter -- which is now
+# recoverable, since AIC100Provider rotates and backs off (2026-08-07). A 429
+# costs ~36s; a stall costs the whole hour and looks like a broken product.
+SYNTHESIS_TOKENS_PER_HOUR = int(
+    os.environ.get("SYNAPSE_SYNTHESIS_TOKENS_PER_HOUR", 125_000))
 SYNTHESIS_REQUESTS_PER_HOUR = 20
 
 # The dashboard enforces THREE request ceilings; the governor modelled one.

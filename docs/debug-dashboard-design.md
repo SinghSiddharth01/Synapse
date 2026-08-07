@@ -85,31 +85,45 @@ The brain identity strip uses the vertical form via `border-image`.
 
 The home page is both the scroll landing page and a 6-slide presentation:
 
-- **Themes**: dark (brand default) and light, toggled by the header Theme
-  button or the `T` key, persisted in `localStorage["synapse-theme"]`, applied
-  as `data-theme` on `<html>`. Dark tokens live on bare `:root`; light
-  overrides the SAME variable names under `:root[data-theme="light"]`
-  (identity hues are darkened there to clear contrast on white). The home page
-  adds theme-scoped extension tokens (`--cta-bg`, `--cta-ink`, `--inset-bg`,
-  `--glow-*`, `--wash`); the shared base block stays byte-identical with the
-  operator pages, which remain dark-only.
+- **Themes**: dark (brand default) and light, toggled by the Theme button or
+  the `T` key, persisted in `localStorage["synapse-theme"]`, applied as
+  `data-theme` on `<html>`. Dark tokens live on bare `:root`; light overrides
+  the SAME variable names under `:root[data-theme="light"]` (identity hues
+  darkened to clear contrast on white). The home page adds theme-scoped
+  extension tokens (`--cta-bg`, `--cta-ink`, `--inset-bg`, `--glow-*`,
+  `--wash`). **The operator pages are themed too**: each carries the same
+  light override block, a topbar `#theme-btn`, and a fully guarded theme IIFE
+  appended inside their single `<script>` block; every DOM touch is
+  feature-checked so the minidom contract drivers (no `documentElement`, no
+  `localStorage`, no `document.addEventListener`) skip it untouched, and the
+  build asserts the contract script survives as a byte-identical prefix.
 - **Slides mode**: the six `.slide` sections become full-viewport slides.
   Enter/exit via the Present button or `Shift+S`; `Esc` exits; arrows /
-  PageUp/PageDown / Home / End navigate; `F` toggles fullscreen; a fixed HUD
-  shows clickable dots, "n / 6", and the shortcut hints. Slide order: hero +
-  network, the problem (animated diagram), architecture (toggleable), pipeline
-  + division of labor + curation, use cases + aha, measured numbers + run-it +
-  GitHub. Slide-mode-only CSS compacts the hero and proof slides to fit
-  1080p-class viewports; `.scroll-only` elements (anecdote, power-draw note,
+  PageUp/PageDown / Home / End navigate and **wrap around at both ends**; `F`
+  toggles fullscreen; a fixed HUD shows clickable dots, "n / 6", and the
+  shortcut hints. The topbar auto-hides in slides and peeks back when the
+  pointer nears the top edge. Slide order: hero + network, the problem
+  (animated diagram + the titled MATLAB example), architecture (toggleable +
+  clickable stages), service internals (pipeline + curation + deterministic
+  retrieval columns), use cases with per-hue scenario cards, measured numbers
+  + GitHub. Slides typography scales UP (targets ~80% viewport fill);
+  `.scroll-only` elements (terminal, five-providers list, power-draw note,
   footer) hide in slides.
 - **Sessions live in the sidebar only** (with the live status dot), never in
   scroll or slide content. `id="sessions"` is test-required and stays there.
 - **Diagrams** (all inline SVG on CSS variables, so they follow the theme):
-  the hero network (three edge workers: sid, aditya, akhil + the service hub +
-  a Cloud AI 100 chip), the dual-panel why diagram, and the end-to-end
-  architecture diagram whose "Running today / What it allows" segmented
-  control flips `data-view` on `#arch` (ghost device + all five provider
-  plugs light via CSS transitions; captions swap in JS).
+  the hero network (three workers with their models named: sid and aditya on
+  Qwen3-4B · Hexagon NPU, akhil on Claude Haiku · Anthropic API, plus the
+  service hub and a Cloud AI 100 chip), the dual-panel why diagram, and the
+  end-to-end architecture diagram: one box per user (agent chip, Synapse MCP ·
+  orchestrator chip, worker → provider chip), five iconized service stages
+  (log, fold, retrieval, synthesis scheduler, working memory) that are
+  **clickable** (`data-focus` on `#arch` dims the rest and swaps the
+  `#arch-detail` explainer), the Llama-3.3-70B AI 100 box, and the provider
+  seam. The "Running today / What it allows" segmented control flips
+  `data-view` (ghost machine + all plugs light via CSS transitions; captions
+  swap in JS). Model symmetry rule: wherever the cloud model (Llama-3.3-70B /
+  AI 100) is named, the local model (Qwen3-4B / Hexagon NPU) is named too.
 - **GitHub link**: the served page may not contain `http://` / `https://`
   substrings (test-enforced), so both GitHub anchors ship with `href="#"` and
   the URL is assembled at runtime in JS. The page still makes zero external

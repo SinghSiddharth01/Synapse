@@ -103,8 +103,39 @@ def test_a_partial_snapshot_still_consults_the_ledger_for_what_it_omits():
     """The gateway reported requests but said nothing about tokens. Answering
     True on the strength of the half it covered would skip the token ceiling
     entirely -- the dimension that actually binds at ~6 merges/hour."""
-    spend = _ledger(6, tokens=4_000)          # 24,000 of the 25,000 token budget
+    # Sized against the ceiling as it stands (125,000), not the 25,000 this
+    # test was written for: 32 rounds x 4,000 = 128,000, over the line.
+    spend = _ledger(32, spacing_s=100.0, tokens=4_000)
     snapshot = RateLimitSnapshot(requests_remaining=13)   # no tokens_remaining
     ok, why = api_mod.affordable(spend, provider=_StubProvider(snapshot))
     assert not ok
     assert "token budget" in why
+
+
+def test_the_token_ceiling_does_not_bind_before_the_confirmed_request_ceiling():
+    """The guessed ceiling must be a backstop, not the decider.
+
+    ⟨2026-08-07⟩ 25,000 tokens/hour stalled synthesis for 45 minutes while the
+    provider console read 1 of 20 requests for the hour and 7 of 250 for the
+    day -- ten merges spent 31,157 tokens and retrieval 5,664, so the GUESSED
+    budget was gone while every CONFIRMED ceiling was barely touched. And the
+    gateway sends no rate-limit headers at all (probed live), so `affordable()`
+    can never reconcile against reality here: a wrong number is both invisible
+    and binding.
+
+    So the token budget is now set above what the request ceiling can spend.
+    Nineteen rounds at the most expensive round actually measured must remain
+    affordable -- if this fails, the guess is deciding again.
+    """
+    worst_round_measured = 5_416
+    spend = _ledger(19, tokens=worst_round_measured)
+    ok, why = api_mod.affordable(spend, provider=_StubProvider())
+    assert ok, f"the guessed token ceiling bound before 20 requests/hour: {why}"
+
+
+def test_the_token_ceiling_is_overridable_without_a_code_change(monkeypatch):
+    """Operators must be able to drop it the moment a real 429 proves the
+    limit is tighter, without waiting for a release."""
+    monkeypatch.setattr(api_mod, "SYNTHESIS_TOKENS_PER_HOUR", 5_000)
+    ok, why = api_mod.affordable(_ledger(2, tokens=4_000), provider=_StubProvider())
+    assert not ok and "token budget" in why

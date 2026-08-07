@@ -154,8 +154,38 @@ class Segmenter:
         if flush_incomplete:
             complete, remainder = turns, []
         elif len(turns) <= 1:
-            # Only one turn so far, and we cannot yet tell whether it has ended.
-            return []
+            # Only one turn so far, and we cannot yet tell whether it has ended
+            # -- but "cannot tell" is not a reason to hold content that is
+            # already finished. ⟨2026-08-07⟩
+            #
+            # The hold exists so a HALF-WRITTEN turn is not distilled into a
+            # half finding. It was unconditional, and in a long agentic turn
+            # nothing could end it: a turn closes on a user TEXT event, and the
+            # idle flush measures time since the transcript last grew, which
+            # every tool result resets. Neither trigger could fire while the
+            # agent worked. Measured live: 19 -> 46 events held across eight
+            # minutes, then 16 findings in one burst once the human stopped.
+            #
+            # Two things already true make the early emit safe. An assistant
+            # message is FINAL the moment it lands in the transcript, so holding
+            # it buys no completeness. And anything past a budget boundary is
+            # already emitted as an independent sub-segment -- see
+            # `_turn_to_segments`: "Sub-segments are not merged back together
+            # anywhere: each is distilled independently and deduplication is
+            # synthesis's job, service-side." So the trade is latency for a
+            # little duplication, and the dedup already exists upstream.
+            #
+            # Only FULL chunks go. The trailing chunk -- the part still being
+            # written -- stays pending, which is the half-turn protection the
+            # hold was for, now bounded to one budget's worth instead of a whole
+            # turn.
+            chunks = self._chunk(turns[0])
+            if len(chunks) <= 1:
+                return []
+            if max_segments is not None:
+                chunks = chunks[:max_segments + 1]
+            self._pending = chunks[-1]
+            return self._segments_from_chunks(chunks[:-1])
         else:
             complete, remainder = turns[:-1], turns[-1]
 
@@ -192,6 +222,17 @@ class Segmenter:
         Sub-segments are not merged back together anywhere: each is distilled
         independently and deduplication is synthesis's job, service-side.
         """
+        return self._segments_from_chunks(self._chunk(turn))
+
+    def _chunk(self, turn: list[AgentEvent]) -> list[list[AgentEvent]]:
+        """Split one turn into budget-sized groups of events.
+
+        Separated from `_turn_to_segments` so `drain` can ask where the
+        boundaries fall WITHOUT minting Segments — an open turn needs its full
+        chunks emitted and its trailing chunk put back, and putting Segments
+        back is not a thing `_pending` can hold. Pure, so re-chunking the tail
+        on the next drain alongside newly arrived events is safe.
+        """
         if not turn:
             return []
 
@@ -222,7 +263,9 @@ class Segmenter:
                 self.budget_tokens,
                 len(chunks),
             )
+        return chunks
 
+    def _segments_from_chunks(self, chunks: list[list[AgentEvent]]) -> list[Segment]:
         segments: list[Segment] = []
         for chunk in chunks:
             session = self.agent_session_id or chunk[0].agent_session_id

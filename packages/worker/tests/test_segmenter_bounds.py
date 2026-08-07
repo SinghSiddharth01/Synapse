@@ -171,10 +171,17 @@ def test_the_split_runs_on_the_held_back_path_too() -> None:
     huge = "\n".join(f"line {i} of an assistant message" for i in range(120))
     segmenter = Segmenter(budget_tokens=budget, agent_session_id="sess-1")
     segmenter.add([ev("user", "text", "go", 0), ev("assistant", "text", huge, 1)])
-    assert segmenter.drain() == [], "one turn so far; nothing is complete"
+    # ⟨2026-08-07⟩ This used to assert `drain() == []` — "one turn so far;
+    # nothing is complete". An open turn already past the budget now emits its
+    # FULL chunks and holds only the trailing one, because waiting for a turn
+    # that may run for minutes of tool use was the latency this fixes. The
+    # property under test is unchanged and now spans both drains: the oversized
+    # event is cut, and every part fits.
+    early = segmenter.drain()
+    assert early, "an open turn past the budget must not be held whole"
 
     segmenter.add([ev("user", "text", "next", 2)])
-    segments = segmenter.drain(flush_incomplete=False)
+    segments = early + segmenter.drain(flush_incomplete=False)
 
     # NOT `len(segments) > 1`: inter-event chunking alone splits `go` from the
     # assistant message, so that assertion is true with the pre-split reverted.
