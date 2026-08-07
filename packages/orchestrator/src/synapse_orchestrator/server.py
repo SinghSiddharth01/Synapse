@@ -289,35 +289,6 @@ def register_tools(server: FastMCP, *, resolve_binding, service_url: str, relay,
     def _client(timeout: float = _LIFECYCLE_TIMEOUT_S):
         return _httpx.AsyncClient(transport=transport, timeout=timeout)
 
-    def _machine_binding():
-        """The `machine`-scoped stand-in binding, if this machine has one.
-
-        `scope` is the contract's answer to "who does this binding speak for"
-        (contracts/binding.py): a `session`-scoped binding is ONE
-        conversation's, and a reader comparing its own session id against it
-        "should refuse on a mismatch"; a `machine`-scoped one is the stand-in
-        `scripts/serve_local.py` writes before any conversation exists,
-        meaning "any conversation here speaks for it, under its own real
-        session id".
-
-        Scanned rather than read off `resolve_binding()` because
-        `SessionBinding.to_local_binding()` drops `scope`, so the resolved
-        primary cannot answer this question. Both layouts are swept for the
-        same reason `_bindings_on` sweeps both.
-
-        Never raises: `read_binding` answers None for an absent or corrupt
-        file, and `glob` on a missing dir yields nothing.
-        """
-        if state_dir is None:
-            return None
-        root = bindings_dir(Path(state_dir))
-        found = [b for b in (read_binding(p) for p in
-                             sorted(root.glob("*.json")) + sorted(root.glob("*/*.json")))
-                 if b is not None and b.scope == "machine"]
-        if not found:
-            return None
-        return max(found, key=lambda b: b.pinned_at)
-
     def _effective_binding(agent_session_id: str | None):
         """The binding the CALLING CONVERSATION speaks under — the whole of
         W2's one-orchestrator-N-clients resolution, used by every tool that
@@ -340,29 +311,14 @@ def register_tools(server: FastMCP, *, resolve_binding, service_url: str, relay,
            since. This is the fix: before it, window A's `query` was routed by
            whichever window joined LAST, so A read and wrote B's Shared
            Session (reproduced, 2026-08-06 review).
-        3. **Matches nothing** — the MACHINE-SCOPED stand-in binding, if one
-           exists, with the CALLER'S REAL id substituted as the acting
-           identity. That is what makes the documented demo path correct with
-           no extra setup: `scripts/serve_local.py` writes one machine-scope
-           binding before any conversation exists, so no per-session file can
-           exist for the window that then connects, and substituting its real
-           id is what gives suppression and attribution a true conversation to
-           key on rather than the `as-<contributor>` placeholder.
-
-           It is deliberately NOT `resolve_binding()` any more (2026-08-06).
-           Falling back to the machine's most-recently-pinned binding
-           regardless of scope meant an id matching nothing rode whatever
-           SESSION-scoped binding another window happened to own: a
-           conversation that had never joined anything read and wrote a
-           teammate's Shared Session while believing itself correctly bound,
-           and the substitution stamped its real id onto that borrowed
-           session so nothing downstream could tell. Silent is what made it
-           bad. `scope` exists precisely to separate "a stand-in any
-           conversation may speak under" from "one conversation's own", and
-           contracts/binding.py already specifies the reader's duty here:
-           refuse on a mismatch. An unknown id is UNBOUND, not "probably this
-           one" — `_NOT_JOINED` tells the caller how to bind, which is the
-           recoverable answer; borrowing is the unrecoverable one.
+        3. **Matches nothing** — the machine's binding, with the CALLER'S REAL
+           id substituted as the acting identity. That is what makes the
+           documented demo path correct with no extra setup: `scripts/
+           serve_local.py` writes one machine-scope binding before any
+           conversation exists, so no per-session file can exist for the
+           window that then connects, and substituting its real id is what
+           gives suppression and attribution a true conversation to key on
+           rather than the `as-<contributor>` placeholder.
 
         Which agent owns the id is never something the caller has to know —
         every registered agent is probed, same discipline as `_bind`.
@@ -374,53 +330,20 @@ def register_tools(server: FastMCP, *, resolve_binding, service_url: str, relay,
                 found = resolve_agent_binding(Path(state_dir), agent, agent_session_id)
                 if found is not None:
                     return found.to_local_binding()
-        stand_in = _machine_binding()
-        if stand_in is None:
+        fallback = resolve_binding()
+        if fallback is None:
             return None
-        return stand_in.to_local_binding().model_copy(
-            update={"agent_session_id": agent_session_id})
+        return fallback.model_copy(update={"agent_session_id": agent_session_id})
 
-    def _identity(agent_session_id: str | None = None) -> str | None:
-        """Who THIS conversation is, for the service.
+    def _identity() -> str | None:
+        """Who this conversation is, for the service.
 
         The live binding wins: it is the identity that has already reached the
         service and that `Attribution.contributor` is stamped with, so a
         `leave_session` must address the same string the findings did. The
         configured `contributor` is only the seed for the state where no
         binding exists yet — which is exactly when `create_session` and
-        `join_session` are called.
-
-        THE CALLER'S OWN binding is consulted first (2026-08-06). On a
-        two-window machine `resolve_binding()` alone answers with whichever
-        window joined last, so a `create_session` from window A was created as
-        window B's contributor whenever B had joined more recently — the
-        wrong-conversation-answers defect W2 fixed for `query`, reaching the
-        one field that decides who OWNS the new session and therefore whom its
-        creator-only end gate will later admit.
-
-        It then falls back to the machine's binding, and that fallback is NOT
-        a leftover — it is the rule
-        `test_the_live_binding_supplies_the_identity_not_the_configured_default`
-        pins, and that test is mutation-verified. The conversation calling
-        `create_session`/`join_session` has by definition no binding of its
-        own yet, so this fallback is the ONLY path on the normal lifecycle
-        route, and it has to reach the contributor a prior `synapse-worker
-        join --contributor <name>` already stamped on
-        `Attribution.contributor` and the service has already seen. Preferring
-        the configured `--contributor` there splits one human into two
-        identities: the contributor-keyed watermark and self-suppression both
-        key on the name the findings carry, and `end_session` then finds the
-        other name still in `members` and refuses, naming the user to
-        themselves.
-
-        So the narrowing here is deliberately only the part that is safe: a
-        caller WITH its own binding stops being overruled by a sibling
-        window's. A caller without one keeps today's answer, because on this
-        machine that string is the same human under the name the service
-        already knows."""
-        own = _effective_binding(agent_session_id) if agent_session_id is not None else None
-        if own is not None:
-            return own.contributor
+        `join_session` are called."""
         binding = resolve_binding()
         if binding is not None:
             return binding.contributor
@@ -931,7 +854,7 @@ def register_tools(server: FastMCP, *, resolve_binding, service_url: str, relay,
         "conversation's then nothing said here will reach the team, and that is "
         "invisible from the inside."))
     async def create_session(purpose: str, agent_session_id: str | None = None) -> str:
-        who = _identity(agent_session_id)
+        who = _identity()
         if who is None:
             return ("No contributor identity is configured, so there is nobody to "
                     "create the session as. Restart the orchestrator with "
@@ -1059,7 +982,7 @@ def register_tools(server: FastMCP, *, resolve_binding, service_url: str, relay,
         "they cannot see tool results, and a join they hear nothing about is "
         "indistinguishable from one that did not happen."))
     async def join_session(shared_id: str, agent_session_id: str | None = None) -> str:
-        who = _identity(agent_session_id)
+        who = _identity()
         if who is None:
             return ("No contributor identity is configured, so there is nobody to join "
                     "as. Restart the orchestrator with `--contributor <your name>`.")
@@ -1310,17 +1233,6 @@ def register_tools(server: FastMCP, *, resolve_binding, service_url: str, relay,
         "and the transcript it unbound."))
     async def end_session(agent_session_id: str | None = None,
                           confirm: bool = False) -> str:
-        # `_effective_binding`, not `resolve_binding()` — arrived at twice
-        # independently (2026-08-06 and -07, merged here). This is the one tool
-        # whose mistake cannot be undone: with two windows joined to two Shared
-        # Sessions, the machine-wide "most recently pinned" pick meant the
-        # caller closed the OTHER window's session, destroying a team's memory
-        # for everyone on a call the user made about a different session. W2
-        # moved every other conversation-acting tool off that pick and missed
-        # this one. The creator-only and `confirm` gates above are a second,
-        # independent layer over the same hazard — they decide WHETHER this
-        # caller may end a session; resolving per caller decides WHICH session
-        # they are ending. Neither substitutes for the other.
         binding = _effective_binding(agent_session_id)
         if binding is None:
             return _NOT_JOINED

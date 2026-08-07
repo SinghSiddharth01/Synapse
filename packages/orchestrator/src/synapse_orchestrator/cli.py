@@ -120,39 +120,6 @@ def _pinned_at_key(binding) -> datetime:
             else binding.pinned_at.replace(tzinfo=timezone.utc))
 
 
-def _count_bound_conversations(state_dir: Path) -> int:
-    """How many distinct CONVERSATIONS this machine holds bindings for.
-
-    What the arrival briefing needs in order to know whether it is entitled to
-    name a session at all (briefing.py's `_ambiguous_briefing`). Two or more
-    and it is not: MCP `initialize` carries no `agent_session_id`, so the
-    orchestrator cannot tell which of them is connecting.
-
-    Counts DISTINCT `(agent, agent_session_id)` pairs, not files. Since W2
-    every bind writes `bindings/<agent>/<session>.json` AND refreshes the
-    compatibility mirror `bindings/<agent>.json` (contracts/binding.py), so
-    one joined conversation is two files on disk and counting files would
-    call every single-window machine ambiguous.
-
-    `session`-scoped only. A `machine`-scoped binding is the stand-in
-    `scripts/serve_local.py` writes to mean "any conversation here speaks for
-    this", so it is by definition not one conversation among several and
-    cannot create the ambiguity this is measuring — counting it would break
-    the documented demo path by making its one and only binding suppress its
-    own briefing.
-    """
-    bindings_dir = _bindings_dir(state_dir)
-    if not bindings_dir.is_dir():
-        return 0
-    seen = set()
-    for path in sorted(bindings_dir.glob("*.json")) + sorted(bindings_dir.glob("*/*.json")):
-        binding = read_binding(path)
-        if binding is None or binding.scope != "session":
-            continue
-        seen.add((binding.agent, binding.agent_session_id))
-    return len(seen)
-
-
 def _resolve_binding_for_agent(state_dir: Path, agent: str,
                                agent_session: str | None = None) -> LocalBinding | None:
     """The binding for exactly ONE Agent product, optionally for exactly ONE
@@ -560,9 +527,8 @@ def _main(argv: list[str] | None = None, *,
     # docs/JOIN.md documents, this string is the ONLY thing the joining agent is
     # handed — serve_local.py writes the binding itself, so `join_session` (the
     # other place the arrival body is delivered) is never called at all.
-    briefing = asyncio.run(compose_instructions(
-        binding, args.service_url, transport=transport,
-        bound_conversations=_count_bound_conversations(state_dir)))
+    briefing = asyncio.run(compose_instructions(binding, args.service_url,
+                                                transport=transport))
     server = create_mcp(briefing)
     # Registered UNCONDITIONALLY, even when nothing is joined yet — round 3
     # review's fix for the tools-frozen-at-boot blocker. `resolve_binding` is
@@ -596,10 +562,8 @@ def _main(argv: list[str] | None = None, *,
     # process started — see briefing.py's "Keeping the briefing TRUE after
     # boot". Hung off the app lifespan, so it lives exactly as long as the
     # server does.
-    attach_briefing_refresher(
-        app, server, resolve_binding, args.service_url,
-        interval=args.briefing_refresh, transport=transport,
-        count_bound_conversations=partial(_count_bound_conversations, state_dir))
+    attach_briefing_refresher(app, server, resolve_binding, args.service_url,
+                              interval=args.briefing_refresh, transport=transport)
     print(f"synapse-orchestrator on http://{args.host}:{args.port} "
           f"(mcp at /mcp, producer at /producer/findings, "
           f"session: {shared_id or 'unbound'})")
