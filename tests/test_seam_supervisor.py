@@ -109,43 +109,107 @@ def _run(supervisor, clock, ticks: int, interval: int | None = None) -> None:
         supervisor.tick()
 
 
+def _kill(supervisor, clock, sl, interval: int | None = None) -> None:
+    """Drive exactly one death: `DEATH_STRIKES` consecutive failing ticks.
+
+    Reads the constant rather than hard-coding 4. These tests are about the
+    backoff ledger and the give-up rule, which are orthogonal to how many
+    strikes buy a death — before this existed they all said `_run(sup, 4)`
+    and turned into failures the moment the threshold moved, obscuring the
+    behaviour they actually pin."""
+    _run(supervisor, clock, sl.DEATH_STRIKES, interval)
+
+
+@pytest.fixture
+def multi_strike(sl, monkeypatch):
+    """Four strikes, whatever the shipped constant is.
+
+    The strike-then-heal machinery has to stay correct at any threshold — it
+    is what `DEATH_STRIKES = 2` and up rely on, and the tail-latency argument
+    that currently justifies 1 is a property of THIS workload, not of the
+    supervisor. Pinning that machinery against the live constant would have
+    deleted the tests along with the behaviour the first time the number
+    changed; pinning it against an explicit 4 keeps it covered and lets
+    `test_the_shipped_threshold_...` below own the shipped value."""
+    monkeypatch.setattr(sl, "DEATH_STRIKES", 4)
+    return 4
+
+
 # ─────────────────────────────────────────────────────────────────────────
 # The liveness rule
 # ─────────────────────────────────────────────────────────────────────────
 
 
-def test_four_consecutive_failures_are_a_death_and_three_are_not(sl):
-    """Four, not one and not two. /models runs no inference and is answered
-    off the accept loop, so a seam that cannot produce it for a minute is not
-    busy — it is not serving. Three strikes must therefore be survivable: a
-    seam that hiccups once must not be restarted out from under a live query.
+def test_the_shipped_threshold_tolerates_one_failure_and_dies_on_the_second(sl):
+    """The CURRENT setting, pinned on its own so a change to it is deliberate.
 
-    ⟨post-review⟩ This docstring used to justify the threshold as "4x15s = 45s
-    clears the seam's own max_seconds_per_call = 30s with 50% margin". That
-    reasoning was inherited from the design note and is wrong twice over:
-    `max_seconds_per_call` is a segment-SIZING budget (prompt bytes / measured
-    prefill rate), not a wall-clock bound on a seam call, and the real
-    per-call bound on this seam is OpenAICompatibleProvider's 300s. The
-    threshold is unchanged — it errs safe — but it is no longer defended with
-    a margin that does not exist."""
+    ⟨2026-08-07⟩ `PROBE_TIMEOUT_S` is 55s because geniex serves one request at
+    a time: the probe queues behind a running generation, and a timeout
+    shorter than the generation tail restarts healthy hardware. So it has to
+    outlast the tail — 55s against a 35.1s measured worst case.
+
+    `DEATH_STRIKES` is 2, and the reason is NOT generation length. A 60s
+    end-to-end budget would afford exactly one strike, and this was first
+    written that way. But `probe_seam` scores four flavours of failure and
+    only the timeout one actually waits: refused, reset and any non-200
+    strike INSTANTLY. At one strike a single transient HTTP 500 restarts the
+    seam and kills the live generation without having waited at all — the 55s
+    buys nothing on those paths because they never reach it. The strikes are
+    the only tolerance for the instant flavours, which is why the assertion
+    below drives a `connection refused` (instant) rather than a timeout: it
+    fails if the threshold ever drops back to 1."""
+    assert sl.DEATH_STRIKES == 2
+    # The load-bearing pair: a strike must cost longer than the seam's
+    # slowest legitimate answer, or the rule restarts working hardware.
+    assert sl.PROBE_TIMEOUT_S > 35.1, "must outlast the measured generation tail"
+    assert sl.DEATH_STRIKES * (sl.PROBE_INTERVAL_S + sl.PROBE_TIMEOUT_S) <= 120
+
     clock = _Clock()
     seam = _Seam(alive=False)
     restart = _Restarter(seam)
     sup = _supervisor(sl, seam, restart, clock)
 
-    _run(sup, clock, 3)
+    _run(sup, clock, 1)
+    assert restart.calls == 0, "one instant failure must not restart the seam"
+    _run(sup, clock, 1)
+    assert restart.calls == 1
+
+
+def test_consecutive_failures_are_a_death_and_one_short_of_it_is_not(sl, multi_strike):
+    """At any threshold above 1, the last strike is the one that kills and
+    every strike before it is survivable — a seam that hiccups must not be
+    restarted out from under a live query.
+
+    ⟨post-review⟩ This docstring used to justify 4 as "4x15s = 45s clears the
+    seam's own max_seconds_per_call = 30s with 50% margin". That reasoning was
+    inherited from the design note and is wrong twice over:
+    `max_seconds_per_call` is a segment-SIZING budget (prompt bytes / measured
+    prefill rate), not a wall-clock bound on a seam call, and the real
+    per-call bound on this seam is OpenAICompatibleProvider's 300s."""
+    clock = _Clock()
+    seam = _Seam(alive=False)
+    restart = _Restarter(seam)
+    sup = _supervisor(sl, seam, restart, clock)
+
+    _run(sup, clock, multi_strike - 1)
     assert restart.calls == 0
     assert sup.status == sl.SUSPECT
-    assert sup.strikes == 3
+    assert sup.strikes == multi_strike - 1
 
     _run(sup, clock, 1)
     assert restart.calls == 1
 
 
-def test_one_slow_probe_costs_a_strike_and_the_next_success_heals_it(sl):
-    """SLOW is not DEAD. A single 5s timeout in the middle of a healthy run
-    must leave no residue — otherwise a busy box accumulates strikes across
-    minutes and eventually restarts a seam that was working the whole time."""
+def test_one_slow_probe_costs_a_strike_and_the_next_success_heals_it(sl, multi_strike):
+    """SLOW is not DEAD. A single timeout in the middle of a healthy run must
+    leave no residue — otherwise a busy box accumulates strikes across minutes
+    and eventually restarts a seam that was working the whole time.
+
+    Exactly the failure that shipped: with a 5s timeout against 8-35s
+    generations the box WAS busy, every generation cost a strike, and four in
+    a row restarted a healthy seam. Healing is what kept that from happening
+    sooner, so it stays covered even though the shipped threshold no longer
+    reaches a second strike."""
     clock = _Clock()
     seam = _Seam(alive=True)
     restart = _Restarter(seam)
@@ -163,7 +227,7 @@ def test_one_slow_probe_costs_a_strike_and_the_next_success_heals_it(sl):
     assert restart.calls == 0
 
 
-def test_three_failures_then_a_success_resets_the_count(sl):
+def test_failures_short_of_death_then_a_success_resets_the_count(sl, multi_strike):
     """The one off-by-one that would matter: if strikes were not reset, a seam
     that failed three times an hour apart would be restarted on the fourth
     unrelated hiccup."""
@@ -172,13 +236,13 @@ def test_three_failures_then_a_success_resets_the_count(sl):
     restart = _Restarter(seam)
     sup = _supervisor(sl, seam, restart, clock)
 
-    _run(sup, clock, 3)
+    _run(sup, clock, multi_strike - 1)
     seam.alive = True
     _run(sup, clock, 1)
     assert sup.strikes == 0
 
     seam.alive = False
-    _run(sup, clock, 3)
+    _run(sup, clock, multi_strike - 1)
     assert restart.calls == 0        # not 3 + 3, which would have restarted
     _run(sup, clock, 1)
     assert restart.calls == 1
@@ -236,20 +300,20 @@ def test_restarts_back_off_0_30_120_and_the_fourth_death_gives_up(sl):
     restart = _Restarter(seam, heals=False)     # nothing ever comes back
     sup = _supervisor(sl, seam, restart, clock)
 
-    _run(sup, clock, 4)                          # death 1
+    _kill(sup, clock, sl)                          # death 1
     assert restart.calls == 1                    # delay 0: immediate
 
-    _run(sup, clock, 4)                          # death 2
+    _kill(sup, clock, sl)                          # death 2
     assert restart.calls == 1                    # 30s delay not yet served
     _run(sup, clock, 2)
     assert restart.calls == 2
 
-    _run(sup, clock, 4)                          # death 3
+    _kill(sup, clock, sl)                          # death 3
     assert restart.calls == 2                    # 120s delay
     _run(sup, clock, 8)
     assert restart.calls == 3
 
-    _run(sup, clock, 4)                          # death 4, inside the window
+    _kill(sup, clock, sl)                          # death 4, inside the window
     assert sup.status == sl.GAVE_UP
     assert restart.calls == 3                    # and no more, ever
 
@@ -269,7 +333,7 @@ def test_the_backoff_delays_are_exactly_0_30_and_120_seconds(sl):
 
     served: list[float] = []
     for expected_calls in (1, 2, 3):
-        _run(sup, clock, 4)                       # four strikes -> a death
+        _kill(sup, clock, sl)                       # four strikes -> a death
         died_at = clock.t
         while restart.calls < expected_calls:
             _run(sup, clock, 1, interval=1)
@@ -292,9 +356,9 @@ def test_a_seam_that_recovers_during_the_backoff_delay_is_not_restarted(sl, tmp_
     restart = _Restarter(seam, heals=False)
     sup = _supervisor(sl, seam, restart, clock, log_path)
 
-    _run(sup, clock, 4)                  # death 1, delay 0 -> restarts at once
+    _kill(sup, clock, sl)                  # death 1, delay 0 -> restarts at once
     assert restart.calls == 1
-    _run(sup, clock, 4)                  # death 2, now serving a 30s delay
+    _kill(sup, clock, sl)                  # death 2, now serving a 30s delay
     assert restart.calls == 1
 
     seam.alive = True                    # ...and it comes back by itself
@@ -324,7 +388,7 @@ def test_a_restart_that_never_ran_does_not_get_the_credit_for_a_recovery(sl, tmp
 
     sup = _supervisor(sl, seam, broken_restart, clock, log_path)
 
-    _run(sup, clock, 4)                  # death -> restart -> raises
+    _kill(sup, clock, sl)                  # death -> restart -> raises
     seam.alive = True                    # someone fixes it by hand
     _run(sup, clock, 1)
 
@@ -346,7 +410,7 @@ def test_after_giving_up_it_still_watches_and_says_when_the_seam_returns(sl, tmp
     sup = _supervisor(sl, seam, restart, clock, log_path)
 
     for _ in range(4):                   # four deaths -> GAVE_UP
-        _run(sup, clock, 4)
+        _kill(sup, clock, sl)
         _run(sup, clock, 12)
     assert sup.status == sl.GAVE_UP
     probes_before = seam.probes
@@ -361,28 +425,60 @@ def test_after_giving_up_it_still_watches_and_says_when_the_seam_returns(sl, tmp
     assert restart.calls == 3            # and it still restarted nothing
 
 
-def test_the_dead_line_reports_the_span_it_measured_not_a_constant(sl, tmp_path):
-    """`(DEATH_STRIKES - 1) * PROBE_INTERVAL_S` = 45s is only the span when
-    probes return instantly. A probe that fails by TIMING OUT spends its own
-    5s first, so on the hung socket this supervisor exists for the real span
-    is ~60s — and the DEAD line is the number an operator quotes when deciding
+def _hung_socket_supervisor(sl, clock, log_path):
+    """A supervisor whose probe hangs for the full timeout, then strikes —
+    the signature this whole module exists for."""
+
+    def slow_failing_probe():
+        clock.advance(sl.PROBE_TIMEOUT_S)     # the read timeout, spent
+        return (f"no response within {sl.PROBE_TIMEOUT_S:g}s "
+                f"(socket accepted, nothing sent)")
+
+    sup = _supervisor(sl, None, _Restarter(_Seam()), clock, log_path)
+    sup._probe = slow_failing_probe
+    return sup
+
+
+def test_the_dead_line_reports_the_span_it_measured_not_a_constant(
+        sl, tmp_path, multi_strike):
+    """`(DEATH_STRIKES - 1) * PROBE_INTERVAL_S` is only the span when probes
+    return instantly. A probe that fails by TIMING OUT spends its own timeout
+    first, so on the hung socket this supervisor exists for the real span is
+    longer — and the DEAD line is the number an operator quotes when deciding
     whether the box is failing more often than it used to. Measured, not
     derived: a constant would be wrong every time it mattered."""
     log_path = tmp_path / "supervisor.log"
     clock = _Clock()
+    sup = _hung_socket_supervisor(sl, clock, log_path)
 
-    def slow_failing_probe():
-        clock.advance(sl.PROBE_TIMEOUT_S)     # the read timeout, spent
-        return "no response within 5s (socket accepted, nothing sent)"
-
-    sup = _supervisor(sl, None, _Restarter(_Seam()), clock, log_path)
-    sup._probe = slow_failing_probe
-
-    _run(sup, clock, 4)
+    _run(sup, clock, multi_strike)
 
     # Strikes begin at t+15 and the fourth tick begins at t+75: four cycles of
     # (15s sleep + 5s burnt in the probe), less the first sleep.
-    assert "4 consecutive probe failures over 60s" in log_path.read_text()
+    span = (multi_strike - 1) * (15 + sl.PROBE_TIMEOUT_S)
+    assert (f"{multi_strike} consecutive probe failures over {int(span)}s"
+            in log_path.read_text())
+
+
+def test_a_one_strike_death_reports_the_silence_not_a_zero_second_span(
+        sl, tmp_path, monkeypatch):
+    monkeypatch.setattr(sl, "DEATH_STRIKES", 1)
+    """At the shipped `DEATH_STRIKES = 1` the first strike IS the death, so
+    the span BETWEEN strikes is zero — and "1 consecutive probe failures over
+    0s" reads as a seam that died instantly when it had in fact been silent
+    for a cadence plus a full probe timeout. An operator sizing how sick the
+    box is would read that number and conclude the opposite of the truth, so
+    the one-strike line reports the silence instead."""
+    log_path = tmp_path / "supervisor.log"
+    clock = _Clock()
+    sup = _hung_socket_supervisor(sl, clock, log_path)
+
+    _run(sup, clock, 1)
+
+    text = log_path.read_text()
+    assert "over 0s" not in text
+    # One cadence of sleep plus the timeout the probe burned before striking.
+    assert f"no answer for {int(15 + sl.PROBE_TIMEOUT_S)}s" in text
 
 
 def test_giving_up_names_the_fallback_commands_and_repeats_itself(sl, tmp_path):
@@ -409,7 +505,8 @@ def test_giving_up_names_the_fallback_commands_and_repeats_itself(sl, tmp_path):
     assert text.count("GIVING UP") > 1            # reprinted, not said once
 
 
-def test_recovery_is_announced_even_though_nobody_noticed_the_outage(sl, tmp_path):
+def test_recovery_is_announced_even_though_nobody_noticed_the_outage(
+        sl, tmp_path, multi_strike):
     """A silent self-heal is explicitly forbidden. If the outage fell between
     two queries and no human saw it, the RESTORED line is the ONLY evidence
     that the box is dying — and a box that dies quietly three times in an
@@ -1061,3 +1158,43 @@ def test_the_npu_seam_carries_no_such_caveat_because_the_probe_is_the_model(
     banner = capsys.readouterr().out
     assert "Supervising the model seam" in banner
     assert "LOCAL proxy only" not in banner
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# The copy that actually ships
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def test_the_installed_stack_carries_the_same_supervision_numbers():
+    """`synapse up` runs synapse_cli.stack, NOT scripts/serve_local.py.
+
+    Everything above loads serve_local by path, so before this existed the
+    entire suite could stay green while the shipped supervisor ran the old
+    15/5.0/4 — which is exactly what happened on the first attempt at this
+    fix: the constants were corrected in the dev script only, the tests
+    passed, and the machine's behaviour did not change. The two copies are
+    maintained by hand (the CLI cannot import a loose script), so the thing
+    worth pinning is that they have not drifted.
+    """
+    import importlib.util
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parent.parent
+    stack_py = repo / "packages" / "cli" / "src" / "synapse_cli" / "stack.py"
+    spec = importlib.util.spec_from_file_location("_stack_under_test", stack_py)
+    stack = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(stack)
+
+    serve_local = _load()
+    for name in ("PROBE_INTERVAL_S", "PROBE_TIMEOUT_S", "DEATH_STRIKES",
+                 "RESTART_DELAYS_S", "RESTART_WINDOW_S", "GAVE_UP_REPEAT_S"):
+        assert getattr(stack, name) == getattr(serve_local, name), (
+            f"{name} has drifted between the dev script and the installed "
+            f"stack; `synapse up` would not behave like the tested copy")
+
+    # And the pair the fix turns on, asserted directly rather than only by
+    # equality — so reverting BOTH copies together still fails here.
+    assert stack.PROBE_TIMEOUT_S > 35.1, "must outlast the measured generation tail"
+    assert stack.DEATH_STRIKES >= 2, (
+        "instant failure flavours (refused/reset/non-200) never reach the "
+        "timeout, so more than one strike is the only tolerance for them")

@@ -84,32 +84,71 @@ MODEL_PORT = 18181
 # --live proxy — it costs zero tokens and zero NPU inference, and it is the
 # exact route `wait_for` already trusts below.
 #
-# 4 consecutive failures before a death is declared: AT LEAST 45s of silence
-# (the strikes land at t+0/15/30/45 when probes return instantly) and in
-# practice ~60s, because a probe that fails by TIMING OUT burns its own 5s
-# before the next 15s sleep. The DEAD line therefore reports the span it
-# MEASURED between the first strike and the fourth, never the nominal 45 —
-# see `_declare_dead`. Detection latency from the last healthy answer is one
-# cadence longer again (~80s worst case).
+# ⟨CORRECTED 2026-08-07⟩ THE PREMISE BELOW USED TO BE FALSE, AND IT SET THESE
+# NUMBERS. The rule was 15s cadence / 5s timeout / 4 strikes, justified like
+# this: "/models is metadata, runs no inference, and is answered off the accept
+# loop, so a seam that cannot produce it for a minute is not busy — it is not
+# serving."
 #
-# CORRECTION (post-review): the design note justified 45s as "50% margin over
-# the seam's own max_seconds_per_call = 30.0". That justification is wrong and
-# is not repeated here. `max_seconds_per_call` (config/synapse.toml) is a
-# SEGMENT-SIZING budget — prompt bytes divided by a measured prefill rate —
-# not a wall-clock bound on a seam call, and the real per-call bound on this
-# seam is OpenAICompatibleProvider's `timeout=300.0`. The honest reason 4x15s
-# separates slow from dead is narrower and still sufficient: /models is
-# metadata, runs no inference, and is answered off the accept loop, so a seam
-# that cannot produce it for a minute is not busy — it is not serving. A
-# single slow response costs one strike and is healed by the next success.
+# Real `geniex serve` does not work that way. It handles ONE request at a time,
+# so a probe issued while a generation is running does not get answered off the
+# side — it queues behind it. Measured from geniex.log, where every slow probe
+# completes in the same second as a concurrent generation:
 #
-# The 5s probe timeout is what converts the OBSERVED failure — connection
-# accepted, no bytes ever sent — into strikes. Whether the process is alive
-# is deliberately irrelevant to the rule, because "process alive, server not
-# serving" IS the failure.
-PROBE_INTERVAL_S = 15
-PROBE_TIMEOUT_S = 5.0
-DEATH_STRIKES = 4
+#   04:35:41 | 22.5119154s | POST "/v1/chat/completions"
+#   04:35:41 | 22.2819893s | GET  "/v1/models"     <- queued, not sick
+#
+# The same call costs 2-4ms when the seam is idle. And a queued probe is
+# INDISTINGUISHABLE from a dead one at the socket: connection accepted, no
+# bytes — the exact signature this rule reads as death. So a 5s timeout struck
+# against any generation longer than 5s, which was 81% of them (n=16: median
+# 12.9s, mean 15.7s, max 35.1s), and four of those in a row restarted a
+# perfectly healthy seam, killing the in-flight distillation with it. The
+# supervisor was manufacturing the outage it exists to detect.
+#
+# WAITING IS THE ONLY TEST. Every cheap proof-of-life signal — the log file
+# growing, a completion timestamp — is written when a request FINISHES, so all
+# of them go silent during exactly the one long request that needs explaining.
+# Busy and dead differ only in whether an answer eventually arrives, so the
+# timeout has to outlast the longest legitimate generation. That is what the
+# stated liveness rule at the top of this block always said; only the number
+# was wrong.
+#
+# Sized off the TAIL, never the mean: a timeout near the average strikes on
+# every above-average call. 55s is ~1.6x the 35.1s worst case actually
+# observed. The sample is small and a throttled NPU is slower still, so treat
+# 55 as the floor of what is defensible, not a target to trim towards.
+#
+# TWO strikes, NOT one, and the reason is not generation length. A 60s
+# end-to-end budget would afford exactly one strike at this timeout, and that
+# was the shape this fix was first written in — but `probe_seam` scores FOUR
+# flavours of failure and only ONE of them spends the timeout. Connection
+# refused, connection reset and any non-200 all strike INSTANTLY. At a single
+# strike, one transient HTTP 500 or one refused connection restarts the seam
+# and kills the generation in flight, having waited for nothing — the 55s
+# above buys no protection at all on those paths, because they never reach it.
+# The strikes are the ONLY tolerance for the instant flavours, so there has to
+# be more than one of them. ~120s end to end is the price.
+#
+# What makes that price cheap is the worker: `tick()` re-queues a failed
+# distillation and charges no retry against a provider that was down (loop.py,
+# MAX_DISTIL_ATTEMPTS), so a restart costs wasted NPU time and a retry rather
+# than conversation. Being SLOW to spot a dead seam therefore costs delay and
+# nothing else, while being WRONG about one still kills a live generation and,
+# at four deaths inside RESTART_WINDOW_S, reaches the GAVE_UP state that stops
+# restarting altogether and needs a human. The asymmetry is the whole argument:
+# spend latency, buy correctness.
+#
+# The 5s cadence is not a probe-frequency decision — an idle probe costs 2-4ms
+# and the supervisor blocks in the probe itself, so during trouble the real
+# cadence is 5+55. It is short so that `tick()`'s `child.poll()` check, which
+# declares an EXITED process dead immediately and with no strikes, keeps
+# running on a fast clock instead of inheriting the probe's timeout. A crash
+# is the one unambiguous failure here and it is now caught in ~5s, better than
+# the ~20s it was before.
+PROBE_INTERVAL_S = 5
+PROBE_TIMEOUT_S = 55.0
+DEATH_STRIKES = 2
 # Attempt 1 immediately, attempt 2 after 30s, attempt 3 after 120s. A fourth
 # death inside RESTART_WINDOW_S gives up: a genuinely broken NPU on stage must
 # converge to "operator switches to a fallback in one command", never to a
@@ -671,18 +710,36 @@ class SeamSupervisor:
             self._last_gave_up_banner = now
             return
         delay = RESTART_DELAYS_S[attempt - 1]
-        # MEASURED, not derived. `(DEATH_STRIKES - 1) * PROBE_INTERVAL_S` = 45s
-        # is only what the strikes span when probes return instantly; a probe
-        # that fails by timing out spends its own PROBE_TIMEOUT_S first, so the
-        # real span on a hung socket is ~60s. The operator quotes this number
+        # MEASURED, not derived. `(DEATH_STRIKES - 1) * PROBE_INTERVAL_S` is
+        # only what the strikes span when probes return instantly — and at
+        # DEATH_STRIKES = 1 it is zero, which is exactly the kind of derived
+        # number that reads as "instant" for a death that took a minute. A
+        # probe that fails by timing out spends its own PROBE_TIMEOUT_S first,
+        # so the real span on a hung socket is ~60s. The operator quotes this
         # when deciding whether the box is failing more often than it used to,
         # so it has to be the elapsed time this supervisor actually observed —
         # a constant would be wrong every single time it mattered.
         span = int(now - self._first_strike_at) if self._first_strike_at else 0
-        cause = (reason if immediate else
-                 f"{DEATH_STRIKES} consecutive probe failures over "
-                 f"{span}s "
-                 f"(last OK {down}s ago; last reason: {reason})")
+        if immediate:
+            cause = reason
+        elif DEATH_STRIKES == 1:
+            # "1 consecutive probe failures over 0s" — true and useless: at a
+            # single strike the first strike IS the death, so the span between
+            # them is zero, while the seam has actually been silent for a
+            # cadence plus a whole probe timeout. Report the silence instead;
+            # `down` is the same figure the multi-strike line already carries.
+            # Re-read the clock rather than reuse `down`. `now` was sampled at
+            # the TOP of the tick, before the probe spent its timeout, so
+            # `down` undercounts the silence by a whole PROBE_TIMEOUT_S — 15s
+            # instead of 70s. Invisible at four strikes, where the accumulated
+            # cycles swamped one timeout; at one strike it IS the number.
+            cause = (f"no answer for {int(self._now() - self.last_ok)}s "
+                     f"(one strike is fatal at a {PROBE_TIMEOUT_S:g}s timeout; "
+                     f"last reason: {reason})")
+        else:
+            cause = (f"{DEATH_STRIKES} consecutive probe failures over "
+                     f"{span}s "
+                     f"(last OK {down}s ago; last reason: {reason})")
         self.log(
             f"SUPERVISOR: model seam DEAD — {cause}. "
             f"Restarting {self.seam_name} (attempt {attempt}/"
@@ -1268,10 +1325,16 @@ def main(argv: list[str] | None = None) -> int:
 
     print(flush=True)
     if supervisor is not None:
+        # The span is quoted as strikes x (cadence + timeout) rather than the
+        # old `(DEATH_STRIKES - 1) * PROBE_INTERVAL_S` lower bound, which
+        # assumed probes return instantly and collapses to a useless "0-0s"
+        # at DEATH_STRIKES = 1. What an operator needs here is the number
+        # this actually takes when the socket hangs, which is the only way it
+        # ever fails.
         print(f"  Supervising the model seam: GET {model_url}/models every "
-              f"{PROBE_INTERVAL_S}s, {DEATH_STRIKES} consecutive failures "
-              f"(~{(DEATH_STRIKES - 1) * PROBE_INTERVAL_S}-"
-              f"{int((DEATH_STRIKES - 1) * (PROBE_INTERVAL_S + PROBE_TIMEOUT_S))}s, "
+              f"{PROBE_INTERVAL_S}s, {DEATH_STRIKES} consecutive failure"
+              f"{'' if DEATH_STRIKES == 1 else 's'} "
+              f"(~{int(DEATH_STRIKES * (PROBE_INTERVAL_S + PROBE_TIMEOUT_S))}s, "
               f"a failing probe costs its own {PROBE_TIMEOUT_S:g}s) = dead, "
               f"then up to {len(RESTART_DELAYS_S)} restarts per "
               f"{RESTART_WINDOW_S // 60} minutes.", flush=True)
