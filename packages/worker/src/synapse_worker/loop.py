@@ -56,6 +56,15 @@ from synapse_worker.triage_log import TriageLog
 
 logger = logging.getLogger(__name__)
 
+#: How many times a segment may fail distillation before `tick()` gives up on
+#: it. A transient provider death (the seam supervisor restarting the NPU under
+#: an in-flight request is the observed case) clears well inside this; a segment
+#: the provider rejects deterministically must NOT retry forever, because the
+#: deferred queue is FIFO and a poison segment at its head would block every
+#: segment behind it for the life of the process. Retry is the default and
+#: abandonment is the loud exception, not the other way round.
+MAX_DISTIL_ATTEMPTS = 3
+
 
 @dataclass
 class TickResult:
@@ -78,6 +87,13 @@ class TickResult:
     # pipeline that stopped.
     deferred: int = 0
     backpressured: bool = False
+    # Segments whose distillation raised and which went BACK on the deferred
+    # queue for a later tick, and segments that exhausted MAX_DISTIL_ATTEMPTS
+    # and were given up on. `abandoned` is the only path in this loop that
+    # loses conversation, so it is counted separately and said out loud rather
+    # than folded into `errors` — see the except clause in `tick()`.
+    requeued: int = 0
+    abandoned: int = 0
     errors: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
@@ -104,6 +120,10 @@ class TickResult:
             bits.append(f"{self.pending_events} events held (turn open)")
         if self.deferred:
             bits.append(f"{self.deferred} deferred (provider rate)")
+        if self.requeued:
+            bits.append(f"{self.requeued} re-queued (provider failed)")
+        if self.abandoned:
+            bits.append(f"{self.abandoned} ABANDONED after {MAX_DISTIL_ATTEMPTS} attempts")
         if self.backpressured:
             bits.append("BACKPRESSURE: not reading new input")
         if self.flushed_incomplete:
@@ -255,6 +275,12 @@ class WorkerLoop:
         # the follower's offset, so losing them is losing conversation.
         self._deferred_path = self.session_state_dir / "deferred-segments.json"
         self._deferred: list[Segment] = []
+        # segment id -> failed distillation attempts, for MAX_DISTIL_ATTEMPTS.
+        # Deliberately NOT persisted alongside the queue: the count is about
+        # this process's provider, and a restart usually means a restarted (or
+        # repaired) model server, which has earned a fresh budget. The segments
+        # themselves survive on disk either way, which is the part that matters.
+        self._attempts: dict[str, int] = {}
         self._restore_pending()
         self._restore_deferred()
         self._last_change = datetime.now(timezone.utc)
@@ -667,6 +693,11 @@ class WorkerLoop:
                     backpressured=result.backpressured,
                 )
 
+        # Segments whose distillation raised this tick and which go back on the
+        # deferred queue below. Collected rather than re-queued in place because
+        # `self._deferred` is the *rest* of the FIFO line and these belong in
+        # front of it — they were admitted off its head.
+        failed: list[Segment] = []
         for segment in segments:
             # Triage FIRST, on the Segment exactly as segmented -- before
             # compaction has a chance to reshape it. See compaction.py's
@@ -687,6 +718,7 @@ class WorkerLoop:
                             segment=segment.id,
                             reason=decision.reason,
                         )
+                    self._attempts.pop(segment.id, None)
                     continue
                 if self.stats:
                     self.stats.event(
@@ -697,9 +729,17 @@ class WorkerLoop:
                     )
             # Only now, for a Segment triage has already decided is worth
             # sending to the model: shape what the model actually sees.
-            segment = self._compact(segment)
+            #
+            # KEPT SEPARATE from `segment` on purpose. This used to rebind
+            # `segment` itself, which left the retry path below holding nothing
+            # but the compacted view. Compaction is lossy — it truncates and
+            # ranks events to fit a budget — so re-queueing it would make the
+            # next attempt work from evidence THIS tick chose to show rather
+            # than what was actually in the transcript. Same argument
+            # `shutdown()` makes on its own except clause.
+            compacted = self._compact(segment)
             if self.stats:
-                self.stats.distil_started(segment.id, len(segment.events))
+                self.stats.distil_started(compacted.id, len(compacted.events))
             try:
                 # THE CONCURRENCY BOUND. Every worker->provider call in this
                 # module goes through the limiter, so "one call at a time" is
@@ -707,39 +747,100 @@ class WorkerLoop:
                 # loop happening to await in sequence — which is what an
                 # `asyncio.gather` refactor here would silently repeal.
                 findings, distil_stats = await self.limiter.call(
-                    lambda s=segment: self.distiller.distil(s))
+                    lambda s=compacted: self.distiller.distil(s))
             except PromptDropError as exc:
                 # The model stopped conditioning on its prompt. Every finding it
                 # would produce is invented, so drop the segment rather than
                 # poison shared memory. Loud, because it means the model or its
                 # type is wrong.
+                #
+                # NOT re-queued, unlike the clause below, and the distinction is
+                # the whole point of keeping these two excepts apart: a
+                # prompt-drop is a segment the model answered WRONGLY, and
+                # retrying buys another invented answer. The clause below is a
+                # segment the model never answered at all.
                 logger.error("Prompt-drop guard tripped on %s: %s", segment.id, exc)
                 result.errors.append(f"prompt-drop on {segment.id}")
                 if self.stats:
                     self.stats.event(
                         "error", f"prompt-drop on {segment.id}", segment=segment.id
                     )
+                self._attempts.pop(segment.id, None)
                 continue
             except Exception as exc:  # noqa: BLE001 - a tick must never die
+                # ⟨CORRECTED 2026-08-07⟩ Put it BACK. `admit()` above has
+                # already taken this segment OFF `self._deferred`, and
+                # `_persist_state()` at the end of the tick writes what remains
+                # over deferred-segments.json — so before this change a single
+                # raise here deleted the segment, and its transcript bytes were
+                # already behind the follower's offset and never re-read. One
+                # provider hiccup was permanent loss of that conversation.
+                #
+                # Observed in the wild on 2026-08-07: the seam supervisor
+                # declared the NPU dead and restarted it (supervisor.log,
+                # "model seam DEAD ... Restarting geniex") while a distillation
+                # was in flight; the worker took an httpx.ReadError, dropped
+                # segment ...-00001, advanced the offset, and reported
+                # "0 findings" — silent loss that looks like success, which is
+                # exactly what decisions/002 and `shutdown()`'s own W3b
+                # correction exist to forbid. `shutdown()` was fixed then;
+                # `tick()`, which runs every 30s rather than once, was not.
+                attempts = self._attempts[segment.id] = (
+                    self._attempts.get(segment.id, 0) + 1)
                 logger.exception("Distillation failed for %s", segment.id)
                 result.errors.append(f"{segment.id}: {exc}")
+                if attempts < MAX_DISTIL_ATTEMPTS:
+                    # The uncompacted segment, for the reason given above.
+                    failed.append(segment)
+                    result.requeued += 1
+                    logger.warning(
+                        "Re-queued %s after attempt %d/%d — NOT dropped, it keeps "
+                        "its place at the head of %s and is retried next tick.",
+                        segment.id, attempts, MAX_DISTIL_ATTEMPTS,
+                        self._deferred_path.name,
+                    )
+                else:
+                    # The one path here that loses conversation. Never quiet.
+                    result.abandoned += 1
+                    self._attempts.pop(segment.id, None)
+                    logger.error(
+                        "GIVING UP on %s after %d failed attempts: %s. This "
+                        "segment's transcript bytes are behind the follower's "
+                        "offset and will NOT be re-read — its conversation is "
+                        "lost from shared memory. Fix the provider and re-attach "
+                        "with --from-start to recover it.",
+                        segment.id, attempts, exc,
+                    )
                 if self.stats:
                     self.stats.event(
-                        "error", f"{segment.id}: {exc}", segment=segment.id
+                        "error",
+                        f"{segment.id}: {exc}"
+                        + (f" (attempt {attempts}/{MAX_DISTIL_ATTEMPTS}, re-queued)"
+                           if attempts < MAX_DISTIL_ATTEMPTS
+                           else f" (abandoned after {attempts} attempts)"),
+                        segment=segment.id,
+                        attempts=attempts,
+                        abandoned=attempts >= MAX_DISTIL_ATTEMPTS,
                     )
                 continue
             finally:
                 if self.stats:
                     self.stats.distil_finished()
+            # Distilled. Its retry budget dies with it.
+            self._attempts.pop(segment.id, None)
 
             if self.stats:
+                # `compacted`, not `segment`: this measures what actually
+                # reached the model, which is the post-compaction view. It read
+                # `segment` before only because `segment` WAS the compacted one
+                # by this line — the split above preserved the meaning.
                 retained = sum(
-                    1 for e in segment.events if e.kind in set(self.distiller.kinds)
+                    1 for e in compacted.events if e.kind in set(self.distiller.kinds)
                 )
                 self.stats.event(
                     "render",
-                    f"{segment.id}: {retained}/{len(segment.events)} events reached the model",
-                    events_in=len(segment.events),
+                    f"{compacted.id}: {retained}/{len(compacted.events)} events reached the model",
+                    events_in=len(compacted.events),
                     retained=retained,
                     kinds=list(self.distiller.kinds),
                     input_tokens=distil_stats.input_tokens,
@@ -750,6 +851,18 @@ class WorkerLoop:
             # Write-ahead: on disk before any send is attempted.
             self.producer.record(findings)
             result.findings += len(findings)
+
+        if failed:
+            # In FRONT of the rest: these were admitted off the head of the
+            # queue, so this restores true FIFO rather than sending them to the
+            # back of the line behind segments that arrived later. Cannot
+            # overflow `max_deferred_segments` — `failed` is a subset of what
+            # `admit()` removed from a queue that was already within the bound.
+            self._deferred = failed + self._deferred
+            # Recomputed, because `result.deferred` was set before the distil
+            # loop ran and a stale count here is exactly the kind of number an
+            # operator reads as "nothing is waiting".
+            result.deferred = len(self._deferred)
 
         result.sent, result.pending_send = await self.producer.flush()
         result.held = self.producer.pending_count()[1]
