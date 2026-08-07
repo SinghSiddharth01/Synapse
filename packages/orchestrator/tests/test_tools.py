@@ -998,3 +998,56 @@ async def test_query_tells_the_agent_what_to_do_with_a_hit_and_claims_no_ranking
         "a hit has to arrive with what to do about it, or it reads as one more "
         "piece of mid-investigation evidence"
     )
+
+
+# ── W2 residual: the briefing has no caller to resolve against ──────────────
+
+
+async def test_two_bound_conversations_cost_the_briefing_its_session():
+    """`instructions` is delivered at MCP `initialize`, and that handshake
+    carries no `agent_session_id` — so unlike `query`/`contribute`, the
+    briefing CANNOT be resolved per conversation. It resolved the machine-wide
+    "most recently pinned" binding instead.
+
+    Observed 2026-08-06: a window bound to nothing was greeted with another
+    window's session id, contributor and counts, and read them out to its user
+    as fact. The counts were stale too, but staleness was the smaller half —
+    the briefing was about a DIFFERENT SESSION, and nothing inside the
+    receiving conversation could tell.
+
+    So ambiguity costs the briefing. Every session-specific field is asserted
+    ABSENT, one assertion each, because "says less" is not the property that
+    matters — "says nothing that could be about the wrong session" is. The
+    body especially: the headline leaks a session id and counts, the body
+    leaks the other window's accumulated team memory rendered in full."""
+    transport = _watermark_and_arrival(httpx.Response(200, json={
+        "text": "ACCUMULATED — 4 finding(s).\n- [decision] the ring buffer stays at 8"
+                " — akhil"}))
+
+    text = await compose_instructions(BINDING, "http://svc", transport=transport,
+                                      bound_conversations=2)
+
+    assert SENTINEL in text                       # still a briefing this server composed
+    assert "sh-1" not in text                     # ...naming no session
+    assert "aditya" not in text                   # ...and no contributor
+    assert "ship the FEC decoder" not in text     # ...no purpose
+    assert "the ring buffer stays at 8" not in text   # ...and none of the BODY
+    assert "4 finding" not in text                # ...nor the counts
+    # What survives is the recoverable half: the tools that DO resolve per
+    # conversation, and the argument that makes them do it.
+    assert "CLAUDE_CODE_SESSION_ID" in text and "join_session" in text
+
+
+async def test_one_bound_conversation_is_not_ambiguous_and_briefs_in_full():
+    """The gate is ambiguity, not multiplicity of bindings in general — a
+    one-window machine is the common case and must be unaffected. Guards the
+    obvious over-correction: suppressing whenever the count is merely known."""
+    transport = _watermark_and_arrival(httpx.Response(200, json={
+        "text": "ACCUMULATED — 4 finding(s).\n- [decision] the ring buffer stays at 8"
+                " — akhil"}))
+
+    text = await compose_instructions(BINDING, "http://svc", transport=transport,
+                                      bound_conversations=1)
+
+    assert "ship the FEC decoder" in text
+    assert "the ring buffer stays at 8" in text

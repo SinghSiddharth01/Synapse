@@ -158,6 +158,48 @@ def _ended_briefing(binding: LocalBinding) -> str:
             "team has already moved to another.")
 
 
+def _ambiguous_briefing(bound: int) -> str:
+    """What an arriving agent is told when this machine holds SEVERAL bound
+    conversations and the protocol cannot say which one just connected.
+
+    `instructions` is delivered once, at MCP `initialize`, and that handshake
+    carries no `agent_session_id` — so unlike `query`/`contribute`/
+    `leave_session`, which W2 moved onto `_effective_binding`, the briefing
+    has no caller identity to resolve against and cannot be made
+    per-conversation. It resolved the machine-wide "most recently pinned"
+    binding instead, which meant a brand-new window was greeted with another
+    window's session id, contributor, finding counts and topics — observed
+    2026-08-06: a conversation bound to nothing was told it was in
+    sh-0628807f as a teammate, with counts belonging to a different binding,
+    and it read that out to its user as fact.
+
+    So ambiguity costs the briefing rather than being guessed through. Names
+    NO session, NO contributor and NO counts: every one of those is the part
+    that would be wrong, and a confident briefing about the wrong session is
+    worse than no briefing — the agent has no way to tell from the inside.
+    What it keeps is the recoverable half, the instruction that makes the
+    per-conversation tools resolve correctly.
+
+    Keeps SENTINEL for the same reason `_ended_briefing` does:
+    `scripts/verify_instructions.py` probes for it through a real MCP client,
+    and this is a briefing this server composed, not a fallback.
+    """
+    return (
+        f"{SENTINEL} Synapse is connected, but this orchestrator cannot tell WHICH "
+        f"conversation you are: {bound} conversations on this machine are bound to "
+        "Shared Sessions, and the MCP handshake carries no session id to choose "
+        "between them. No session id, contributor or team-memory summary is reported "
+        "here on purpose — naming one would mean naming another window's, and a "
+        "briefing confidently about the wrong session is worse than none, because "
+        "nothing inside this conversation can tell the difference. "
+        "Call `query` (if this conversation has already joined) or `join_session "
+        "<shared_id>` (if it has not), passing agent_session_id set to your own "
+        "session id — Claude Code exports it as CLAUDE_CODE_SESSION_ID. Those tools "
+        "DO resolve per conversation, and their result, not this text, is the "
+        "authority on which Shared Session you are in and what it holds."
+    )
+
+
 async def build_briefing(binding: LocalBinding | None, service_url: str, *,
                          timeout: float = 2.0,
                          transport: httpx.AsyncBaseTransport | None = None) -> str:
@@ -427,9 +469,22 @@ _MAX_INSTRUCTIONS_CHARS = (_MAX_BRIEFING_CHARS + len(_CONNECT_PREAMBLE)
 
 async def compose_instructions(binding: LocalBinding | None, service_url: str, *,
                                timeout: float = 2.0,
+                               bound_conversations: int | None = None,
                                transport: httpx.AsyncBaseTransport | None = None
                                ) -> str:
     """What actually goes into MCP `instructions`: the headline, then the body.
+
+    `bound_conversations` is how many conversations this machine currently
+    holds session-scoped bindings for. More than one and NOTHING
+    session-specific is composed at all — see `_ambiguous_briefing`. None (the
+    default) means the caller does not count, which is every pre-existing
+    caller and every test: unchanged behaviour, so this gate is opt-in at the
+    one call site that can actually count.
+
+    The check sits here rather than inside `build_briefing` because it must
+    also suppress the arrival BODY, which is the larger leak of the two: the
+    headline gives away a session id and counts, the body is the other
+    window's accumulated team memory rendered in full.
 
     ⟨ADDED 2026-08-06, adversarial review finding #1⟩ The join beat did not fire
     on the documented path. `docs/JOIN.md` step 3 has the teammate run
@@ -450,6 +505,8 @@ async def compose_instructions(binding: LocalBinding | None, service_url: str, *
     no memory to summarise, and appending a stale or empty body would contradict
     the sentence just above it.
     """
+    if bound_conversations is not None and bound_conversations > 1:
+        return _ambiguous_briefing(bound_conversations)
     headline = await build_briefing(binding, service_url, timeout=timeout,
                                     transport=transport)
     if binding is None or headline == _DEFAULT_INSTRUCTIONS:
@@ -497,6 +554,7 @@ DEFAULT_REFRESH_SECONDS = 10.0
 
 
 async def refresh_briefing(server, resolve_binding, service_url: str, *,
+                           count_bound_conversations=None,
                            transport: httpx.AsyncBaseTransport | None = None) -> str:
     """Recompose the briefing from the CURRENT binding and install it.
 
@@ -511,8 +569,14 @@ async def refresh_briefing(server, resolve_binding, service_url: str, *,
     fails open independently — a body that cannot be fetched leaves the headline
     exactly where it was rather than reverting it.
     """
-    text = await compose_instructions(resolve_binding(), service_url,
-                                      transport=transport)
+    # Counted here, not captured, for the same reason `resolve_binding` is
+    # called here: a second window that joined after boot has to be able to
+    # turn the briefing ambiguous, and a window that left has to be able to
+    # turn it specific again.
+    text = await compose_instructions(
+        resolve_binding(), service_url, transport=transport,
+        bound_conversations=(count_bound_conversations()
+                             if count_bound_conversations is not None else None))
     # The low-level server is the one place this lives: it is what
     # `create_initialization_options()` reads for each new connection, and
     # `FastMCP.instructions` is a read-only property delegating to it, so the
@@ -523,6 +587,7 @@ async def refresh_briefing(server, resolve_binding, service_url: str, *,
 
 def attach_briefing_refresher(app, server, resolve_binding, service_url: str, *,
                               interval: float = DEFAULT_REFRESH_SECONDS,
+                              count_bound_conversations=None,
                               transport: httpx.AsyncBaseTransport | None = None) -> None:
     """Refresh `instructions` for as long as the app is actually serving.
 
@@ -544,8 +609,9 @@ def attach_briefing_refresher(app, server, resolve_binding, service_url: str, *,
     async def _loop() -> None:
         while True:
             try:
-                await refresh_briefing(server, resolve_binding, service_url,
-                                       transport=transport)
+                await refresh_briefing(
+                    server, resolve_binding, service_url, transport=transport,
+                    count_bound_conversations=count_bound_conversations)
             except Exception:  # noqa: BLE001 — fail open, same as build_briefing
                 logger.debug("Briefing refresh failed; keeping the previous one",
                              exc_info=True)
