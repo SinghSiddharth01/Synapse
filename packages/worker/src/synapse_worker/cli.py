@@ -62,9 +62,11 @@ from synapse_worker.discovery import (
     read_bindings_for_agent,
     resolve_agent_binding,
     resolve_transcript,
+    session_dirname,
 )
 from synapse_worker.limiter import SeamLimiter
 from synapse_worker.loop import WorkerLoop
+from synapse_worker.supervisor import WorkerSupervisor
 from synapse_worker.producer import FileSink, HttpSink, Producer, read_last_bound_shared_id
 from synapse_worker.stats import StatsBuffer
 from synapse_worker.triage_log import TriageLog
@@ -338,6 +340,75 @@ def _build(args: argparse.Namespace, debug_port: int = 0):
     return config, loop, transcript, producer, source, stats
 
 
+def _build_siblings(args: argparse.Namespace, config, primary, stats) -> list:
+    """A `WorkerLoop` for every OTHER conversation of this agent that is bound.
+
+    `_build` above answers "which ONE transcript", because that is all a
+    `WorkerLoop` follows. That made `synapse up` — which starts exactly one
+    worker — silently blind to every window except whichever bound first: the
+    second Claude Code window on a machine was never distilled, and the only
+    evidence was absence.
+
+    Skipped entirely when the caller named a conversation (`--transcript`,
+    `--agent-session-id`). Those two flags mean "follow exactly this one", and
+    quietly following three would contradict them.
+
+    `scope == "session"` only: a `machine`-scoped binding is the
+    `serve_local.py` stand-in that speaks for whatever conversation is here, so
+    it is already the primary — adding it again would follow one transcript
+    twice, double-distilling every segment.
+
+    Each sibling gets its OWN `Producer` over its own WAL directory. A shared
+    one would be retargeted by whichever loop ticked last (`rebind` in
+    `WorkerLoop.__init__` and every `_sync_binding_from_disk`), tagging
+    findings with another conversation's Shared Session. The `SeamLimiter` IS
+    shared, deliberately, and is the reason one process beats N — see
+    supervisor.py.
+    """
+    if getattr(args, "transcript", None) or getattr(args, "agent_session_id", None):
+        return []
+    worker_cfg = config.worker
+    state_dir = Path(worker_cfg.state_dir)
+    siblings = []
+    for record in read_bindings_for_agent(state_dir, primary.binding.agent):
+        if record.agent_session_id == primary.binding.agent_session_id:
+            continue
+        if record.scope != "session":
+            continue
+        transcript = Path(record.transcript_path)
+        if not transcript.is_file():
+            # Named but gone: the same refusal `resolve_transcript` makes for
+            # the primary. Falling back to detection here would follow a
+            # different conversation than the binding names.
+            print(f"note             bound conversation {record.agent_session_id} "
+                  f"names {transcript}, which does not exist — not following it. "
+                  f"Re-run `synapse-worker join` from that window.")
+            continue
+        binding = record.to_local_binding()
+        sink = (
+            HttpSink(worker_cfg.upstream_url, timeout=worker_cfg.upstream_timeout_s)
+            if worker_cfg.sink == "http"
+            else FileSink(Path(worker_cfg.sink_file))
+        )
+        siblings.append(WorkerLoop(
+            transcript=transcript,
+            distiller=build_distiller(config, binding),
+            producer=Producer(
+                state_dir / "wal" / session_dirname(record.agent_session_id), sink),
+            binding=binding,
+            state_dir=state_dir,
+            budget_tokens=config.segment_budget,
+            idle_flush_seconds=worker_cfg.idle_flush_seconds,
+            stats=stats,
+            # THE shared bound. One process exists to make the NPU's
+            # concurrency ceiling a real ceiling again.
+            limiter=primary.limiter,
+            agent=binding.agent,
+            session_identified=True,
+        ))
+    return siblings
+
+
 def _no_transcript():
     print(
         "No live agent transcript found for this directory.\n"
@@ -437,18 +508,30 @@ async def cmd_run(args: argparse.Namespace) -> int:
         return 1
     print(f"canary           ok (prompt_tokens={canary.input_tokens})\n")
 
+    # Every OTHER conversation of this agent that is bound on this machine.
+    # `synapse up` starts one worker, so without this the second window to bind
+    # is never distilled at all — silently, since the process stays healthy and
+    # keeps ticking on the first window's transcript.
+    siblings = _build_siblings(args, config, loop, stats)
+    for sibling in siblings:
+        print(f"also following   {sibling.transcript} "
+              f"[{sibling.binding.agent_session_id}] -> {sibling.binding.shared_id}")
+
     if args.from_start:
         print("Starting from the beginning of the transcript.\n")
     elif config.worker.attach_at_end:
-        loop.attach_at_end()
+        for followed in (loop, *siblings):
+            followed.attach_at_end()
         print("Attached at the end; only new conversation will be condensed.\n")
 
+    runner = WorkerSupervisor([loop, *siblings]) if siblings else loop
     try:
-        await loop.run(interval_seconds=interval, max_ticks=args.ticks)
+        await runner.run(interval_seconds=interval, max_ticks=args.ticks)
     except KeyboardInterrupt:
         pass
-    result = await loop.shutdown()
-    print(f"\nshutdown — {result.summary()}")
+    outcome = await runner.shutdown()
+    for result in (outcome if siblings else [outcome]):
+        print(f"\nshutdown — {result.summary()}")
     if debug_server is not None:
         debug_server.stop()
     return 0
