@@ -114,7 +114,7 @@ async def test_two_windows_of_one_human_are_two_participants_end_to_end(tmp_path
     state_dir = tmp_path / "state"
     for session, transcript in (("conv-1", "/tmp/cc-1.jsonl"), ("conv-2", "/tmp/cc-2.jsonl")):
         write_binding(state_dir / "bindings" / "claude-code" / f"{session}.json",
-                      SessionBinding(agent_session_id=session, shared_id=sid,
+                      SessionBinding(service_url="http://127.0.0.1:8899", agent_session_id=session, shared_id=sid,
                                      contributor="aditya", agent="claude-code",
                                      transcript_path=transcript, pinned_at=TS))
 

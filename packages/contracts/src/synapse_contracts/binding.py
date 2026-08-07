@@ -61,6 +61,24 @@ class SessionBinding(BaseModel):
     transcript_path: str
     pinned_at: datetime
     scope: Literal["session", "machine"] = "session"
+    #: WHICH SERVICE this `shared_id` lives on. ⟨2026-08-07⟩
+    #:
+    #: A shared_id is only meaningful relative to a server — the ids are minted
+    #: per service, and two services will happily hold different sessions. Until
+    #: this field existed a binding named the session but not the server, while
+    #: `service.url` sat in config as global mutable state, so REPOINTING THE
+    #: CONFIG SILENTLY INVALIDATED EVERY BINDING ON THE MACHINE. They kept
+    #: resolving, kept looking valid, and failed only at push time as a 404 from
+    #: a service that had never heard of the id. Measured on a live machine:
+    #: `service.url` moved 192.168.4.81 -> 192.168.4.44 -> localhost across one
+    #: night, and 431 findings queued against a session only the first host had.
+    #:
+    #: REQUIRED, not optional, and deliberately so. An optional field would let
+    #: a binding written before this change keep masquerading as valid, which is
+    #: precisely the failure being fixed. Pre-first-release there is no install
+    #: worth accommodating: an old pin fails validation, reads as "not joined",
+    #: and one `join_session(...)` from the agent writes a correct one.
+    service_url: str
 
     def to_local_binding(self) -> LocalBinding:
         return LocalBinding(
@@ -104,21 +122,57 @@ def write_binding(path: Path, binding: SessionBinding) -> None:
         Path(tmp_name).unlink(missing_ok=True)
 
 
-def read_binding(path: Path) -> SessionBinding | None:
-    """None if no session has been pinned, or the pin file is unreadable.
+def same_service(a: str | None, b: str | None) -> bool:
+    """Whether two service URLs name the same server.
+
+    Trailing slashes only: `http://x:8899` and `http://x:8899/` are one server,
+    and refusing on punctuation would be a worse bug than the one this check
+    exists for. Deliberately NOT normalising host aliases — `localhost` and
+    `127.0.0.1` usually are the same box and `192.168.4.44` might be too, but
+    "usually" is what produced the silent 404s, and a binding that resolves
+    against a server the operator did not name is the failure, not the fix.
+    """
+    if a is None or b is None:
+        return True
+    return a.rstrip("/") == b.rstrip("/")
+
+
+def read_binding(path: Path, *,
+                 expected_service_url: str | None = None) -> SessionBinding | None:
+    """None if no session has been pinned, or the pin file is unreadable, or it
+    belongs to a DIFFERENT service than the caller is pointed at.
 
     Deliberately returns None rather than raising: an absent or corrupt binding
     is a normal state (no `/synapse start` was ever run in this repo) and the
     caller's job is to fall back to detection, not to crash.
+
+    ⟨2026-08-07⟩ `expected_service_url` is the whole point of `service_url`. A
+    shared_id means nothing without the server that minted it, so a binding for
+    another service must read as UNSET rather than resolve — otherwise the
+    producer pushes to a service that 404s, which is invisible until someone
+    reads the orchestrator log. The refusal is logged at WARNING naming BOTH
+    urls, because "not joined" on its own sends you looking in the wrong place.
+    Callers that legitimately do not know the service (e.g. `synapse health`
+    reporting what is on disk) pass nothing and get the binding.
     """
     path = Path(path)
     if not path.is_file():
         return None
     try:
-        return SessionBinding.model_validate_json(path.read_text(encoding="utf-8"))
+        binding = SessionBinding.model_validate_json(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, ValueError) as exc:
         logger.warning("Binding at %s is unreadable (%s); treating as unset", path, exc)
         return None
+    if not same_service(binding.service_url, expected_service_url):
+        logger.warning(
+            "Binding at %s is for session %s on %s, but this client is pointed at "
+            "%s. TREATING AS NOT JOINED: pushing to a service that never minted "
+            "that id 404s every finding. Re-join from your agent to bind against "
+            "the service you are actually using, or point `service.url` back.",
+            path, binding.shared_id, binding.service_url, expected_service_url,
+        )
+        return None
+    return binding
 
 
 def clear_binding(path: Path) -> None:

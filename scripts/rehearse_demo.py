@@ -493,6 +493,7 @@ def main() -> int:
              "write_binding('.synapse-rehearsal/bindings/claude-code.json', SessionBinding("
              f"agent_session_id='as-demo-aditya', shared_id='{sid}', contributor='aditya',"
              "agent='claude-code', transcript_path='(rehearsal)',"
+             f"service_url='http://127.0.0.1:{args.service_port}',"
              "pinned_at=datetime.now(timezone.utc)))\n"
              f"record_session('.synapse-rehearsal', {sid!r}, created_by={CREATOR!r},"
              f" purpose={PURPOSE!r})"],

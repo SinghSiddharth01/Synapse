@@ -404,7 +404,7 @@ async def test_live_worker_notices_a_join_to_a_different_session_mid_run(tmp_pat
     # this is exactly the gap the fix closes.
     write_binding(
         binding_path_for_agent(state_dir, "claude-code"),
-        SessionBinding(
+        SessionBinding(service_url="http://127.0.0.1:8899", 
             agent_session_id="sess-1", shared_id="shared-2", contributor="aditya",
             agent="claude-code", transcript_path=str(transcript),
             pinned_at=datetime(2026, 8, 4, tzinfo=timezone.utc),
@@ -426,7 +426,7 @@ async def test_live_worker_notices_a_join_to_a_different_session_mid_run(tmp_pat
     # test_rejoin_back_to_the_original_session_drains_the_held_finding).
     write_binding(
         binding_path_for_agent(state_dir, "claude-code"),
-        SessionBinding(
+        SessionBinding(service_url="http://127.0.0.1:8899", 
             agent_session_id="sess-1", shared_id="shared-1", contributor="aditya",
             agent="claude-code", transcript_path=str(transcript),
             pinned_at=datetime(2026, 8, 4, tzinfo=timezone.utc),

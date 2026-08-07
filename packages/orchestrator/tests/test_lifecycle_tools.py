@@ -84,7 +84,7 @@ def _prejoin(wiring, shared_id: str = "sh-1", *, contributor: str = "sid",
              transcript: str = "/tmp/conv.jsonl") -> None:
     """Whatever a previous `join` (tool or `synapse-worker join`) left behind."""
     write_binding(wiring.binding_file,
-                  SessionBinding(agent_session_id="conv-1", shared_id=shared_id,
+                  SessionBinding(service_url="http://127.0.0.1:8899", agent_session_id="conv-1", shared_id=shared_id,
                                  contributor=contributor, agent="claude-code",
                                  transcript_path=transcript, pinned_at=TS))
 
@@ -550,7 +550,7 @@ async def test_leave_session_detaches_every_product_bound_to_that_session(tmp_pa
     wiring = _wire(tmp_path, _service(urls=urls))
     _prejoin(wiring, "sh-1", contributor="sid", transcript="/tmp/cc.jsonl")
     write_binding(wiring.state_dir / "bindings" / "codex.json",
-                  SessionBinding(agent_session_id="conv-codex", shared_id="sh-1",
+                  SessionBinding(service_url="http://127.0.0.1:8899", agent_session_id="conv-codex", shared_id="sh-1",
                                  contributor="aditya", agent="codex",
                                  transcript_path="/tmp/codex.jsonl",
                                  # LATER than the claude-code pin, so
@@ -577,13 +577,13 @@ def _two_windows(wiring, *, shared_a="sh-1", shared_b="sh-1", contributor="sid")
     window_a = wiring.state_dir / "bindings" / "claude-code" / "conv-1.json"
     window_b = wiring.state_dir / "bindings" / "claude-code" / "conv-2.json"
     write_binding(window_a,
-                  SessionBinding(agent_session_id="conv-1", shared_id=shared_a,
+                  SessionBinding(service_url="http://127.0.0.1:8899", agent_session_id="conv-1", shared_id=shared_a,
                                  contributor=contributor, agent="claude-code",
                                  transcript_path="/tmp/cc-1.jsonl", pinned_at=TS))
     later = datetime(2026, 8, 7, tzinfo=timezone.utc)
     for path in (window_b, wiring.binding_file):
         write_binding(path,
-                      SessionBinding(agent_session_id="conv-2", shared_id=shared_b,
+                      SessionBinding(service_url="http://127.0.0.1:8899", agent_session_id="conv-2", shared_id=shared_b,
                                      contributor=contributor, agent="claude-code",
                                      transcript_path="/tmp/cc-2.jsonl", pinned_at=later))
     return window_a, window_b
@@ -675,7 +675,7 @@ async def test_a_leave_that_takes_the_mirror_with_it_leaves_the_sibling_resolvab
     wiring = _wire(tmp_path, _service(urls=urls))
     window_b = wiring.state_dir / "bindings" / "claude-code" / "conv-2.json"
     write_binding(window_b,
-                  SessionBinding(agent_session_id="conv-2", shared_id="sh-1",
+                  SessionBinding(service_url="http://127.0.0.1:8899", agent_session_id="conv-2", shared_id="sh-1",
                                  contributor="sid", agent="claude-code",
                                  transcript_path="/tmp/cc-2.jsonl", pinned_at=TS))
     # Window A joined later, so it owns the mirror.
@@ -683,7 +683,7 @@ async def test_a_leave_that_takes_the_mirror_with_it_leaves_the_sibling_resolvab
     for path in (wiring.state_dir / "bindings" / "claude-code" / "conv-1.json",
                  wiring.binding_file):
         write_binding(path,
-                      SessionBinding(agent_session_id="conv-1", shared_id="sh-1",
+                      SessionBinding(service_url="http://127.0.0.1:8899", agent_session_id="conv-1", shared_id="sh-1",
                                      contributor="sid", agent="claude-code",
                                      transcript_path="/tmp/cc-1.jsonl", pinned_at=later))
 
@@ -710,7 +710,7 @@ async def test_leave_session_still_removes_the_member_when_nobody_else_holds_it(
     wiring = _wire(tmp_path, _service(urls=urls))
     window_a = wiring.state_dir / "bindings" / "claude-code" / "conv-1.json"
     write_binding(window_a,
-                  SessionBinding(agent_session_id="conv-1", shared_id="sh-1",
+                  SessionBinding(service_url="http://127.0.0.1:8899", agent_session_id="conv-1", shared_id="sh-1",
                                  contributor="sid", agent="claude-code",
                                  transcript_path="/tmp/cc-1.jsonl", pinned_at=TS))
 
@@ -734,7 +734,7 @@ async def test_an_ended_session_clears_every_product_bound_to_it(tmp_path):
     wiring = _wire(tmp_path, lambda r: httpx.Response(409, json={"error": "session_ended"}))
     _prejoin(wiring, "sh-1")
     write_binding(wiring.state_dir / "bindings" / "codex.json",
-                  SessionBinding(agent_session_id="conv-codex", shared_id="sh-1",
+                  SessionBinding(service_url="http://127.0.0.1:8899", agent_session_id="conv-codex", shared_id="sh-1",
                                  contributor="sid", agent="codex",
                                  transcript_path="/tmp/codex.jsonl",
                                  pinned_at=datetime(2026, 8, 7, tzinfo=timezone.utc)))
@@ -1041,7 +1041,7 @@ async def test_an_unknown_session_id_borrows_the_machine_binding_with_its_own_id
     bodies: dict = {}
     wiring = _wire(tmp_path, _service(urls=urls, bodies=bodies))
     write_binding(wiring.binding_file,
-                  SessionBinding(agent_session_id="as-sid", shared_id="local-dev",
+                  SessionBinding(service_url="http://127.0.0.1:8899", agent_session_id="as-sid", shared_id="local-dev",
                                  contributor="sid", agent="claude-code",
                                  transcript_path="/tmp/scratch.jsonl", pinned_at=TS,
                                  scope="machine"))

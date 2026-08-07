@@ -42,7 +42,7 @@ import os
 import sys
 from pathlib import Path
 
-from synapse_contracts import LocalBinding, Segment
+from synapse_contracts import LocalBinding, Segment, userconfig
 from synapse_distiller import (
     Distiller,
     PromptDropError,
@@ -71,6 +71,10 @@ from synapse_worker.stats import StatsBuffer
 from synapse_worker.triage_log import TriageLog
 
 logger = logging.getLogger(__name__)
+
+# Matches `synapse-orchestrator --service-url`'s own default, so a client that
+# never configured one binds against the same place it would push to.
+DEFAULT_SERVICE_URL = "http://127.0.0.1:8899"
 
 DEFAULT_AGENT = "claude-code"  # `_build`'s fallback for an explicit --transcript
 # given WITHOUT --agent, whose dialect nothing infers; `replay --skipped`
@@ -355,11 +359,16 @@ async def cmd_join(args: argparse.Namespace) -> int:
     config = load_config()
     state_dir = Path(config.worker.state_dir)
 
+    # The SERVICE, not the orchestrator this worker pushes through: a
+    # shared_id is minted by, and only meaningful on, the service. Stamped onto
+    # the binding so repointing `service.url` cannot silently orphan it.
+    service_url = userconfig.get("service.url") or DEFAULT_SERVICE_URL
     bindings = join_session(
         args.shared_id,
         args.contributor,
         Path.cwd(),
         state_dir,
+        service_url,
         agent_session_id=getattr(args, "agent_session_id", None),
     )
 

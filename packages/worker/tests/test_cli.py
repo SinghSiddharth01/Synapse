@@ -281,7 +281,7 @@ def test_build_selects_codex_source_for_a_pinned_codex_binding(tmp_path) -> None
     codex_transcript.write_text("", encoding="utf-8")
     write_binding(
         binding_path_for_agent(tmp_path / ".synapse", "codex"),
-        SessionBinding(
+        SessionBinding(service_url="http://127.0.0.1:8899", 
             agent_session_id="codex-sess-1",
             shared_id="team-standup",
             contributor="akhil",
@@ -312,7 +312,7 @@ def test_build_with_explicit_agent_flag_skips_straight_to_that_agent(tmp_path, m
 
     write_binding(
         binding_path_for_agent(tmp_path / ".synapse", "claude-code"),
-        SessionBinding(
+        SessionBinding(service_url="http://127.0.0.1:8899", 
             agent_session_id="cc-sess",
             shared_id="other-session",
             contributor="akhil",
@@ -375,7 +375,7 @@ def test_build_prefers_a_pinned_binding_over_an_earlier_agents_heuristic(
     codex_transcript.write_text("", encoding="utf-8")
     write_binding(
         binding_path_for_agent(tmp_path / ".synapse", "codex"),
-        SessionBinding(
+        SessionBinding(service_url="http://127.0.0.1:8899", 
             agent_session_id="codex-sess-1",
             shared_id="team-standup",
             contributor="akhil",
@@ -451,7 +451,7 @@ async def test_run_reports_other_agents_bindings_it_is_not_following(
 
     write_binding(
         binding_path_for_agent(tmp_path / ".synapse", "claude-code"),
-        SessionBinding(
+        SessionBinding(service_url="http://127.0.0.1:8899", 
             agent_session_id="cc-sess", shared_id="team-standup", contributor="akhil",
             agent="claude-code", transcript_path=str(claude_transcript),
             pinned_at=datetime.now(timezone.utc),
@@ -459,7 +459,7 @@ async def test_run_reports_other_agents_bindings_it_is_not_following(
     )
     write_binding(
         binding_path_for_agent(tmp_path / ".synapse", "codex"),
-        SessionBinding(
+        SessionBinding(service_url="http://127.0.0.1:8899", 
             agent_session_id="codex-sess", shared_id="team-standup", contributor="akhil",
             agent="codex", transcript_path=str(codex_transcript),
             pinned_at=datetime.now(timezone.utc),
@@ -782,7 +782,7 @@ async def test_status_reports_held_findings_from_a_different_session(tmp_path, c
     state_dir = tmp_path / ".synapse"
     write_binding(
         cli.binding_path_for_agent(state_dir, cli.DEFAULT_AGENT),
-        SessionBinding(
+        SessionBinding(service_url="http://127.0.0.1:8899", 
             agent_session_id="as-t", shared_id="team-standup",
             contributor="aditya", agent=cli.DEFAULT_AGENT,
             transcript_path=str(tmp_path / "sess.jsonl"),
@@ -882,7 +882,7 @@ async def test_current_shared_id_prefers_a_joined_binding_over_a_divergent_last_
     # real run's construction-time sync (WorkerLoop.__init__).
     write_binding(
         cli.binding_path_for_agent(state_dir, cli.DEFAULT_AGENT),
-        SessionBinding(
+        SessionBinding(service_url="http://127.0.0.1:8899", 
             agent_session_id="as-t", shared_id="sh-A",
             contributor="aditya", agent=cli.DEFAULT_AGENT,
             transcript_path=str(tmp_path / "sess.jsonl"),
@@ -907,7 +907,7 @@ async def test_current_shared_id_prefers_a_joined_binding_over_a_divergent_last_
     # this test exists to exercise.
     write_binding(
         cli.binding_path_for_agent(state_dir, cli.DEFAULT_AGENT),
-        SessionBinding(
+        SessionBinding(service_url="http://127.0.0.1:8899", 
             agent_session_id="as-t", shared_id="sh-B",
             contributor="aditya", agent=cli.DEFAULT_AGENT,
             transcript_path=str(tmp_path / "sess.jsonl"),
@@ -991,7 +991,7 @@ async def test_replay_skipped_redistils_and_archives(tmp_path, monkeypatch, caps
     TriageLog(state_dir).record_skip(seg, "lint-clean")
     write_binding(
         cli.binding_path_for_agent(state_dir, cli.DEFAULT_AGENT),
-        SessionBinding(
+        SessionBinding(service_url="http://127.0.0.1:8899", 
             agent_session_id="as-real-42", shared_id="local-dev",
             contributor="aditya", agent=cli.DEFAULT_AGENT,
             transcript_path=str(tmp_path / "sess.jsonl"), pinned_at=ts,
@@ -1076,7 +1076,7 @@ async def test_replay_skipped_prefers_joined_binding_over_cli_defaults(
 
     write_binding(
         cli.binding_path_for_agent(state_dir, cli.DEFAULT_AGENT),
-        SessionBinding(
+        SessionBinding(service_url="http://127.0.0.1:8899", 
             agent_session_id="as-real-42", shared_id="team-standup",
             contributor="akhil", agent=cli.DEFAULT_AGENT,
             transcript_path=str(tmp_path / "sess.jsonl"), pinned_at=ts,
@@ -1109,7 +1109,7 @@ async def test_replay_skipped_refuses_when_canary_fails(tmp_path, monkeypatch, c
     TriageLog(state_dir).record_skip(seg, "lint-clean")
     write_binding(
         cli.binding_path_for_agent(state_dir, cli.DEFAULT_AGENT),
-        SessionBinding(
+        SessionBinding(service_url="http://127.0.0.1:8899", 
             agent_session_id="as-t", shared_id="local-dev",
             contributor="aditya", agent=cli.DEFAULT_AGENT,
             transcript_path=str(tmp_path / "sess.jsonl"), pinned_at=ts,
@@ -1162,7 +1162,7 @@ async def test_replay_skipped_requeues_only_the_failed_segment(
     log.record_skip(bad, "readonly-run")
     write_binding(
         cli.binding_path_for_agent(state_dir, cli.DEFAULT_AGENT),
-        SessionBinding(
+        SessionBinding(service_url="http://127.0.0.1:8899", 
             agent_session_id="as-t", shared_id="local-dev",
             contributor="aditya", agent=cli.DEFAULT_AGENT,
             transcript_path=str(tmp_path / "sess.jsonl"), pinned_at=ts,
@@ -1240,7 +1240,7 @@ async def test_replay_skipped_records_each_finding_before_moving_on(
     log.record_skip(seg_b, "lint-clean")
     write_binding(
         cli.binding_path_for_agent(state_dir, cli.DEFAULT_AGENT),
-        SessionBinding(
+        SessionBinding(service_url="http://127.0.0.1:8899", 
             agent_session_id="as-t", shared_id="local-dev",
             contributor="aditya", agent=cli.DEFAULT_AGENT,
             transcript_path=str(tmp_path / "sess.jsonl"), pinned_at=ts,
@@ -1338,7 +1338,7 @@ async def test_replay_skipped_requeues_a_prompt_drop_segment(
     log.record_skip(dropped, "readonly-run")
     write_binding(
         cli.binding_path_for_agent(state_dir, cli.DEFAULT_AGENT),
-        SessionBinding(
+        SessionBinding(service_url="http://127.0.0.1:8899", 
             agent_session_id="as-t", shared_id="local-dev",
             contributor="aditya", agent=cli.DEFAULT_AGENT,
             transcript_path=str(tmp_path / "sess.jsonl"), pinned_at=ts,

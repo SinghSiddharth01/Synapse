@@ -68,7 +68,7 @@ def _bind_conversation(wiring, session_id: str, shared_id: str = "sh-1") -> None
     """What a previous create/join left behind: the W2 per-conversation file."""
     write_binding(
         wiring.state_dir / "bindings" / "claude-code" / f"{session_id}.json",
-        SessionBinding(agent_session_id=session_id, shared_id=shared_id,
+        SessionBinding(service_url="http://127.0.0.1:8899", agent_session_id=session_id, shared_id=shared_id,
                        contributor="sid", agent="claude-code",
                        transcript_path="/tmp/conv.jsonl", pinned_at=TS))
 
