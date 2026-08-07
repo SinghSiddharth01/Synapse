@@ -1509,6 +1509,8 @@ _PAGE = """<!doctype html>
 
 
 
+
+
 (function () {
   "use strict";
   // Light/dark toggle: T key or the topbar button. Guarded throughout so the
@@ -2528,6 +2530,8 @@ _BRAIN_PAGE = """<!doctype html>
 
 
 
+
+
 (function () {
   "use strict";
   // Light/dark toggle: T key or the topbar button. Guarded throughout so the
@@ -2952,6 +2956,7 @@ _HOME_PAGE = """<!doctype html>
   .arch text { font: 600 16px var(--sans); fill: var(--ink); }
   .arch text.t-mono { font: 650 15px var(--mono); letter-spacing: 0.08em; }
   .arch text.t-sub { font-weight: 500; font-size: 14px; fill: var(--ink-muted); }
+  .arch text.t-prov { font-weight: 500; font-size: 12.5px; fill: var(--ink-muted); }
   .arch text.t-cyan { fill: var(--cyan); }
   .arch text.t-copper { fill: var(--copper); }
   .arch text.t-green { fill: var(--green); }
@@ -2987,7 +2992,7 @@ _HOME_PAGE = """<!doctype html>
     padding: 14px 10px 13px;
     text-align: center;
   }
-  .node b { display: block; font-size: 16px; font-weight: 650; letter-spacing: -0.012em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .node b { display: block; font-size: 16px; font-weight: 650; letter-spacing: -0.012em; }
   .node span { display: block; font: 500 13px var(--mono); color: var(--ink-muted); margin-top: 5px; line-height: 1.5; }
   .node.agent {
     border-color: rgba(224, 154, 90, 0.5);
@@ -3235,7 +3240,6 @@ _HOME_PAGE = """<!doctype html>
     .chain { flex-direction: column; }
     .arrowsep { flex-basis: 26px; }
     .arrowsep::before { content: "↓"; }
-    .node b { white-space: normal; }
     .band-card.hero-stat, .band-card.wide { grid-column: auto; }
     .net text { font-size: 18px; }
     .net text.sub2, .net text.sub3 { display: none; }
@@ -3414,7 +3418,7 @@ _HOME_PAGE = """<!doctype html>
         <circle class="lic cop" cx="58" cy="172" r="8"/>
         <path class="lic cop" d="M58 160 v-4 M58 184 v4 M46 172 h-4 M74 172 h-4"/>
         <text x="86" y="168">Edge worker</text>
-        <text class="t-sub" x="86" y="187">distil · Qwen3-4B · Hexagon NPU</text>
+        <text class="t-prov" x="86" y="187">distil · Qwen3-4B · Hexagon NPU</text>
 
         <rect class="box dev" x="20" y="234" width="352" height="204" rx="14"/>
         <text class="t-mono t-copper" x="38" y="262">ADITYA · SNAPDRAGON X ELITE</text>
@@ -3430,7 +3434,7 @@ _HOME_PAGE = """<!doctype html>
         <circle class="lic cop" cx="58" cy="396" r="8"/>
         <path class="lic cop" d="M58 384 v-4 M58 408 v4 M46 396 h-4 M74 396 h-4"/>
         <text x="86" y="392">Edge worker</text>
-        <text class="t-sub" x="86" y="411">distil · Qwen3-4B · Hexagon NPU</text>
+        <text class="t-prov" x="86" y="411">distil · Qwen3-4B · Hexagon NPU</text>
 
         <rect class="box dev" x="20" y="458" width="352" height="204" rx="14"/>
         <text class="t-mono t-copper" x="38" y="486">AKHIL · ANY LAPTOP · NO NPU</text>
@@ -3446,7 +3450,7 @@ _HOME_PAGE = """<!doctype html>
         <circle class="lic cop" cx="58" cy="620" r="8"/>
         <path class="lic cop" d="M58 608 v-4 M58 632 v4 M46 620 h-4 M74 620 h-4"/>
         <text x="86" y="616">Edge worker</text>
-        <text class="t-sub" x="86" y="635">distil · Claude Haiku · Anthropic API</text>
+        <text class="t-prov" x="86" y="635">distil · Claude Haiku · Anthropic API</text>
 
         <path class="flow in" d="M372 150 C 425 160, 438 180, 470 200"/>
         <path class="ah" stroke="var(--copper)" d="M470 200 l-11 -3 m11 3 l-10 6"/>
@@ -3491,8 +3495,8 @@ _HOME_PAGE = """<!doctype html>
         <path class="ah" stroke="var(--cyan)" d="M898 300 l-11 -5 m11 5 l-11 5"/>
         <path class="flow syn" d="M898 370 C 860 370, 850 370, 800 370"/>
         <path class="ah" stroke="var(--cyan)" d="M800 370 l11 -5 m-11 5 l11 5"/>
-        <text class="t-cyan t-mono" x="846" y="282" text-anchor="middle" style="font-size:12px;letter-spacing:0.02em">merge round</text>
-        <text class="t-cyan t-mono" x="846" y="394" text-anchor="middle" style="font-size:12px;letter-spacing:0.02em">rewritten</text>
+        <text class="t-cyan t-mono" x="849" y="282" text-anchor="middle">merge</text>
+        <text class="t-cyan t-mono" x="849" y="394" text-anchor="middle">rewrite</text>
 
         <rect class="box cld" x="900" y="240" width="320" height="190" rx="14"/>
         <text class="t-cyan t-mono" x="1060" y="274" text-anchor="middle" style="letter-spacing:0.1em">CLOUD AI 100</text>
@@ -3502,24 +3506,24 @@ _HOME_PAGE = """<!doctype html>
 
         <text class="t-sub" x="20" y="690">Provider seam · one interface, five plugs, all swappable</text>
         <g class="plug plug-live">
-          <rect class="plug-node" x="20" y="700" width="228" height="30" rx="9"/>
-          <text class="plug-t" x="134" y="720" text-anchor="middle">NPU · GenieX · Qwen3-4B</text>
+          <rect class="plug-node" x="20" y="700" width="236" height="30" rx="9"/>
+          <text class="plug-t" x="138" y="720" text-anchor="middle">NPU · GenieX · Qwen3-4B</text>
         </g>
         <g class="plug plug-live">
-          <rect class="plug-node" x="264" y="700" width="228" height="30" rx="9"/>
-          <text class="plug-t" x="378" y="720" text-anchor="middle">Cloud AI 100 · 70B</text>
+          <rect class="plug-node" x="264" y="700" width="236" height="30" rx="9"/>
+          <text class="plug-t" x="382" y="720" text-anchor="middle">Cloud AI 100 · 70B</text>
         </g>
         <g class="plug plug-live">
-          <rect class="plug-node" x="508" y="700" width="228" height="30" rx="9"/>
-          <text class="plug-t" x="622" y="720" text-anchor="middle">Anthropic API</text>
+          <rect class="plug-node" x="508" y="700" width="236" height="30" rx="9"/>
+          <text class="plug-t" x="626" y="720" text-anchor="middle">Anthropic API</text>
         </g>
         <g class="plug">
-          <rect class="plug-node" x="752" y="700" width="228" height="30" rx="9"/>
-          <text class="plug-t" x="866" y="720" text-anchor="middle">Claude CLI</text>
+          <rect class="plug-node" x="752" y="700" width="236" height="30" rx="9"/>
+          <text class="plug-t" x="870" y="720" text-anchor="middle">Claude CLI</text>
         </g>
         <g class="plug">
-          <rect class="plug-node" x="996" y="700" width="228" height="30" rx="9"/>
-          <text class="plug-t" x="1110" y="720" text-anchor="middle">offline stand-in</text>
+          <rect class="plug-node" x="996" y="700" width="236" height="30" rx="9"/>
+          <text class="plug-t" x="1114" y="720" text-anchor="middle">offline stand-in</text>
         </g>
       </svg>
       </div>
@@ -4682,6 +4686,8 @@ _MEMORY_PAGE = """<!doctype html>
   refresh();
   setInterval(refresh, 2000);
 })();
+
+
 
 
 
