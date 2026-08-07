@@ -9,10 +9,12 @@ route; see its docstring.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
 from collections import Counter
+from contextlib import asynccontextmanager, suppress
 from collections.abc import Mapping
 from typing import Any
 
@@ -260,6 +262,49 @@ def _affordable_from_ledger(spend: list[tuple[float, int, str, int]], *,
 def _spenders(entries: list[tuple[float, int, str, int]]) -> str:
     counts = Counter(c for _, _t, c, _r in entries)
     return ", ".join(f"{n} {c}" for c, n in sorted(counts.items()))
+
+
+async def drain_pending(*, store, synthesizer, pending: dict[str, list],
+                        last_merge: dict[str, float],
+                        affordable, interval_s: float, now: float) -> list[str]:
+    """Run the merges that deferral postponed.
+
+    Without this, `deferred: true` is a promise the service cannot keep: the
+    only thing that drains `_pending` is the next push to the SAME session, so
+    a burst that ends in a deferral leaves the working memory stale until
+    someone happens to push again. Observed 2026-08-06 -- findings pushed at
+    23:03 and 23:10 against a memory last written at 22:57. Findings stay
+    queryable throughout, which is why the stall took 40 minutes to notice: the
+    gap is confined to the SYNTHESIZED memory.
+
+    A failure here is logged and skipped, never fatal: this runs on a
+    background loop, and one sick session must not stop every other session's
+    memory from catching up. The findings stay in `pending` and the next tick
+    retries them.
+    """
+    merged: list[str] = []
+    for sid in list(pending):
+        findings = pending.get(sid) or []
+        if not findings:
+            continue
+        last = last_merge.get(sid)
+        if last is not None and (now - last) < interval_s:
+            continue
+        ok, why = affordable()
+        if not ok:
+            logger.info("Drain for %s held on budget (%s); %d finding(s) still "
+                        "pending.", sid, why, len(findings))
+            continue
+        try:
+            await synthesizer.merge(store, sid, findings)
+        except Exception:
+            logger.exception("Drain for %s failed; %d finding(s) stay pending "
+                             "for the next tick.", sid, len(findings))
+            continue
+        pending.pop(sid, None)
+        last_merge[sid] = now
+        merged.append(sid)
+    return merged
 
 
 def _missing(body: dict, *required: str) -> JSONResponse | None:
@@ -1150,7 +1195,42 @@ def build_app(provider: ModelProvider, *, debug: bool = True,
     if debug:
         routes.extend(debug_routes(store, call_log, feed, wm_log))
 
-    app = Starlette(routes=routes)
+    # THE RECOVERY MECHANISM. Everything else in this file makes a deferral
+    # correct and visible; this is what makes a deferred merge actually run.
+    # Without it `_pending` is drained only by the next push to the same
+    # session, so a burst that ends in a deferral leaves the working memory
+    # stale until someone happens to push again -- observed 2026-08-06 as a
+    # memory 13 minutes behind two landed pushes.
+    #
+    # The drain interval is the debounce floor: a deferral is answered no later
+    # than one interval after it becomes affordable. Opt out with
+    # SYNAPSE_DRAIN_DISABLED=1 -- tests that assert on exact merge counts want a
+    # service that only merges when pushed.
+    drain_enabled = os.environ.get("SYNAPSE_DRAIN_DISABLED") != "1"
+
+    async def _drain_loop() -> None:
+        while True:
+            await asyncio.sleep(interval_s)
+            try:
+                await drain_pending(
+                    store=store, synthesizer=synthesizer, pending=_pending,
+                    last_merge=_last_merge, affordable=_affordable,
+                    interval_s=interval_s, now=time.monotonic())
+            except Exception:
+                logger.exception("Pending drain tick failed; continuing.")
+
+    @asynccontextmanager
+    async def _lifespan(app):
+        task = asyncio.create_task(_drain_loop()) if drain_enabled else None
+        try:
+            yield
+        finally:
+            if task is not None:
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+
+    app = Starlette(routes=routes, lifespan=_lifespan)
     app.state.store = store          # test seam: no route reads it
     # test seam: lets a test confirm no CallLog exists at all when debug is
     # disabled (not merely that it's unreachable) -- no route reads this.
